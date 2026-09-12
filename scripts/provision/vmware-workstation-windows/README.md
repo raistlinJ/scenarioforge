@@ -41,8 +41,21 @@ If WinGet is unavailable, setup prints
 [Microsoft's manual installation instructions](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows).
 The VM provisioning code still runs in PowerShell **7.4 or newer**.
 
-Install [Python for Windows](https://www.python.org/downloads/windows/) (3.11 or
-newer). You can let the lab installer download QEMU when needed, or install the
+If Python is missing, older than 3.11, or missing the builder packages, setup
+offers to install **uv** using WinGet and use it to download Python **3.12** and
+install `requirements-installer.txt` in a separate environment. Downloads may
+take a few minutes. This requires separate consent even with `-Yes`; `-DryRun`
+only reports the missing prerequisite. Existing Python installations and virtual
+environments are preserved. The default managed environment is
+`%LOCALAPPDATA%\ScenarioForge\installer-python312`, and setup reuses it when valid.
+An existing unusable environment is preserved and a new unique directory is used.
+The selected Python path is saved in lab state. uv and its Python downloads remain
+installed after lab cleanup. If WinGet is unavailable, setup prints manual uv
+installation guidance. See [uv installation](https://docs.astral.sh/uv/getting-started/installation/).
+
+Alternatively, install [Python for Windows](https://www.python.org/downloads/windows/)
+(3.11 or newer) and prepare an environment manually as shown below.
+You can let the lab installer download QEMU when needed, or install the
 Windows build linked from [QEMU's official download page](https://www.qemu.org/download/#windows)
 yourself. Only `qemu-img.exe` is used; QEMU does not run the lab VMs.
 
@@ -69,8 +82,9 @@ checksum checks, and canceled setup stop the lab installation and remove its
 temporary download. QEMU itself remains installed when the lab is cleaned up.
 
 Clone the **whole ScenarioForge repository** onto a local Windows drive, then
-open PowerShell in this installer directory and prepare a Windows Python
-environment:
+open PowerShell in this installer directory. If using automatic uv setup, skip
+the following manual environment commands and omit `-PythonExe` when installing.
+To prepare a Windows Python environment manually:
 
 ```powershell
 py -3 -m venv .venv

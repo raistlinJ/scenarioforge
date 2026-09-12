@@ -61,6 +61,45 @@ try {
         Assert ((Read-InstallerConfig '' 'debian').participant_os -eq 'debian') 'CLI overrides environment'
     } finally { $env:SF_PARTICIPANT_OS = $oldOS }
 
+    & {
+        function Read-Host { throw 'Unexpected Python setup prompt' }
+        Assert-Throws { Install-InstallerPython -Preview } 'Run without -DryRun'
+    }
+    & {
+        function Read-Host { return '' }
+        function Find-InstallerUv { throw 'Declining must not look up or install uv' }
+        Assert-Throws { Install-InstallerPython } 'Python setup declined'
+    }
+    & {
+        $oldLocal = $env:LOCALAPPDATA
+        $env:LOCALAPPDATA = $temp
+        try {
+            function Read-Host { return 'yes' }
+            function Find-InstallerUv { return 'uv.exe' }
+            function Test-InstallerPython { param($Path) return (Test-Path -LiteralPath $Path) }
+            $script:uvCommands = @()
+            function Invoke-HostCommand {
+                param($File, $Arguments, $TimeoutSeconds)
+                $script:uvCommands += ,$Arguments
+                if ($Arguments[1] -eq 'venv') {
+                    $scripts = Join-Path $Arguments[-1] 'Scripts'
+                    New-Item -ItemType Directory -Path $scripts -Force | Out-Null
+                    '' | Set-Content (Join-Path $scripts 'python.exe')
+                }
+                return @{ Code = 0 }
+            }
+            $python = Install-InstallerPython
+            Assert (Test-Path $python) 'uv creates dedicated Python environment'
+            Assert (($script:uvCommands[0] -join ' ') -eq '--no-config python install 3.12') 'uv installs Python 3.12'
+            Assert ($script:uvCommands[1] -contains '--managed-python') 'uv uses its managed interpreter'
+            Assert ($script:uvCommands[2] -contains $python) 'Packages target the new environment'
+            Assert ($script:uvCommands[2][-1] -like '*requirements-installer.txt') 'uv installs builder requirements'
+            $originalPython = $python
+            $python = Install-InstallerPython
+            Assert ($python -ne $originalPython -and (Test-Path $originalPython)) 'Existing environment is preserved'
+        } finally { $env:LOCALAPPDATA = $oldLocal }
+    }
+
     # Exercise the real native process argument handling, including embedded quotes.
     $probe = Join-Path $temp 'argument probe.ps1'
     'param([string]$Value); [Console]::Write($Value)' | Set-Content $probe
@@ -94,7 +133,7 @@ try {
     Find-ImageTools $native
     Assert ($script:NativeCommand[1][-2] -eq '--git' -and $script:NativeCommand[1][-1] -eq $native.git_exe) 'Optional catalogs use Windows Git'
     $native.python_exe = Join-Path $temp 'missing-python.exe'
-    Assert-Throws { Find-ImageTools $native } 'Install Windows Python'
+    Assert-Throws { Find-ImageTools $native -Preview } 'Run without -DryRun'
 
 
     # Missing-QEMU approval/download tests use actual hashing and temp-file cleanup.

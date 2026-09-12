@@ -236,19 +236,77 @@ function Install-MissingQemu {
     }
 }
 
+function Test-InstallerPython {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $result = Invoke-HostCommand $Path @('-c', 'import sys; assert sys.version_info >= (3, 11); import pycdlib; from passlib.hash import sha512_crypt') -AllowFailure
+        return $result.Code -eq 0
+    } catch { return $false }
+}
+
+function Find-InstallerUv {
+    $command = Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    foreach ($path in @((Join-Path $env:LOCALAPPDATA 'Microsoft/WinGet/Links/uv.exe'),
+        (Join-Path $env:USERPROFILE '.local/bin/uv.exe'), (Join-Path $env:USERPROFILE '.cargo/bin/uv.exe'))) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    }
+    return $null
+}
+
+function Install-InstallerPython {
+    param([switch]$Preview)
+    if ($Preview) { throw 'Python 3.11+ with installer packages is required. Run without -DryRun to set up Python 3.12 using uv, or select a prepared environment with -PythonExe.' }
+    $answer = Read-Host 'Set up Python 3.12 and the installer packages using uv (installing uv with WinGet if needed)? Downloads may take a few minutes [y/N]'
+    if (-not $answer -or ([string]$answer).Trim() -notmatch '^(?i:y|yes)$') { throw 'Python setup declined. Supply Python 3.11+ with requirements-installer.txt installed using -PythonExe.' }
+    $uv = Find-InstallerUv
+    if (-not $uv) {
+        $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue
+        if (-not $winget) { throw 'WinGet was not found. Install uv from https://docs.astral.sh/uv/getting-started/installation/ and rerun setup.' }
+        Write-Host 'Installing uv with WinGet...'
+        Invoke-HostCommand $winget.Source @('install', '--id', 'astral-sh.uv', '--exact', '--source', 'winget',
+            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity') -TimeoutSeconds 600 | Out-Null
+        $uv = Find-InstallerUv
+        if (-not $uv) { throw 'uv installation finished but uv.exe was not found. Reopen your terminal and rerun setup.' }
+    }
+    $directory = Join-Path $env:LOCALAPPDATA 'ScenarioForge/installer-python312'
+    if (Test-Path -LiteralPath $directory) { $directory += '-' + [guid]::NewGuid().ToString('N') }
+    $python = Join-Path $directory 'Scripts/python.exe'
+    try {
+        Write-Host 'Downloading Python 3.12 and preparing the installer environment...'
+        Invoke-HostCommand $uv @('--no-config', 'python', 'install', '3.12') -TimeoutSeconds 600 | Out-Null
+        Invoke-HostCommand $uv @('--no-config', 'venv', '--python', '3.12', '--managed-python', $directory) -TimeoutSeconds 600 | Out-Null
+        Invoke-HostCommand $uv @('--no-config', 'pip', 'install', '--python', $python, '-r',
+            (Join-Path $PSScriptRoot 'requirements-installer.txt')) -TimeoutSeconds 600 | Out-Null
+        if (-not (Test-InstallerPython $python)) { throw 'The uv environment failed Python/package verification.' }
+        Write-Host "Installer Python ready: $python"
+        return $python
+    } catch {
+        if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+        throw
+    }
+}
+
 function Find-ImageTools {
     param($Config, [switch]$Preview)
     if (-not $Config.python_exe) {
+        $cachedPython = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'ScenarioForge/installer-python312/Scripts/python.exe' } else { '' }
+        if (Test-InstallerPython $cachedPython) { $Config.python_exe = $cachedPython }
+    }
+    if (-not $Config.python_exe) {
         $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
         if ($launcher) {
-            $Config.python_exe = (Invoke-HostCommand $launcher.Source @('-3', '-c', 'import sys; print(sys.executable)')).Out.Trim()
+            try { $Config.python_exe = (Invoke-HostCommand $launcher.Source @('-3', '-c', 'import sys; print(sys.executable)')).Out.Trim() }
+            catch { Write-Host 'The Python launcher could not select an interpreter; checking uv setup.' }
         } else {
             $python = Get-Command python.exe -ErrorAction SilentlyContinue
             if ($python -and $python.Source -notmatch 'WindowsApps') { $Config.python_exe = $python.Source }
         }
     }
-    if (-not $Config.python_exe -or -not (Test-Path -LiteralPath $Config.python_exe -PathType Leaf)) {
-        throw 'Install Windows Python 3.11+ or set python_exe to its python.exe path.'
+    if (-not (Test-InstallerPython $Config.python_exe)) {
+        Write-Host "Selected Python is missing, older than 3.11, or lacks installer packages: $($Config.python_exe)"
+        $Config.python_exe = Install-InstallerPython -Preview:$Preview
     }
     $Config.python_exe = (Resolve-Path -LiteralPath $Config.python_exe).Path
     $Config.qemu_img = Install-MissingQemu $Config.qemu_img -Preview:$Preview
