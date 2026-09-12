@@ -124,6 +124,7 @@ function Assert-HostNetworks {
     $result = Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'listHostNetworks')
     foreach ($item in @(@($State.Config.management_vmnet, '172.31.250.0'), @($State.Config.hitl_vmnet, '10.254.200.0'))) {
         if ($item[0] -eq $State.Config.hitl_vmnet -and $State.ContainsKey('HitlNetworkPlan') -and $State.HitlNetworkPlan) { continue }
+        if ($item[0] -eq $State.Config.management_vmnet -and $State.ContainsKey('ManagementNetworkPlan') -and $State.ManagementNetworkPlan) { continue }
         $pattern = '^\s*\d+\s+' + [regex]::Escape($item[0]) + '\s+hostOnly\s+false\s+' + [regex]::Escape($item[1]) + '\s+255\.255\.255\.0\s*$'
         if (-not @($result.Out -split '\r?\n' | Where-Object { $_ -match $pattern }).Count) {
             throw "Configure $($item[0]) as host-only, subnet $($item[1])/24, with DHCP disabled in Workstation's Virtual Network Editor. No host networks were changed."
@@ -297,8 +298,9 @@ function Remove-Lab {
         $paths += $path
         Write-Host "Remove owned VM: $directory"
     }
-    Write-Host "Preserve pre-existing management and NAT networks: $($State.Config.management_vmnet) and vmnet8."
+    Write-Host 'Preserve pre-existing host networks and vmnet8 NAT.'
     Remove-OwnedHitlNetwork $State $StateFile -Preview -Force:$AllowRunning -Keep:$KeepHitlNetwork
+    Remove-OwnedManagementNetwork $State $StateFile -Preview -Force:$AllowRunning
     if ($Preview) { Write-Host 'Preview only. No files, VMs, or host networks are changed.'; return }
     if (@($paths | Where-Object { $running -contains $_ }).Count -and -not $AllowRunning) { throw 'VMs are running. Shut them down, or use cleanup -Force to permit graceful shutdown before removal.' }
     if (-not $Confirmed -and (Read-Host 'Type CLEANUP to permanently remove these lab VMs') -cne 'CLEANUP') { throw 'Cleanup canceled.' }
@@ -310,6 +312,7 @@ function Remove-Lab {
         Remove-Item -LiteralPath (Split-Path $path -Parent) -Recurse -Force
     }
     Remove-OwnedHitlNetwork $State $StateFile -Force:$AllowRunning -Keep:$KeepHitlNetwork
+    Remove-OwnedManagementNetwork $State $StateFile -Force:$AllowRunning
     foreach ($path in $State.Files.Keys) {
         if ((Test-Path -LiteralPath $path) -and (Get-FileHash -LiteralPath $path).Hash -eq $State.Files[$path]) {
             Remove-Item -LiteralPath $path -Force
@@ -321,7 +324,7 @@ function Remove-Lab {
     }
     $archive = Join-Path $State.LabDir 'scenarioforge-optional-content.tar.gz'
     if ((Test-Path -LiteralPath $archive) -and $State.ArchiveHash -and (Get-FileHash -LiteralPath $archive).Hash -eq $State.ArchiveHash) { Remove-Item -LiteralPath $archive }
-    Write-Host 'Cleanup complete. Host networks, modified files, and downloaded image cache were preserved.'
+    Write-Host 'Cleanup complete. Pre-existing host networks, modified files, and downloaded image cache were preserved.'
 }
 
 function Invoke-Installer {
@@ -356,6 +359,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         if ($Command -eq 'resume') {
             if ($NoWait) { $state.Config.no_wait = $true }
             Create-OwnedHitlNetwork $state $stateFile
+            Create-OwnedManagementNetwork $state $stateFile
             Assert-HostNetworks $state
             Complete-LabSetup $state $credentials $stateFile
             Install-LabShortcuts $state $stateFile $PSScriptRoot
@@ -407,7 +411,9 @@ See the adjacent README for prerequisites and isolated network configuration.
     }
     foreach ($key in @('core_password', 'app_password', 'participant_password', 'web_admin_password')) { $state.Config.Remove($key) }
     Plan-HitlNetwork $state
+    Plan-ManagementNetwork $state -Preview:$DryRun
     $config.hitl_vmnet = $state.Config.hitl_vmnet
+    $config.management_vmnet = $state.Config.management_vmnet
     Assert-HostNetworks $state
     $totalMemory = $config.core_memory_mb + $config.app_memory_mb + $config.participant_memory_mb
     $hostMemory = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB
@@ -430,6 +436,7 @@ See the adjacent README for prerequisites and isolated network configuration.
     $secrets | Export-Clixml -LiteralPath (Join-Path $StateDir 'credentials.xml')
     Save-LabState $state $stateFile
     Create-OwnedHitlNetwork $state $stateFile
+    Create-OwnedManagementNetwork $state $stateFile
     Assert-HostNetworks $state
     $request = $config.Clone()
     $request.install_id = $state.InstallId

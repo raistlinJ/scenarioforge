@@ -4,7 +4,8 @@ param(
     [ValidateSet('Create', 'Remove')][string]$Action,
     [string]$VMnet,
     [string]$ManagementVMnet = 'vmnet1',
-    [string]$VmwareDirectory
+    [string]$VmwareDirectory,
+    [ValidateSet('HITL', 'Management')][string]$NetworkRole = 'HITL'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -131,14 +132,92 @@ function Plan-HitlNetwork {
         'An existing dedicated HITL network can be selected with hitl_vmnet once it meets the isolation settings in the README.')
 }
 
+function Test-ManagementNetwork {
+    param($Rows, [string]$Name)
+    if (-not $Rows.ContainsKey($Name)) { return $false }
+    $row = $Rows[$Name]
+    return ($row.Type -eq 'hostOnly' -and $row.DHCP -eq 'false' -and
+        $row.Subnet -eq '172.31.250.0' -and $row.Mask -eq '255.255.255.0')
+}
+
+function Plan-ManagementNetwork {
+    param($State, [switch]$Preview)
+    $rows = Get-HostNetworkRows $State
+    $requested = $State.Config.management_vmnet
+    if (Test-ManagementNetwork $rows $requested) { return }
+    $manual = "In Workstation, open Edit > Virtual Network Editor > Change Settings. Select $requested, choose Host-only, set subnet 172.31.250.0 and mask 255.255.255.0, and uncheck 'Use local DHCP service'. Apply and rerun setup. Alternatively, configure a dedicated network this way and set management_vmnet in your JSON to its name."
+    if ($Preview) { throw "Management network $requested needs configuration. A normal install can offer to create a separate host-only network. $manual" }
+    $answer = Read-Host "$requested does not have the required management settings. Create a separate host-only network (172.31.250.0/24, DHCP off, host adapter enabled), preserving ${requested}? Windows will request administrator approval [y/N]"
+    if (([string]$answer).Trim() -notmatch '^(?i:y|yes)$') { throw "Management network creation declined. $manual" }
+    Find-Vnetlib (Split-Path $State.Vmrun -Parent) | Out-Null
+    $registryNames = @(Get-VMnetRegistryNames)
+    $rejections = [Collections.Generic.List[string]]::new()
+    foreach ($number in 2..19) {
+        $name = "vmnet$number"
+        if ($number -eq 8 -or $name -eq $requested -or $name -eq $State.Config.hitl_vmnet) { continue }
+        if ($rows.ContainsKey($name) -or $name -in $registryNames -or @(Get-VMnetHostAdapters $name).Count) {
+            $rejections.Add("${name}: existing network configuration or host adapter")
+            continue
+        }
+        try { Assert-VMnetNotInUse $State $name } catch { $rejections.Add("${name}: $($_.Exception.Message)"); continue }
+        $State.Config.management_vmnet = $name
+        $State.ManagementNetworkPlan = $true
+        Write-Host "Create dedicated $name for management (host-only 172.31.250.0/24, DHCP off, host adapter enabled); preserve $requested."
+        return
+    }
+    throw ("No unused network is available for management.`n" + ($rejections -join "`n") + "`n$manual")
+}
+
+function Create-OwnedManagementNetwork {
+    param($State, [string]$StateFile)
+    if (-not $State.ContainsKey('ManagementNetworkPlan') -or -not $State.ManagementNetworkPlan) { return }
+    $name = $State.Config.management_vmnet
+    if ($name -eq $State.Config.hitl_vmnet -or $name -notmatch '^vmnet([2-7]|9|1[0-9])$') { throw 'Invalid planned management network.' }
+    if ((Get-HostNetworkRows $State).ContainsKey($name) -or $name -in @(Get-VMnetRegistryNames) -or
+        @(Get-VMnetHostAdapters $name).Count) { throw "$name became configured; refusing to overwrite it." }
+    Assert-VMnetNotInUse $State $name
+    $State.CreatedManagementNetwork = @{ Name = $name; Subnet = '172.31.250.0'; Mask = '255.255.255.0'; Status = 'creating' }
+    Save-LabState $State $StateFile
+    Invoke-ElevatedNetworkAction $State Create -Management
+    if (-not (Test-ManagementNetwork (Get-HostNetworkRows $State) $name)) { throw 'Management network verification failed; state retained.' }
+    $State.CreatedManagementNetwork.Status = 'created'
+    $State.ManagementNetworkPlan = $false
+    Save-LabState $State $StateFile
+}
+
+function Remove-OwnedManagementNetwork {
+    param($State, [string]$StateFile, [switch]$Force, [switch]$Preview)
+    if (-not $State.ContainsKey('CreatedManagementNetwork') -or -not $State.CreatedManagementNetwork) { return }
+    $name = $State.CreatedManagementNetwork.Name
+    if ($name -ne $State.Config.management_vmnet -or $name -eq $State.Config.hitl_vmnet -or
+        $name -notmatch '^vmnet([2-7]|9|1[0-9])$') { throw 'Invalid tracked management network; cleanup stopped.' }
+    Write-Host "Remove installer-created management network $name."
+    if ($Preview) { return }
+    Assert-VMnetNotInUse $State $name
+    $rows = Get-HostNetworkRows $State
+    $exists = $rows.ContainsKey($name) -or $name -in @(Get-VMnetRegistryNames) -or @(Get-VMnetHostAdapters $name).Count
+    if ($exists) {
+        if (-not $Force -and -not (Test-ManagementNetwork $rows $name)) { throw "$name changed or is partially configured; use cleanup -Force to remove it." }
+        Invoke-ElevatedNetworkAction $State Remove -Management
+        if ((Get-HostNetworkRows $State).ContainsKey($name) -or $name -in @(Get-VMnetRegistryNames) -or
+            @(Get-VMnetHostAdapters $name).Count) { throw "$name still exists; installer state retained." }
+    }
+    $State.CreatedManagementNetwork = $null
+    Save-LabState $State $StateFile
+}
+
 function Invoke-ElevatedNetworkAction {
-    param($State, [ValidateSet('Create', 'Remove')][string]$Operation)
+    param($State, [ValidateSet('Create', 'Remove')][string]$Operation, [switch]$Management)
     $helper = Join-Path $PSScriptRoot 'host-networks.ps1'
     $quote = { param($Value) "'" + $Value.Replace("'", "''") + "'" }
-    $command = "& $(& $quote $helper) -Action $Operation -VMnet $(& $quote $State.Config.hitl_vmnet) -ManagementVMnet $(& $quote $State.Config.management_vmnet) -VmwareDirectory $(& $quote (Split-Path $State.Vmrun -Parent))"
+    $name = $State.Config.hitl_vmnet
+    $protected = $State.Config.management_vmnet
+    $role = 'HITL'
+    if ($Management) { $name = $State.Config.management_vmnet; $protected = $State.Config.hitl_vmnet; $role = 'Management' }
+    $command = "& $(& $quote $helper) -Action $Operation -VMnet $(& $quote $name) -ManagementVMnet $(& $quote $protected) -NetworkRole $role -VmwareDirectory $(& $quote (Split-Path $State.Vmrun -Parent))"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $process = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded)
-    if ($process.ExitCode -ne 0) { throw "HITL $Operation failed or was canceled. Installer state was retained for cleanup/retry." }
+    if ($process.ExitCode -ne 0) { throw "$role $Operation failed or was canceled. Installer state was retained for cleanup/retry." }
 }
 
 function Create-OwnedHitlNetwork {
@@ -190,7 +269,8 @@ function Remove-OwnedHitlNetwork {
 }
 
 function Invoke-NativeNetworkAction {
-    param([string]$Operation, [string]$Name, [string]$Management, [string]$Directory)
+    param([string]$Operation, [string]$Name, [string]$Management, [string]$Directory,
+        [ValidateSet('HITL', 'Management')][string]$Role = 'HITL')
     if ($Name -notmatch '^vmnet([2-7]|9|1[0-9])$' -or $Name -eq $Management) { throw 'Refusing reserved/management vmnet.' }
     $state = @{ Vmrun = Join-Path $Directory 'vmrun.exe' }
     Assert-VMnetNotInUse $state $Name
@@ -205,16 +285,22 @@ function Invoke-NativeNetworkAction {
         if ((Get-HostNetworkRows $state).ContainsKey($Name) -or $Name -in @(Get-VMnetRegistryNames) -or
             @(Get-VMnetHostAdapters $Name).Count) { throw "$Name already exists; no changes made." }
         Invoke-Vnet @('add', 'adapter', $Name)
-        Invoke-Vnet @('set', 'vnet', $Name, 'addr', '10.254.200.0')
+        $subnet = if ($Role -eq 'Management') { '172.31.250.0' } else { '10.254.200.0' }
+        Invoke-Vnet @('set', 'vnet', $Name, 'addr', $subnet)
         Invoke-Vnet @('set', 'vnet', $Name, 'mask', '255.255.255.0')
         Invoke-Vnet @('remove', 'dhcp', $Name)
         Invoke-Vnet @('remove', 'nat', $Name)
         Invoke-Vnet @('update', 'adapter', $Name)
-        Invoke-Vnet @('disable', 'adapter', $Name)
-        foreach ($adapter in @(Get-VMnetHostAdapters $Name | Where-Object { $_.Status -ne 'Disabled' })) {
-            $adapter | Disable-NetAdapter -Confirm:$false
+        if ($Role -eq 'HITL') {
+            Invoke-Vnet @('disable', 'adapter', $Name)
+            foreach ($adapter in @(Get-VMnetHostAdapters $Name | Where-Object { $_.Status -ne 'Disabled' })) {
+                $adapter | Disable-NetAdapter -Confirm:$false
+            }
+            if (-not (Test-IsolatedHitl (Get-HostNetworkRows $state) $Name)) { throw 'Could not create isolated HITL vmnet.' }
+        } else {
+            Invoke-Vnet @('enable', 'adapter', $Name)
+            if (-not (Test-ManagementNetwork (Get-HostNetworkRows $state) $Name)) { throw 'Could not create host-only management vmnet.' }
         }
-        if (-not (Test-IsolatedHitl (Get-HostNetworkRows $state) $Name)) { throw 'Could not create isolated HITL vmnet.' }
     } else {
         Invoke-Vnet @('remove', 'dhcp', $Name)
         Invoke-Vnet @('remove', 'nat', $Name)
@@ -237,6 +323,6 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         if (-not $IsWindows -or -not $Action) { throw 'Use the Windows installer to invoke network management.' }
         Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -DisableNameChecking
-        Invoke-NativeNetworkAction $Action $VMnet $ManagementVMnet $VmwareDirectory
+        Invoke-NativeNetworkAction $Action $VMnet $ManagementVMnet $VmwareDirectory $NetworkRole
     } catch { Write-Error $_ -ErrorAction Continue; exit 1 }
 }

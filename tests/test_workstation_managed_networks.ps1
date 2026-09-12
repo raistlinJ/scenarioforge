@@ -42,14 +42,16 @@ try {
     function Assert-VMnetNotInUse { param($State, $Name) }
     function Find-Vnetlib { param($Directory) 'vnetlib64.exe' }
     function Invoke-ElevatedNetworkAction {
-        param($State, $Operation)
-        $name = $State.Config.hitl_vmnet
+        param($State, $Operation, [switch]$Management)
+        $name = if ($Management) { $State.Config.management_vmnet } else { $State.Config.hitl_vmnet }
+        $ownedKey = if ($Management) { 'CreatedManagementNetwork' } else { 'CreatedHitlNetwork' }
         $script:operations += $Operation
         if ($Operation -eq 'Create') {
             $saved = Get-Content $stateFile -Raw | ConvertFrom-Json -AsHashtable
-            Assert ($saved.CreatedHitlNetwork.Status -eq 'creating') 'Ownership must be saved before mutation'
+            Assert ($saved[$ownedKey].Status -eq 'creating') 'Ownership must be saved before mutation'
             if ($script:failCreate) { throw 'simulated UAC failure' }
-            $script:rows[$name] = @{ Type='hostOnly'; DHCP='false'; Subnet='10.254.200.0'; Mask='255.255.255.0' }
+            $subnet = if ($Management) { '172.31.250.0' } else { '10.254.200.0' }
+            $script:rows[$name] = @{ Type='hostOnly'; DHCP='false'; Subnet=$subnet; Mask='255.255.255.0' }
             $script:registryNames += $name
         } else {
             $script:rows.Remove($name)
@@ -101,6 +103,72 @@ try {
     & {
         function Get-VMnetHostAdapters { param($Name) @{ Status = 'Disabled' } }
         Assert-Throws { Plan-HitlNetwork $state } 'vmnet3: a host adapter exists'
+    }
+    $managementState = @{ Vmrun = $state.Vmrun; Config = @{ management_vmnet='vmnet1'; hitl_vmnet='vmnet3' } }
+    & {
+        function Read-Host { throw 'Unexpected prompt' }
+        Plan-ManagementNetwork $managementState
+        Assert (-not $managementState.ContainsKey('ManagementNetworkPlan')) 'Valid existing management network reused'
+    }
+    $script:rows.vmnet1.DHCP = 'true'
+    & {
+        function Read-Host { throw 'Unexpected prompt' }
+        Assert-Throws { Plan-ManagementNetwork $managementState -Preview } 'Virtual Network Editor.*Host-only.*172.31.250.0'
+    }
+    & {
+        function Read-Host { return '' }
+        Assert-Throws { Plan-ManagementNetwork $managementState } 'creation declined.*Virtual Network Editor'
+        Assert ($managementState.Config.management_vmnet -eq 'vmnet1') 'Declining preserves configured network name'
+    }
+    & {
+        function Read-Host { return ' yes ' }
+        Plan-ManagementNetwork $managementState
+    }
+    Assert ($managementState.Config.management_vmnet -eq 'vmnet4') 'New management network excludes existing and planned HITL networks'
+    Assert (-not $managementState.ContainsKey('CreatedManagementNetwork')) 'Management planning does not create network'
+    $script:failCreate = $true
+    Assert-Throws { Create-OwnedManagementNetwork $managementState $stateFile } 'UAC failure'
+    Assert ((Get-Content $stateFile -Raw | ConvertFrom-Json).CreatedManagementNetwork.Status -eq 'creating') 'Failed management creation retains ownership'
+    $script:failCreate = $false
+    Create-OwnedManagementNetwork $managementState $stateFile
+    Assert ($managementState.CreatedManagementNetwork.Status -eq 'created') 'Management creation verified and recorded'
+    Assert (-not $managementState.ManagementNetworkPlan) 'Management plan cleared after creation'
+    Assert ($script:rows.vmnet1.DHCP -eq 'true') 'Original management network preserved'
+    $script:rows.vmnet4.DHCP = 'true'
+    Assert-Throws { Remove-OwnedManagementNetwork $managementState $stateFile } 'changed'
+    $before = $script:operations.Count
+    Remove-OwnedManagementNetwork $managementState $stateFile -Preview -Force
+    Assert ($script:operations.Count -eq $before) 'Management cleanup preview cannot mutate'
+    Remove-OwnedManagementNetwork $managementState $stateFile -Force
+    Assert (-not $script:rows.ContainsKey('vmnet4')) 'Owned management network removed'
+    Assert ($script:rows.ContainsKey('vmnet1')) 'Pre-existing management network retained'
+    Assert ($null -eq $managementState.CreatedManagementNetwork) 'Management ownership cleared after removal'
+    Remove-OwnedManagementNetwork $managementState $stateFile
+    Assert ($script:operations.Count -eq ($before + 1)) 'Management cleanup is idempotent'
+    & {
+        # Verify native management creation uses the management subnet and keeps
+        # the host adapter enabled, unlike the isolated HITL network.
+        $script:nativeCommands = @()
+        $script:managementReady = $false
+        function Get-HostNetworkRows {
+            param($State)
+            if ($script:managementReady) { return @{ vmnet4 = @{ Type='hostOnly'; DHCP='false'; Subnet='172.31.250.0'; Mask='255.255.255.0' } } }
+            return @{}
+        }
+        function Get-VMnetRegistryNames { @() }
+        function Invoke-HostCommand {
+            param($File, $Arguments, [switch]$AllowFailure, $TimeoutSeconds)
+            $command = $Arguments -join ' '
+            $script:nativeCommands += $command
+            if ($command -eq '-- enable adapter vmnet4') { $script:managementReady = $true }
+            return @{ Code = 1 }
+        }
+        Invoke-NativeNetworkAction Create vmnet4 vmnet3 $temp Management
+        Assert ($script:nativeCommands -contains '-- set vnet vmnet4 addr 172.31.250.0') 'Native management subnet'
+        Assert ($script:nativeCommands -contains '-- remove dhcp vmnet4') 'Native management disables DHCP'
+        Assert ($script:nativeCommands -contains '-- remove nat vmnet4') 'Native management disables NAT'
+        Assert ($script:nativeCommands -contains '-- enable adapter vmnet4') 'Native management enables host adapter'
+        Assert ($script:nativeCommands -notcontains '-- disable adapter vmnet4') 'Management host adapter remains enabled'
     }
     Write-Host 'Managed Workstation networking tests passed.'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }

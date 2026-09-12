@@ -81,6 +81,16 @@ does not install Workstation.
 ## 2. Configure Workstation networking
 
 Configure management and NAT in **Edit → Virtual Network Editor → Change Settings**.
+If the selected management network does not match the settings below, setup
+offers a separate **[y/N]** prompt to create another host-only network with DHCP
+disabled and its host adapter enabled. Accepting selects an unused vmnet and
+uses it for the new lab, preserving the original network. Creation requests
+Windows elevation after prerequisite checks and the lab installation confirmation.
+The selected name is saved in lab state and passed to the VM builder; your JSON
+file is not rewritten. Declining prints the exact Virtual Network Editor settings
+to apply manually. `-Yes` does not skip this separate consent, and `-DryRun`
+prints guidance without prompting or creating a network.
+
 The installer automatically creates an isolated HITL network when needed:
 
 | Network | Type and subnet | DHCP | Host virtual adapter |
@@ -264,6 +274,9 @@ This provisions new VMs; it does not convert an existing participant VM.
 ### Force cleanup and host networks
 
 Cleanup removes the HITL vmnet recorded as created by this installation.
+It also removes any management network created by this installer. Pre-existing
+management networks are preserved. Failed network creation retains ownership
+state for cleanup; `cleanup -Force` can remove partially configured owned networks.
 `cleanup -Force` also permits changed network settings and cleanup of running
 installer-owned VMs. `-KeepHitlNetwork` preserves the tracked network instead.
 Pre-existing HITL, management, and NAT networks remain untouched. Networks still
