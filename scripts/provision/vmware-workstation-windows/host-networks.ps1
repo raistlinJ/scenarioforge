@@ -22,13 +22,32 @@ function Get-HostNetworkRows {
     return $rows
 }
 
+function Test-VMnetRegistryConfigured {
+    param($Key)
+    # Workstation pre-creates slots containing only DisplayName (e.g. VMnet2).
+    # Any other value or child key is configuration we must preserve, including
+    # unknown settings and disabled networks. Never remove placeholders here.
+    return (@($Key.GetSubKeyNames()).Count -gt 0 -or
+        @($Key.GetValueNames() | Where-Object { $_ -ine 'DisplayName' }).Count -gt 0)
+}
+
 function Get-VMnetRegistryNames {
     $names = @()
     foreach ($view in @([Microsoft.Win32.RegistryView]::Registry32, [Microsoft.Win32.RegistryView]::Registry64)) {
         $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
         try {
             $key = $base.OpenSubKey('SOFTWARE\VMware, Inc.\VMnetLib\VMnetConfig')
-            if ($key) { try { $names += $key.GetSubKeyNames() } finally { $key.Dispose() } }
+            if ($key) {
+                try {
+                    foreach ($name in $key.GetSubKeyNames()) {
+                        $network = $key.OpenSubKey($name)
+                        if (-not $network) { throw "VMware registry entry $name changed during inspection; retry setup." }
+                        try {
+                            if (Test-VMnetRegistryConfigured $network) { $names += $name }
+                        } finally { $network.Dispose() }
+                    }
+                } finally { $key.Dispose() }
+            }
         } finally { $base.Dispose() }
     }
     return @($names | Select-Object -Unique)

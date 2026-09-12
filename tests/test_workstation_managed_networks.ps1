@@ -11,6 +11,22 @@ function Assert-Throws([scriptblock]$Block, $Pattern) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('sf-network-test-' + [Guid]::NewGuid())
 New-Item -ItemType Directory $temp | Out-Null
 try {
+    # Real registry-key interface, including the display-name-only slots reported
+    # on Windows. Unknown values and child keys must continue blocking reuse.
+    foreach ($case in @(
+        @{ Values = @('DisplayName'); Children = @(); Configured = $false },
+        @{ Values = @(); Children = @(); Configured = $false },
+        @{ Values = @('displayname'); Children = @(); Configured = $false },
+        @{ Values = @('DisplayName', 'UnknownSetting'); Children = @(); Configured = $true },
+        @{ Values = @('DisplayName', ''); Children = @(); Configured = $true },
+        @{ Values = @('DisplayName'); Children = @('Adapter'); Configured = $true },
+        @{ Values = @('DisplayName'); Children = @('NAT'); Configured = $true }
+    )) {
+        $key = [pscustomobject]@{ Values = $case.Values; Children = $case.Children }
+        $key | Add-Member ScriptMethod GetValueNames { $this.Values }
+        $key | Add-Member ScriptMethod GetSubKeyNames { $this.Children }
+        Assert ((Test-VMnetRegistryConfigured $key) -eq $case.Configured) 'Registry placeholder classification'
+    }
     $stateFile = Join-Path $temp 'state.json'
     $script:rows = @{
         vmnet1 = @{ Type='hostOnly'; DHCP='false'; Subnet='172.31.250.0'; Mask='255.255.255.0' }
