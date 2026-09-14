@@ -81,7 +81,15 @@ function Read-InstallerConfig {
 function Assert-InstallerConfig {
     param($Config)
     if ($Config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
-    if ($Config.cyber_agent_flow -and $Config.participant_os -ne 'kali') { throw 'cyber_agent_flow requires participant_os=kali.' }
+    if ($Config.cyber_agent_flow -and $Config.participant_os -ne 'kali') {
+        Write-Host 'CyberAgentFlow enabled; selecting Kali for the participant VM.'
+        $Config.participant_os = 'kali'
+        if ($Config.participant_disk_gb -lt 25) { $Config.participant_disk_gb = 40 }
+    }
+    if ($Config.cyber_agent_flow -and $Config.participant_memory_mb -lt 4096) {
+        Write-Host 'CyberAgentFlow enabled; allocating 4096 MB RAM to the participant VM.'
+        $Config.participant_memory_mb = 4096
+    }
     if ($Config.participant_os -eq 'kali' -and $Config.participant_disk_gb -lt 25) {
         throw 'Kali participant_disk_gb must be at least 25 (default: 40).'
     }

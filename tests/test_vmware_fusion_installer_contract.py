@@ -20,6 +20,106 @@ def run_bash(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.parametrize('healthy', [True, False])
+def test_direct_service_recovery_requires_healthy_adapters(tmp_path, healthy):
+    config = tmp_path / 'networking'
+    config.write_text('answer VNET_8_DHCP yes\nanswer VNET_8_NAT yes\n'
+                      'answer VNET_3_DHCP no\nanswer VNET_3_NAT no\n')
+    events = tmp_path / 'events'
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+trap 'echo UNEXPECTED_STATUS_TRAP >&2' ERR
+sleep() {{ :; }}
+sudo() {{
+    case "$1" in
+        */vmnet-cli)
+            if [[ "$2" == --start ]]; then return 1; fi
+            if [[ -f {shlex.quote(str(events))} && {int(healthy)} == 1 ]]; then return 0; fi
+            echo 'DHCP service on vmnet8 is not running'
+            echo 'NAT service on vmnet8 is not running'
+            echo 'Hostonly virtual adapter on vmnet8 is disabled'
+            return 1 ;;
+        test) return 1 ;;
+        *) printf '%s\\n' "$*" >> {shlex.quote(str(events))} ;;
+    esac
+}}
+if fusion_start_networking; then exit 0; else exit 1; fi
+''')
+    assert (result.returncode == 0) == healthy
+    assert 'UNEXPECTED_STATUS_TRAP' not in result.stderr
+    calls = events.read_text()
+    assert '/var/run/vmnet-natd-vmnet8.pid' in calls
+    assert '/var/run/vmnet-dhcpd-vmnet8.pid' in calls
+    assert 'vmnet3' not in calls
+    if not healthy:
+        assert 'host adapters' in result.stderr
+
+
+@pytest.mark.parametrize('address,service,expected', [
+    ('192.168.20.1', 'running', 0),
+    ('192.168.99.1', 'running', 1),
+    ('192.168.20.1', 'not running', 1),
+])
+def test_bridge_verification_preserves_service_and_subnet_checks(tmp_path, address, service, expected):
+    config = tmp_path / 'networking'
+    config.write_text('answer VNET_8_VIRTUAL_ADAPTER yes\n'
+                      'answer VNET_8_HOSTONLY_SUBNET 192.168.20.0\n'
+                      'answer VNET_8_HOSTONLY_NETMASK 255.255.255.0\n')
+    interfaces = f'bridge101: flags=8a63<UP,BROADCAST,RUNNING> mtu 1500\n\tinet {address} netmask 0xffffff00\n\tmember: vmenet1 flags=3\n\tstatus: active\n'
+    status = f'NAT service on vmnet8 is {service}\nHostonly virtual adapter on vmnet8 is disabled\nSome/All of the configured services are not running'
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+ifconfig() {{ printf '%s' {shlex.quote(interfaces)}; }}
+fusion_bridge_status_is_healthy {shlex.quote(status)}
+''')
+    assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize('process,ready', [
+    ('0 /Library/Application Support/VMware/VMware Fusion/Services/Contents/Library/vmnet-bridge', True),
+    ('0 /Applications/VMware Fusion.app/Contents/Library/vmnet-bridge', True),
+    ('501 /Applications/VMware Fusion.app/Contents/Library/vmnet-bridge', False),
+    ('0 /Library/PrivilegedHelperTools/com.docker.vmnetd', False),
+])
+def test_service_preflight_is_read_only(process, ready):
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+ps() {{ printf '%s\\n' {shlex.quote(process)}; }}
+sudo() {{ echo UNEXPECTED_MUTATION; exit 91; }}
+open() {{ echo UNEXPECTED_MUTATION; exit 92; }}
+require_fusion_services_initialized
+''')
+    assert (result.returncode == 0) == ready
+    assert 'UNEXPECTED_MUTATION' not in result.stdout
+    if not ready:
+        assert 'Open VMware Fusion' in result.stderr
+        assert 'No network changes were made' in result.stderr
+
+
+def test_management_helper_resolves_after_sourcing_shared_installer(tmp_path):
+    config = tmp_path / 'networking'
+    config.write_text('answer VNET_1_HOSTONLY_SUBNET 192.168.230.0\n'
+                      'answer VNET_1_HOSTONLY_NETMASK 255.255.255.0\n'
+                      'answer VNET_1_DHCP no\n')
+    ping = tmp_path / 'ping'
+    ping.write_text('#!/bin/sh\nexit 1\n')
+    ping.chmod(0o755)
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+PATH={shlex.quote(str(tmp_path))}:"$PATH"
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+MANAGEMENT_VMNET=vmnet1
+APP_MANAGEMENT_CIDR=
+CORE_MANAGEMENT_CIDR=
+derive_fusion_management_addresses
+printf '%s %s' "$APP_MANAGEMENT_CIDR" "$CORE_MANAGEMENT_CIDR"
+''')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.endswith('192.168.230.2/24 192.168.230.3/24')
+
+
 def test_fusion_installer_has_valid_bash_syntax_and_executable_bit() -> None:
     result = subprocess.run(
         ["bash", "-n", str(INSTALLER)],
@@ -397,6 +497,7 @@ SCENARIOFORGE_FUSION_RUNTIME_STATUS_FILE={shlex.quote(str(runtime))}
 source {shlex.quote(str(INSTALLER))}
 parse_args install --dry-run --yes --lab-dir {shlex.quote(str(lab_dir))}
 require_linux_workstation() {{ :; }}
+derive_fusion_management_addresses() {{ APP_MANAGEMENT_CIDR=172.31.250.2/24; CORE_MANAGEMENT_CIDR=172.31.250.3/24; }}
 host_network_exists() {{ return 0; }}
 validate_hitl_isolation() {{ :; }}
 perform_install

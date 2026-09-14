@@ -65,8 +65,8 @@ CORE_DISK_GB="${SF_CORE_DISK_GB:-80}"
 APP_DISK_GB="${SF_APP_DISK_GB:-40}"
 PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-20}"
 
-APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-172.31.250.2/24}"
-CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-172.31.250.3/24}"
+APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-}"
+CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-}"
 CORE_HITL_CIDR="${SF_CORE_HITL_CIDR:-10.254.200.3/24}"
 PARTICIPANT_CIDR="${SF_PARTICIPANT_CIDR:-10.254.200.10/24}"
 
@@ -196,8 +196,8 @@ Important options:
   --force                     allow cleanup of a complete, running lab
 
 Network/address overrides:
-  --app-management-cidr CIDR   default: 172.31.250.2/24
-  --core-management-cidr CIDR  default: 172.31.250.3/24
+  --app-management-cidr CIDR   default: selected management network subnet
+  --core-management-cidr CIDR  default: selected management network subnet
   --core-hitl-cidr CIDR        default: 10.254.200.3/24
   --participant-cidr CIDR      default: 10.254.200.10/24
 
@@ -424,6 +424,20 @@ validate_host_networks() {
 source "${BASH_SOURCE[0]%/*}/host-networks.sh"
 
 validate_inputs() {
+    if declare -F derive_fusion_management_addresses >/dev/null; then
+        derive_fusion_management_addresses
+    else
+        derive_workstation_management_addresses
+    fi
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        local llm_network
+        llm_network="$(python3 "${CAF_HELPER%/*}/management_addresses.py" --llm \
+            "$VMWARE_NETWORKING_FILE" "$LLM_VMNET" "$LLM_INTERFACE_CIDR" "$LLM_GATEWAY")" \
+            || die "LLM interface/gateway do not match the selected NAT vmnet; remove stale overrides or inspect its network settings"
+        LLM_INTERFACE_CIDR="${llm_network%% *}"
+        LLM_GATEWAY="${llm_network##* }"
+        log "LLM network: $LLM_VMNET, interface $LLM_INTERFACE_CIDR, gateway $LLM_GATEWAY"
+    fi
     validate_caf
     if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
         [[ "$LLM_VMNET" != "$HITL_VMNET" && "$LLM_VMNET" != "$MANAGEMENT_VMNET" ]] || die "LLM vmnet must differ from HITL and management"
@@ -467,6 +481,16 @@ validate_inputs() {
         [[ ! -e "$vmx" ]] || die "VM already exists: $vmx"
     done
     validate_host_network_plan
+}
+
+derive_workstation_management_addresses() {
+    local addresses
+    addresses="$(python3 "$SCRIPT_DIR/../common/management_addresses.py" "$VMWARE_NETWORKING_FILE" \
+        "$MANAGEMENT_VMNET" "$APP_MANAGEMENT_CIDR" "$CORE_MANAGEMENT_CIDR")" \
+        || die "cannot select management addresses; check management_vmnet and any explicit CIDR overrides"
+    APP_MANAGEMENT_CIDR="${addresses%% *}"
+    CORE_MANAGEMENT_CIDR="${addresses##* }"
+    log "Management on $MANAGEMENT_VMNET: APP $APP_MANAGEMENT_CIDR; CORE $CORE_MANAGEMENT_CIDR"
 }
 
 confirm_install() {
@@ -848,7 +872,24 @@ guest_percent() {
     local vmx="$1" username="$2" password="$3" marker="$4" current
     if guest_file_exists "$vmx" "$username" "$password" "$marker"; then printf '100\n'; return; fi
     current="$(guest_file_text "$vmx" "$username" "$password" /var/lib/scenarioforge/bootstrap-percent || true)"
-    [[ "$current" =~ ^[0-9]+$ ]] && (( current <= 100 )) && printf '%s\n' "$current" || printf '0\n'
+    [[ "$current" =~ ^[0-9]+$ ]] && (( current <= 100 )) && printf '%s\n' "$current" || printf 'unavailable\n'
+}
+
+poll_guest_percent() {
+    local target="$1" sampled previous
+    shift
+    sampled="$(guest_percent "$@")"
+    previous="${!target:-0}"
+    if [[ "$sampled" =~ ^[0-9]+$ ]]; then
+        printf -v "$target" '%s' "$sampled"
+        printf -v "${target}_availability" '%s' ''
+        if (( sampled < previous )); then
+            warn "Guest $1 reports lower progress ($previous -> $sampled); bootstrap may have restarted"
+        fi
+    else
+        printf -v "$target" '%s' "$previous"
+        printf -v "${target}_availability" '%s' ' (temporarily unavailable; last known progress)'
+    fi
 }
 guest_phase() {
     local text
@@ -880,7 +921,9 @@ CAF_REMOVE_BOOTSTRAP
     else
         vmrun -T "$VMRUN_TYPE" deleteNetworkAdapter "$PARTICIPANT_VMX" 1
     fi
-    if vmrun -T "$VMRUN_TYPE" listNetworkAdapters "$PARTICIPANT_VMX" 2>/dev/null | grep -Eq '^1[[:space:]]'; then
+    # vmrun listNetworkAdapters numbers rows densely: retained ethernet2
+    # becomes row 1 after ethernet1 is removed. Check the VMX identity instead.
+    if grep -Eiq '^[[:space:]]*ethernet1\.present[[:space:]]*=[[:space:]]*"TRUE"' "$PARTICIPANT_VMX"; then
         die "participant NAT adapter is still attached; remove ethernet1 in $VMWARE_PRODUCT_NAME before using the lab"
     fi
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
@@ -889,25 +932,26 @@ CAF_REMOVE_BOOTSTRAP
 }
 
 wait_for_participant() {
-    local deadline=$(( $(date +%s) + WAIT_MINUTES * 60 )) percent phase elapsed
+    local deadline=$(( $(date +%s) + WAIT_MINUTES * 60 )) percent=0 percent_availability='' phase elapsed
     while :; do
         if guest_file_exists "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD" /var/lib/scenarioforge/participant-ready; then return; fi
-        percent="$(guest_percent "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD" /var/lib/scenarioforge/participant-ready)"
+        poll_guest_percent percent "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD" /var/lib/scenarioforge/participant-ready
         phase="$(guest_phase "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD")"
         [[ "$phase" != failed* ]] || die "participant provisioning failed: $phase"
         elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
-        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Participant ${percent}% (elapsed $elapsed): $phase"
+        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Participant ${percent}%${percent_availability} (elapsed $elapsed): $phase"
         (( $(date +%s) < deadline )) || die "participant provisioning timed out after $WAIT_MINUTES minutes; its temporary NAT adapter was left attached for diagnosis"
         sleep 20
     done
 }
 
 wait_for_all_guests() {
-    local deadline=$(( $(date +%s) + WAIT_MINUTES * 60 )) cp ap pp cphase aphase pphase elapsed
+    local deadline=$(( $(date +%s) + WAIT_MINUTES * 60 )) cp=0 ap=0 pp=0 cphase aphase pphase elapsed
+    local cp_availability='' ap_availability='' pp_availability=''
     while :; do
-        cp="$(guest_percent "$CORE_VMX" corevm "$CORE_PASSWORD" /var/lib/scenarioforge/core-ready)"
-        ap="$(guest_percent "$APP_VMX" scenarioforge "$APP_PASSWORD" /var/lib/scenarioforge/app-ready)"
-        pp="$(guest_percent "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD" /var/lib/scenarioforge/participant-ready)"
+        poll_guest_percent cp "$CORE_VMX" corevm "$CORE_PASSWORD" /var/lib/scenarioforge/core-ready
+        poll_guest_percent ap "$APP_VMX" scenarioforge "$APP_PASSWORD" /var/lib/scenarioforge/app-ready
+        poll_guest_percent pp "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD" /var/lib/scenarioforge/participant-ready
         cphase="$(guest_phase "$CORE_VMX" corevm "$CORE_PASSWORD")"
         aphase="$(guest_phase "$APP_VMX" scenarioforge "$APP_PASSWORD")"
         pphase="$(guest_phase "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD")"
@@ -916,11 +960,11 @@ wait_for_all_guests() {
         [[ "$pphase" != failed* ]] || die "participant provisioning failed: $pphase"
         INSTALL_PERCENT=$(( 60 + (cp + ap + pp) * 39 / 300 ))
         elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
-        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap (elapsed $elapsed): CORE=${cp}% APP=${ap}% PARTICIPANT=${pp}%"
+        emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap (elapsed $elapsed): CORE=${cp}%${cp_availability} APP=${ap}%${ap_availability} PARTICIPANT=${pp}%${pp_availability}"
         verbose "CORE: $cphase | APP: $aphase | PARTICIPANT: $pphase"
         write_runtime_status running "$INSTALL_PHASE" "CORE=$cp APP=$ap PARTICIPANT=$pp"
         write_state
-        (( cp == 100 && ap == 100 && pp == 100 )) && return
+        if (( cp == 100 && ap == 100 && pp == 100 )) && [[ -z "$cp_availability$ap_availability$pp_availability" ]]; then return; fi
         (( $(date +%s) < deadline )) || die "guest provisioning timed out after $WAIT_MINUTES minutes; run '$0 status' for the last reported phases"
         sleep 20
     done
@@ -1137,16 +1181,21 @@ show_credentials() {
 
 show_status_once() {
     load_state
-    local cp ap pp cphase aphase pphase address percent
-    cp="$(guest_percent "$CORE_VMX" corevm "${CORE_VM_PASSWORD:-}" /var/lib/scenarioforge/core-ready)"
-    ap="$(guest_percent "$APP_VMX" scenarioforge "${APP_VM_PASSWORD:-}" /var/lib/scenarioforge/app-ready)"
-    pp="$(guest_percent "$PARTICIPANT_VMX" participant "${PARTICIPANT_VM_PASSWORD:-}" /var/lib/scenarioforge/participant-ready)"
+    local cp=${LAST_CORE_PERCENT:-0} ap=${LAST_APP_PERCENT:-0} pp=${LAST_PARTICIPANT_PERCENT:-0} cphase aphase pphase address percent
+    local cp_availability='' ap_availability='' pp_availability=''
+    poll_guest_percent cp "$CORE_VMX" corevm "${CORE_VM_PASSWORD:-}" /var/lib/scenarioforge/core-ready
+    poll_guest_percent ap "$APP_VMX" scenarioforge "${APP_VM_PASSWORD:-}" /var/lib/scenarioforge/app-ready
+    poll_guest_percent pp "$PARTICIPANT_VMX" participant "${PARTICIPANT_VM_PASSWORD:-}" /var/lib/scenarioforge/participant-ready
+    LAST_CORE_PERCENT=$cp LAST_APP_PERCENT=$ap LAST_PARTICIPANT_PERCENT=$pp
     cphase="$(guest_phase "$CORE_VMX" corevm "${CORE_VM_PASSWORD:-}")"
     aphase="$(guest_phase "$APP_VMX" scenarioforge "${APP_VM_PASSWORD:-}")"
     pphase="$(guest_phase "$PARTICIPANT_VMX" participant "${PARTICIPANT_VM_PASSWORD:-}")"
+    cphase="$cphase$cp_availability"
+    aphase="$aphase$ap_availability"
+    pphase="$pphase$pp_availability"
     percent="${INSTALL_PERCENT:-0}"
     if [[ "$INSTALL_COMPLETE" != 1 && "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED" != 1 \
-        && "$cp" == 100 && "$ap" == 100 && "$pp" == 100 ]]; then
+        && "$cp" == 100 && "$ap" == 100 && "$pp" == 100 && -z "$cp_availability$ap_availability$pp_availability" ]]; then
         INSTALL_COMPLETE=1
         INSTALL_PERCENT=100
         INSTALL_PHASE="Installation complete"
@@ -1337,6 +1386,10 @@ perform_install() {
 
     progress 35 "Converting cloud disks and creating VMware VMX/seed ISO files"
     create_vms
+    # Launchers can start VMs and discover the APP address themselves. Create
+    # them before bootstrap waits, so a guest failure does not hide access.
+    create_participant_desktop_shortcut
+    create_host_desktop_shortcut
 
     progress 55 "Starting the CORE, APP, and participant VMs"
     start_vm "$CORE_VMX"

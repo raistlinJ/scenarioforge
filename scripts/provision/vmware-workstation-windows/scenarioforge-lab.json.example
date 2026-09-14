@@ -38,7 +38,5 @@
   "llm_provider_url": "",
   "llm_provider_type": "ollama_direct",
   "llm_model": "",
-  "llm_interface_cidr": "",
-  "llm_gateway": "",
   "llm_vmnet": "vmnet8"
 }

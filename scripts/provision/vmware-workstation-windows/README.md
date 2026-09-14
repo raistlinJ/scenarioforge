@@ -1,5 +1,22 @@
 # ScenarioForge lab on VMware Workstation for Windows
 
+Omit both `llm_interface_cidr` and `llm_gateway` for automatic DHCP on the
+dedicated LLM interface. The selected vmnet must provide DHCP. The guest ignores
+DHCP default routes and DNS settings and maintains only a route to the provider
+IP, refreshed after lease changes. Provider address/URL must still be supplied.
+Both static fields remain advanced overrides: **do not change them unless you
+understand the network's addressing and routing**. Windows JSON does not support
+comments; these fields are therefore omitted from its example.
+
+CyberAgentFlow provisioning installs and verifies the guest Python environment before
+marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
+participant desktop and in its applications menu. These changes apply when the
+guest is provisioned; existing VMs are not automatically updated.
+
+Windows retains its dedicated management network at `172.31.250.0/24` and validates
+or offers to create that network. Host VM-aware shortcuts are installed before
+bootstrap completes; `desktop_shortcut` controls their creation.
+
 This PowerShell installer creates the same three graphical Linux guests as the
 [Linux Workstation installer](../vmware-workstation-linux/README.md):
 
@@ -316,9 +333,9 @@ states without network ownership records preserve their networks.
 
 ## Optional CyberAgentFlow on Kali
 
-Set `participant_os=kali` and `cyber_agent_flow=true` in the grouped example
-config section (Windows JSON uses `"participant_os": "kali"` and
-`"cyber_agent_flow": true`). The shell installers also accept
+Set `cyber_agent_flow=true` in the grouped example config section (Windows JSON
+uses `"cyber_agent_flow": true`). This selects a Kali participant automatically.
+The shell installers also accept
 `--cyber-agent-flow`; Windows accepts `-CyberAgentFlow`.
 
 Setup clones `https://github.com/raistlinJ/cyber-agent-flow.git`, the upstream
@@ -332,11 +349,11 @@ Configure these values before enabling the option:
 | Setting | Meaning |
 | --- | --- |
 | `llm_provider_address` | Fixed IPv4 address of the external LLM provider |
-| `llm_provider_url` | Full HTTP(S) endpoint using that same IP, including port/path |
+| `llm_provider_url` | Full HTTP(S) endpoint, using the IP or a hostname that resolves to it |
 | `llm_provider_type` | `ollama_direct`, `litellm`, `openai`, or `claude` |
 | `llm_model` | Model name used by CyberAgentFlow |
-| `llm_interface_cidr` | Reserved, unused static address/prefix for Kali on the egress network |
-| `llm_gateway` | Reachable router address in that network |
+| `llm_interface_cidr` | Advanced static override; omit with gateway for automatic DHCP |
+| `llm_gateway` | Advanced static router override; supply only together with interface CIDR |
 | `llm_vmnet` | VMware: existing egress vmnet, default `vmnet8` |
 | `llm_bridge` | Proxmox: existing egress bridge; empty uses `uplink_bridge` |
 
@@ -344,7 +361,9 @@ Use the gateway/subnet actually configured on your chosen vmnet/bridge. The LLM
 network must differ from HITL and management. A third Kali NIC is matched by MAC
 and named `ens20`; cloud-init persists its static address and a provider-specific
 `/32` route via the gateway (direct link route for a provider in the same subnet).
-It has no DHCP, IPv6 autoconfiguration, or default route. The ordinary bootstrap
+Automatic mode uses DHCP for its address and gateway, ignoring general DHCP routes
+and DNS settings. Neither mode enables IPv6 autoconfiguration or a default route.
+The ordinary bootstrap
 NIC `ens19` is still removed after provisioning; the new LLM NIC remains. Guest
 readiness checks `ip -4 route get ADDRESS` and refuses to mark setup complete if
 that route does not use `ens20`. This checks routing, not provider availability or
@@ -357,10 +376,9 @@ automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are
-placed in the provisioning config. The WebUI uses `configs/cli.json` for initial provider, URL, model, TLS, and
-limit settings; existing browser-saved settings take precedence. API keys are
-not embedded in the page. Provisioning applies a bundled compatibility patch
-for this behavior and skips it if the same patch is already present upstream.
+placed in the provisioning config. The WebUI uses `configs/cli.json` for initial
+provider, URL, model, TLS, and limit settings; existing browser-saved settings
+take precedence. API keys are not embedded in the page.
 
 This option applies to new labs; cleanup removes the extra NIC with its VM and
 preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existing

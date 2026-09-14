@@ -1,6 +1,5 @@
 """Shared opt-in Kali CyberAgentFlow provisioning and dedicated LLM routing."""
 import argparse
-import base64
 import ipaddress
 import json
 import os
@@ -24,21 +23,27 @@ def validate(config):
     if c.get('participant_os') != 'kali':
         raise ValueError('cyber_agent_flow requires participant_os=kali')
     provider = ipaddress.IPv4Address(c['llm_provider_address'])
-    interface = ipaddress.IPv4Interface(c['llm_interface_cidr'])
-    gateway = ipaddress.IPv4Address(c['llm_gateway'])
+    automatic = not c['llm_interface_cidr'] and not c['llm_gateway']
+    if bool(c['llm_interface_cidr']) != bool(c['llm_gateway']):
+        raise ValueError('Set both llm_interface_cidr and llm_gateway, or omit both for automatic DHCP configuration')
+    interface = None if automatic else ipaddress.IPv4Interface(c['llm_interface_cidr'])
+    # Accept an accidental/pasted CIDR suffix on a gateway, but normalize it
+    # before emitting Netplan's `via`, which accepts an address only.
+    gateway = None if automatic else ipaddress.IPv4Interface(c['llm_gateway']).ip
+    c['llm_gateway'] = '' if automatic else str(gateway)
     if provider.is_unspecified or provider.is_multicast or provider.is_loopback:
         raise ValueError('llm_provider_address must be a reachable unicast IPv4 address')
-    if gateway not in interface.network or gateway == interface.ip or gateway in (interface.network.network_address, interface.network.broadcast_address):
+    if not automatic and (gateway not in interface.network or gateway == interface.ip or gateway in (interface.network.network_address, interface.network.broadcast_address)):
         raise ValueError('llm_gateway must be a different usable address in llm_interface_cidr')
-    if interface.ip in (interface.network.network_address, interface.network.broadcast_address) or provider == interface.ip:
+    if not automatic and (interface.ip in (interface.network.network_address, interface.network.broadcast_address) or provider == interface.ip):
         raise ValueError('llm_interface_cidr must have a usable guest address distinct from the provider')
     for network in (c.get('participant_cidr', '10.254.200.10/24'), c.get('core_management_cidr', '172.31.250.3/24')):
         protected = ipaddress.ip_interface(network).network
-        if interface.network.overlaps(protected) or provider in protected:
+        if (not automatic and interface.network.overlaps(protected)) or provider in protected:
             raise ValueError('LLM network/provider must not overlap HITL or management')
     endpoint = urlsplit(c['llm_provider_url'])
-    if endpoint.scheme not in ('http', 'https') or endpoint.hostname != str(provider) or endpoint.username or endpoint.password:
-        raise ValueError('llm_provider_url must be an http(s) URL using llm_provider_address, without credentials')
+    if endpoint.scheme not in ('http', 'https') or not endpoint.hostname or endpoint.username or endpoint.password:
+        raise ValueError('llm_provider_url must be an http(s) URL without credentials')
     if c['llm_provider_type'] not in ('ollama_direct', 'litellm', 'openai', 'claude'):
         raise ValueError('unsupported llm_provider_type')
     source = urlsplit(c['cyber_agent_flow_url'])
@@ -54,6 +59,11 @@ def validate(config):
 
 def interface(config, mac):
     c = validate(config)
+    if not c['llm_interface_cidr']:
+        return {'match': {'macaddress': mac}, 'set-name': 'ens20',
+                'dhcp4': True, 'dhcp6': False, 'accept-ra': False, 'link-local': [],
+                'dhcp4-overrides': {'use-routes': False, 'use-dns': False, 'use-domains': False,
+                                    'use-ntp': False, 'use-hostname': False, 'send-hostname': False}}
     provider = ipaddress.IPv4Address(c['llm_provider_address'])
     subnet = ipaddress.IPv4Interface(c['llm_interface_cidr']).network
     route = {'to': f'{provider}/32'}
@@ -73,7 +83,45 @@ def inject(script, config):
                api_key_env='MCP_API_KEY', ssl_verify=True, server_command='venv/bin/python mcp_kali.py',
                tools_config='kali_tools.json')
     q = shlex.quote
-    web_patch = base64.b64encode(Path(__file__).with_name('cyber-agent-flow-web-defaults.patch').read_bytes()).decode()
+    automatic_setup = ''
+    if not c['llm_interface_cidr']:
+        route_config = json.dumps(dict(provider=c['llm_provider_address'], protected=[
+            c.get('participant_cidr', '10.254.200.10/24'), c.get('core_management_cidr', '172.31.250.3/24')]))
+        route_script = Path(__file__).with_name('llm_dhcp_route.py').read_text()
+        automatic_setup = f'''
+cat > /usr/local/sbin/scenarioforge-llm-route <<'CAF_ROUTE_SCRIPT'
+{route_script}
+CAF_ROUTE_SCRIPT
+chmod 0755 /usr/local/sbin/scenarioforge-llm-route
+cat > /etc/scenarioforge-llm-route.json <<'CAF_ROUTE_CONFIG'
+{route_config}
+CAF_ROUTE_CONFIG
+cat > /etc/systemd/system/scenarioforge-llm-route.service <<'CAF_ROUTE_SERVICE'
+[Unit]
+Description=Route the LLM provider through the dedicated DHCP interface
+After=systemd-networkd.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/scenarioforge-llm-route
+CAF_ROUTE_SERVICE
+cat > /etc/systemd/system/scenarioforge-llm-route.timer <<'CAF_ROUTE_TIMER'
+[Unit]
+Description=Refresh the LLM provider route after DHCP lease changes
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=15s
+[Install]
+WantedBy=timers.target
+CAF_ROUTE_TIMER
+systemctl daemon-reload
+systemctl enable --now scenarioforge-llm-route.timer
+llm_route_ready=0
+for attempt in $(seq 1 30); do
+    if systemctl start scenarioforge-llm-route.service; then llm_route_ready=1; break; fi
+    sleep 2
+done
+[[ "$llm_route_ready" == 1 ]] || fail_bootstrap 'LLM DHCP lease/route unavailable; check DHCP on the selected vmnet/bridge or provide both static overrides'
+'''
     addition = f'''
 set_bootstrap_status 90 'installing CyberAgentFlow'
 [[ "$ID" == kali ]] || fail_bootstrap 'CyberAgentFlow requires Kali'
@@ -87,6 +135,10 @@ if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed ]]; then
     git -C /opt/cyber-agent-flow fetch origin {q(c['cyber_agent_flow_ref'])}
     git -C /opt/cyber-agent-flow checkout --detach FETCH_HEAD
     bash /opt/cyber-agent-flow/install_prerequisites.sh
+    # Do not trust prerequisite scripts that can warn and skip pip setup.
+    /opt/cyber-agent-flow/venv/bin/python -m pip install -r /opt/cyber-agent-flow/requirements.txt
+    /opt/cyber-agent-flow/venv/bin/python -m pip check
+    /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'"
     cat > /opt/cyber-agent-flow/configs/cli.json <<'CAF_CONFIG'
 {json.dumps(cli, indent=2)}
 CAF_CONFIG
@@ -94,9 +146,14 @@ CAF_CONFIG
     chmod 0600 /opt/cyber-agent-flow/configs/cli.json
     touch /var/lib/scenarioforge/cyber-agent-flow-installed
 fi
-printf '%s' '{web_patch}' | base64 -d > /var/lib/scenarioforge/cyber-agent-flow-web-defaults.patch
-if ! git -c safe.directory=/opt/cyber-agent-flow -C /opt/cyber-agent-flow apply --reverse --check /var/lib/scenarioforge/cyber-agent-flow-web-defaults.patch 2>/dev/null; then
-    git -c safe.directory=/opt/cyber-agent-flow -C /opt/cyber-agent-flow apply /var/lib/scenarioforge/cyber-agent-flow-web-defaults.patch
+# Verify existing installations too, before declaring the participant ready.
+/opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
+    || fail_bootstrap 'CyberAgentFlow dependency verification failed; inspect the Python error above'
+{automatic_setup}
+provider_host={q(urlsplit(c['llm_provider_url']).hostname or '')}
+if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then
+    getent ahostsv4 "$provider_host" | awk '{{print $1}}' | sort -u | grep -Fxq -- {q(str(c['llm_provider_address']))} \
+        || fail_bootstrap 'LLM provider URL hostname does not resolve to llm_provider_address'
 fi
 ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev ens20( |$)' || fail_bootstrap 'LLM provider traffic is not routed through ens20'
 cat > /usr/local/bin/cyber-agent-flow <<'CAF_LAUNCH'
@@ -105,6 +162,22 @@ cd /opt/cyber-agent-flow
 exec bash ./start_ws.sh "$@"
 CAF_LAUNCH
 chmod 0755 /usr/local/bin/cyber-agent-flow
+install -d -o participant -g participant -m 0755 /home/participant/Desktop
+cat > /home/participant/Desktop/cyber-agent-flow.desktop <<'CAF_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=CyberAgentFlow Web
+Comment=Start the CyberAgentFlow web server
+Exec=/usr/local/bin/cyber-agent-flow
+Path=/opt/cyber-agent-flow
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;Network;
+StartupNotify=false
+CAF_DESKTOP
+chown participant:participant /home/participant/Desktop/cyber-agent-flow.desktop
+chmod 0755 /home/participant/Desktop/cyber-agent-flow.desktop
+install -m 0644 /home/participant/Desktop/cyber-agent-flow.desktop /usr/share/applications/cyber-agent-flow.desktop
 '''
     marker = 'touch /var/lib/scenarioforge/participant-ready'
     if script.count(marker) != 1:

@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+FUSION_SCRIPT_DIR="$SCRIPT_DIR"
 WORKSTATION_INSTALLER="$SCRIPT_DIR/../vmware-workstation-linux/install-scenarioforge-lab.sh"
 [[ -r "$WORKSTATION_INSTALLER" ]] || {
     printf 'ERROR: shared VMware installer not found: %s\n' "$WORKSTATION_INSTALLER" >&2
@@ -13,6 +14,10 @@ WORKSTATION_INSTALLER="$SCRIPT_DIR/../vmware-workstation-linux/install-scenariof
 # implementation, then replace only the macOS host and architecture seams.
 # shellcheck source=scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh
 source "$WORKSTATION_INSTALLER"
+
+# Empty means derive from the selected Fusion network after config/CLI parsing.
+APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-}"
+CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-}"
 
 SCRIPT_VERSION="0.3.0"
 INSTALLER_OWNER="scenarioforge-vmware-fusion-v1"
@@ -165,8 +170,8 @@ Important options:
   --keep-hitl-network         cleanup the lab while preserving its host vmnet
 
 Network/address overrides:
-  --app-management-cidr CIDR   default: 172.31.250.2/24
-  --core-management-cidr CIDR  default: 172.31.250.3/24
+  --app-management-cidr CIDR   default: selected management network subnet
+  --core-management-cidr CIDR  default: selected management network subnet
   --core-hitl-cidr CIDR        default: 10.254.200.3/24
   --participant-cidr CIDR      default: 10.254.200.10/24
 
@@ -249,8 +254,29 @@ require_linux_workstation() {
     for command in qemu-img curl openssl python3 shasum hdiutil; do
         command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
     done
+    require_fusion_services_initialized
     vmrun -T "$VMRUN_TYPE" listHostNetworks >/dev/null 2>&1 \
         || die "VMware Fusion is installed but vmrun could not inspect its networks; open Fusion once and complete first-run setup"
+}
+
+require_fusion_services_initialized() {
+    # Fusion's full service startup launches vmnet-bridge before vmnet-cli.
+    # Calling the latter alone can leave DHCP/NAT unable to initialize. This
+    # preflight is read-only, including during dry runs: let Fusion perform its
+    # own privileged setup instead of partially reproducing services.sh.
+    local processes
+    processes="$(ps -axo uid=,comm=)" \
+        || die "could not inspect Fusion services; no network changes were made"
+    if ! awk -v app="$FUSION_APP/Contents/Library/vmnet-bridge" '
+        $1 == 0 {
+            sub(/^[[:space:]]*0[[:space:]]+/, "")
+            if ($0 == app || $0 == "/Library/Application Support/VMware/VMware Fusion/Services/Contents/Library/vmnet-bridge") found=1
+        }
+        END {exit !found}
+    ' <<<"$processes"; then
+        die "Fusion bridge service is not initialized. Open VMware Fusion, complete any administrator/setup prompts, then rerun this command. No network changes were made; vmnet-cli --start alone does not perform Fusion's full service initialization."
+    fi
+    log "Fusion bridge service is initialized"
 }
 
 create_seed_iso() {
@@ -371,6 +397,17 @@ prepare_host_network_plan() {
     FUSION_NETWORK_PLAN=1
 }
 
+derive_fusion_management_addresses() {
+    local addresses
+    addresses="$(python3 "$FUSION_SCRIPT_DIR/../common/management_addresses.py" \
+        "$VMWARE_NETWORKING_FILE" "$MANAGEMENT_VMNET" \
+        "$APP_MANAGEMENT_CIDR" "$CORE_MANAGEMENT_CIDR")" \
+        || die "cannot select management addresses; check the selected network and any explicit management CIDR overrides"
+    APP_MANAGEMENT_CIDR="${addresses%% *}"
+    CORE_MANAGEMENT_CIDR="${addresses##* }"
+    log "Management addresses on $MANAGEMENT_VMNET: APP $APP_MANAGEMENT_CIDR; CORE $CORE_MANAGEMENT_CIDR"
+}
+
 validate_host_network_plan() {
     host_network_exists "$MANAGEMENT_VMNET" \
         || die "management network $MANAGEMENT_VMNET was not found in VMware Fusion"
@@ -454,10 +491,113 @@ destination.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 PY
 }
 
+fusion_bridge_status_is_healthy() {
+    local interfaces
+    interfaces="$(ifconfig -a)" || return 1
+    SF_FUSION_INTERFACES="$interfaces" python3 - "$VMWARE_NETWORKING_FILE" "$1" <<'PY'
+import ipaddress
+import os
+from pathlib import Path
+import re
+import sys
+
+values = dict(re.findall(r'^answer\s+(\S+)\s+(\S+)', Path(sys.argv[1]).read_text(), re.M))
+blocks = re.split(r'(?=^\S+: flags=)', os.environ['SF_FUSION_INTERFACES'], flags=re.M)
+checked = 0
+for line in sys.argv[2].splitlines():
+    if line == 'Some/All of the configured services are not running':
+        continue
+    if re.fullmatch(r'(DHCP|NAT) service on vmnet\d+ is running', line):
+        continue
+    if re.fullmatch(r'Hostonly virtual adapter on vmnet\d+ is enabled', line):
+        continue
+    match = re.fullmatch(r'Hostonly virtual adapter on vmnet(\d+) is disabled', line)
+    if not match:
+        raise SystemExit(1)
+    prefix = f'VNET_{match[1]}_'
+    if values.get(prefix + 'VIRTUAL_ADAPTER') != 'yes':
+        raise SystemExit(1)
+    try:
+        network = ipaddress.IPv4Network(values[prefix + 'HOSTONLY_SUBNET'] + '/' + values[prefix + 'HOSTONLY_NETMASK'])
+    except (KeyError, ValueError):
+        raise SystemExit(1)
+    found = False
+    for block in blocks:
+        if not re.match(r'bridge\d+: flags=[0-9a-fA-F]+<[^>]*\bUP\b', block):
+            continue
+        if not re.search(r'^\s+status: active$', block, re.M) or not re.search(r'^\s+member: vmenet\d+ ', block, re.M):
+            continue
+        for address, mask in re.findall(r'^\s+inet ([\d.]+) netmask (0x[0-9a-fA-F]+)', block, re.M):
+            if ipaddress.IPv4Address(address) == network.network_address + 1 and int(mask, 16) == int(network.netmask):
+                found = True
+    if not found:
+        raise SystemExit(1)
+    checked += 1
+raise SystemExit(0 if checked else 1)
+PY
+}
+
+fusion_start_networking() {
+    sudo "$FUSION_VMNET_CLI" --start && return 0
+    warn "Fusion service launcher failed; attempting direct DHCP/NAT startup with standard PID files"
+    local status vmnet feature binary pid attempt
+    local library="${FUSION_VMNET_CLI%/*}" preferences="${VMWARE_NETWORKING_FILE%/*}"
+    # Give partially started services time to register before deciding which
+    # daemons are missing. Never start DHCP/NAT on a network with them disabled.
+    sleep 2
+    status="$(trap - ERR; sudo "$FUSION_VMNET_CLI" --status 2>&1)" || true
+    while read -r vmnet; do
+        [[ "$vmnet" =~ ^vmnet[0-9]+$ ]] || continue
+        for feature in NAT DHCP; do
+            [[ "$(fusion_network_config_value "$vmnet" "$feature")" == yes ]] || continue
+            grep -Fxq "$feature service on $vmnet is running" <<<"$status" && continue
+            # Require an explicit missing-service report, not an unknown error.
+            grep -Fxq "$feature service on $vmnet is not running" <<<"$status" || return 1
+            if [[ "$feature" == NAT ]]; then binary=vmnet-natd; else binary=vmnet-dhcpd; fi
+            pid="/var/run/$binary-$vmnet.pid"
+            # A live PID may be a daemon still initializing. Do not launch a
+            # duplicate or remove an existing PID file in this recovery path.
+            if sudo test -e "$pid"; then
+                warn "Existing PID file $pid; refusing duplicate startup"
+                continue
+            fi
+            log "Starting $feature on $vmnet directly"
+            if [[ "$feature" == NAT ]]; then
+                sudo "$library/$binary" -c "$preferences/$vmnet/nat.conf" \
+                    -d "$pid" -m "$preferences/$vmnet/nat.mac" "$vmnet" || return 1
+            else
+                sudo "$library/$binary" -cf "$preferences/$vmnet/dhcpd.conf" \
+                    -lf "/var/db/vmware/$binary-$vmnet.leases" -pf "$pid" "$vmnet" || return 1
+            fi
+        done
+    done < <(sed -nE 's/^[[:space:]]*answer VNET_([0-9]+)_.*/vmnet\1/p' "$VMWARE_NETWORKING_FILE" | sort -u)
+    # Fusion owns host-adapter startup. Retry its launcher after the daemons
+    # register, then require full status success, including host adapters.
+    sleep 2
+    sudo "$FUSION_VMNET_CLI" --start || true
+    for attempt in 1 2 3 4 5; do
+        # macOS Bash can inherit ERR into this command substitution despite
+        # the outer conditional. A nonzero status is expected while polling;
+        # keep its output and exit code, but suppress the fatal handler here.
+        if status="$(trap - ERR; sudo "$FUSION_VMNET_CLI" --status 2>&1)"; then
+            log "Fusion networking recovered; configured services and host adapters are running"
+            return 0
+        fi
+        if fusion_bridge_status_is_healthy "$status"; then
+            log "Fusion services are running; host adapters verified through active macOS bridges"
+            return 0
+        fi
+        sleep 1
+    done
+    warn "$status"
+    warn "Direct service recovery did not restore all configured services and host adapters"
+    return 1
+}
+
 fusion_reload_networking() {
-    sudo "$FUSION_VMNET_CLI" --configure \
-        && sudo "$FUSION_VMNET_CLI" --stop \
-        && sudo "$FUSION_VMNET_CLI" --start
+    sudo "$FUSION_VMNET_CLI" --stop \
+        && sudo "$FUSION_VMNET_CLI" --configure \
+        && fusion_start_networking
 }
 
 fusion_restore_networking() {
@@ -482,17 +622,19 @@ apply_host_network_plan() {
     log "Creating isolated $HITL_VMNET; macOS may request an administrator password"
     if ! sudo install -o root -g wheel -m 0644 "$candidate" "$VMWARE_NETWORKING_FILE" \
         || ! fusion_reload_networking; then
-        fusion_restore_networking "$backup" || true
+        fusion_restore_networking "$backup" \
+            || die "could not apply Fusion networking, and rollback could not restart the previous networks. Backup: $backup. Installer ownership state was retained. Inspect Fusion DHCP/NAT service logs before retrying."
         INSTALLER_CREATED_HITL_VMNET=""
         write_state
-        die "could not apply the VMware Fusion network configuration"
+        die "could not apply the VMware Fusion network configuration; the previous configuration was restored and restarted"
     fi
     local attempt
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         fusion_hitl_network_is_safe "$HITL_VMNET" && return
         sleep 1
     done
-    fusion_restore_networking "$backup" || true
+    fusion_restore_networking "$backup" \
+        || die "Fusion did not activate $HITL_VMNET, and rollback failed. Backup: $backup. Installer ownership state was retained."
     INSTALLER_CREATED_HITL_VMNET=""
     write_state
     die "Fusion did not activate $HITL_VMNET as an isolated network; the previous configuration was restored"

@@ -34,6 +34,22 @@ caf_generate() {
 validate_caf() {
     [[ "$CYBER_AGENT_FLOW" == 0 || "$CYBER_AGENT_FLOW" == 1 ]] || die 'cyber_agent_flow must be true or false'
     [[ "$CYBER_AGENT_FLOW" == 1 ]] || return 0
+    if [[ "${PARTICIPANT_MEMORY_MB:-0}" =~ ^[0-9]+$ ]] && (( ${PARTICIPANT_MEMORY_MB:-0} < 4096 )); then
+        log 'CyberAgentFlow enabled; allocating 4096 MB RAM to the participant VM.'
+        PARTICIPANT_MEMORY_MB=4096
+    fi
+    # CyberAgentFlow is a Kali-only participant option. Select Kali here, after
+    # config and CLI processing, so the default participant_os=debian in the
+    # example config cannot accidentally reject an otherwise valid setup.
+    if [[ "$PARTICIPANT_OS" != kali ]]; then
+        log 'CyberAgentFlow enabled; selecting Kali for the participant VM.'
+        PARTICIPANT_OS=kali
+        # Debian's default disk is smaller than Kali's minimum. Preserve an
+        # explicit Kali-sized choice, but make the automatic selection usable.
+        if [[ "${PARTICIPANT_DISK_GB:-0}" =~ ^[0-9]+$ ]] && (( PARTICIPANT_DISK_GB < 25 )); then
+            PARTICIPANT_DISK_GB=40
+        fi
+    fi
     caf_generate validate || die 'invalid CyberAgentFlow / LLM network configuration'
 }
 

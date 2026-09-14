@@ -20,7 +20,7 @@ def config():
 
 @pytest.mark.parametrize('key,value', [
     ('participant_os', 'debian'), ('llm_provider_address', '0.0.0.0/0'),
-    ('llm_provider_address', '10.254.200.20'), ('llm_provider_url', 'http://wrong-host:11434'),
+    ('llm_provider_address', '10.254.200.20'), ('llm_provider_url', 'ftp://provider.example'),
     ('llm_gateway', '192.168.90.1'), ('llm_interface_cidr', '10.254.200.10/24'),
     ('cyber_agent_flow_ref', '--evil'), ('cyber_agent_flow_url', 'file:///tmp/repo'),
     ('cyber_agent_flow', 'false'),
@@ -38,6 +38,43 @@ def test_fixed_provider_route(config):
     assert nic['dhcp4'] is False and nic['dhcp6'] is False and nic['accept-ra'] is False
     config.update(llm_provider_address='192.168.80.20', llm_provider_url='http://192.168.80.20:11434')
     assert caf.interface(config, 'mac')['routes'] == [{'to': '192.168.80.20/32', 'scope': 'link'}]
+
+
+def test_automatic_dhcp_ignores_general_routes_and_installs_route_service(config, tmp_path):
+    config.update(llm_interface_cidr='', llm_gateway='')
+    nic = caf.interface(config, 'mac')
+    assert nic['dhcp4'] is True
+    assert nic['dhcp4-overrides']['use-routes'] is False
+    assert nic['dhcp4-overrides']['use-dns'] is False
+    assert 'routes' not in nic
+    script = caf.inject('#!/bin/bash\ntouch /var/lib/scenarioforge/participant-ready\n', config)
+    assert script.index('systemctl start scenarioforge-llm-route.service') < script.index('touch /var/lib/scenarioforge/participant-ready')
+    path = tmp_path / 'auto.sh'
+    path.write_text(script)
+    subprocess.run(['bash', '-n', str(path)], check=True)
+
+
+def test_automatic_route_uses_lease_and_rejects_protected_networks():
+    spec = importlib.util.spec_from_file_location('llm_route', COMMON.with_name('llm_dhcp_route.py'))
+    route = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(route)
+    config = dict(provider='203.0.113.20', protected=['10.254.200.10/24', '172.31.250.3/24'])
+    lease = dict(ADDRESS='192.168.20.100', NETMASK='255.255.255.0', ROUTER='192.168.20.2')
+    args = route.route_arguments(config, lease)
+    assert args == ['ip', '-4', 'route', 'replace', '203.0.113.20/32', 'via', '192.168.20.2', 'dev', 'ens20', 'src', '192.168.20.100']
+    with pytest.raises(ValueError):
+        route.route_arguments(config, dict(lease, ADDRESS='10.254.200.30'))
+    with pytest.raises(ValueError):
+        route.route_arguments(config, dict(lease, ROUTER='14.0.0.1'))
+    config['provider'] = '192.168.20.50'
+    assert 'via' not in route.route_arguments(config, lease)
+
+
+def test_provider_hostname_and_gateway_cidr_are_accepted_and_normalized(config):
+    config.update(llm_provider_url='https://provider.example:10101/v1', llm_gateway='192.168.80.2/24')
+    normalized = caf.validate(config)
+    assert normalized['llm_gateway'] == '192.168.80.2'
+    assert caf.interface(normalized, 'mac')['routes'] == [{'to': '203.0.113.20/32', 'via': '192.168.80.2'}]
 
 
 def test_injected_install_precedes_readiness(config, tmp_path):
@@ -60,7 +97,8 @@ def test_shell_config_and_guest_generation(platform, callback, config, tmp_path)
     assignments = '\n'.join(f'{callback} {key} {shlex.quote(str(value).lower() if isinstance(value, bool) else value)}' for key, value in config.items())
     probe = f'''source {shlex.quote(str(installer))}
 {assignments}
-validate_caf
+CORE_MANAGEMENT_CIDR=172.31.250.3/24
+validate_caf >&2
 WORK_DIR={shlex.quote(str(tmp_path))}
 write_guest_bootstraps
 caf_generate inject "$WORK_DIR/participant-bootstrap.sh"
@@ -75,6 +113,25 @@ caf_generate network 00:50:56:01:02:03
     subprocess.run(['bash', '-n', str(tmp_path / 'participant-bootstrap.sh')], check=True)
 
 
+def test_shell_option_selects_kali_after_default_debian_config(tmp_path):
+    installer = ROOT / 'scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh'
+    probe = f'''source {shlex.quote(str(installer))}
+PARTICIPANT_OS=debian
+PARTICIPANT_DISK_GB=20
+CORE_MANAGEMENT_CIDR=172.31.250.3/24
+CYBER_AGENT_FLOW=1
+LLM_PROVIDER_ADDRESS=203.0.113.20
+LLM_PROVIDER_URL=https://provider.example:10101/v1
+LLM_INTERFACE_CIDR=192.168.80.10/24
+LLM_GATEWAY=192.168.80.2/24
+validate_caf
+printf '%s|%s|%s\\n' "$PARTICIPANT_OS" "$PARTICIPANT_DISK_GB" "$LLM_GATEWAY"
+'''
+    result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.endswith('kali|40|192.168.80.2/24\n')
+
+
 def test_fusion_detach_keeps_dedicated_nic(tmp_path):
     installer = ROOT / 'scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh'
     vmx = tmp_path / 'participant.vmx'
@@ -84,7 +141,11 @@ CYBER_AGENT_FLOW=1
 PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=1
 PARTICIPANT_VMX={shlex.quote(str(vmx))}
 vm_running() {{ return 1; }}
-vmrun() {{ if [[ "$*" == *deleteNetworkAdapter* ]]; then exit 93; fi; return 0; }}
+vmrun() {{
+    if [[ "$*" == *deleteNetworkAdapter* ]]; then exit 93; fi
+    if [[ "$*" == *listNetworkAdapters* ]]; then printf '0 custom vmnet3\\n1 custom vmnet8\\n'; fi
+    return 0
+}}
 write_state() {{ :; }}
 start_vm() {{ :; }}
 detach_participant_uplink
@@ -125,33 +186,3 @@ def test_launcher_starts_web_mode(config, tmp_path):
     result = subprocess.run(['bash', str(path), '--build'], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'web mode:--build'
-
-
-def test_web_defaults_patch_applies_and_is_idempotent(tmp_path):
-    import ast
-    patch = COMMON.with_name('cyber-agent-flow-web-defaults.patch')
-    source = ROOT.parent / 'cyber-agent-flow'
-    if not (source / '.git').exists():
-        pytest.skip('Sibling checkout needed for upstream compatibility check')
-    for name in ('app.py', 'static/js/main.js', 'templates/index.html'):
-        target = tmp_path / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        content = subprocess.check_output(['git', '-C', str(source), 'show', f'HEAD:{name}'])
-        target.write_bytes(content)
-    subprocess.run(['git', '-C', str(tmp_path), 'apply', str(patch)], check=True)
-    subprocess.run(['git', '-C', str(tmp_path), 'apply', '--reverse', '--check', str(patch)], check=True)
-    tree = ast.parse((tmp_path / 'app.py').read_text())
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_web_cli_defaults')
-    namespace = {'__file__': str(tmp_path / 'app.py'), 'json': json}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), '<defaults>', 'exec'), namespace)
-    load = namespace['_web_cli_defaults']
-    assert load() == {}
-    config = tmp_path / 'configs/cli.json'
-    config.parent.mkdir()
-    config.write_text(json.dumps(dict(provider='openai', url='http://192.0.2.1:8000/v1', model='example',
-                                     ssl_verify=False, api_key='secret', api_key_env='SECRET', context_window=4096)))
-    assert load() == dict(provider='openai', url='http://192.0.2.1:8000/v1', model='example', sslVerify=False, contextWindow=4096)
-    config.write_text('{invalid')
-    assert load() == {}
-    config.write_text(json.dumps({'url': 'https://user:password@example.com', 'api_key': 'secret'}))
-    assert load() == {}

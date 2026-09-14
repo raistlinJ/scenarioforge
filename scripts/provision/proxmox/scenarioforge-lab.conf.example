@@ -7,23 +7,31 @@
 # Precedence: built-in defaults < this file < SF_* environment < CLI flags.
 # If passwords are stored here, protect the copy with: chmod 600 FILE
 
+# --- VM disk and cloud-init snippet storage ---
 storage=local-lvm
 snippet_storage=local
+
+# --- Host network bridges ---
 uplink_bridge=vmbr0
 management_bridge=sfmgmt0
 hitl_bridge=sfhitl0
 
+# --- Virtual machine identifiers ---
 core_vmid=9401
 app_vmid=9402
 participant_vmid=9403
+
+# --- Participant operating system ---
 # debian (minimal XFCE) or kali (XFCE and standard Kali tools)
 participant_os=debian
 
+# --- VM network addresses ---
 app_management_cidr=172.31.250.2/24
 core_management_cidr=172.31.250.3/24
 core_hitl_cidr=10.254.200.3/24
 participant_cidr=10.254.200.10/24
 
+# --- SSH access and login credentials ---
 ssh_public_key=
 # CORE VM login username: corevm
 core_password=
@@ -34,37 +42,55 @@ participant_password=
 # ScenarioForge Web UI administrator username: coreadmin
 web_admin_password=
 
+# --- Source versions ---
 core_minimal_ref=main
 core_ref=master
 scenarioforge_ref=main
 flag_generators_ref=5f612eecb8ff5df74a0e517d0de1e54385a62044
 
+# --- Optional lab content ---
 flag_generators=true
 vulnhub=true
+
+# --- Provisioning wait behavior ---
 wait_minutes=90
 no_wait=false
+
+# --- Logging and status monitoring ---
 verbose=false
 watch=false
 interval=10
+
+# --- Confirmation and execution controls ---
 yes=false
 dry_run=false
 force=false
 
 # --- Optional CyberAgentFlow and dedicated LLM interface (Kali only) ---
-# Set participant_os=kali above and enable this to install the application.
+# Enabling CyberAgentFlow allocates at least 4096 MB RAM to the participant.
+# Enabling this selects Kali automatically, even if participant_os is left at
+# its default Debian value above.
 # Source is the project at ../cyber-agent-flow; guests clone its upstream repo.
 cyber_agent_flow=false
 cyber_agent_flow_url=https://github.com/raistlinJ/cyber-agent-flow.git
 cyber_agent_flow_ref=main
-# Fixed IPv4 destination; the URL must use this same IP (no hostname resolution).
+
+# --- LLM provider connection ---
+# Fixed IPv4 route destination. The URL can use this IP or a hostname that
+# resolves to it when the Kali guest is provisioned.
 llm_provider_address=
 llm_provider_url=
 llm_provider_type=ollama_direct
 llm_model=
-# Reserve an unused static guest address on the selected egress network.
-# Set its real gateway; no default route or DHCP is enabled on this interface.
-llm_interface_cidr=
-llm_gateway=
+
+# --- Dedicated LLM interface and routing ---
+# Automatic: DHCP on llm_bridge supplies the dedicated interface address/gateway.
+# A DHCP server must be available on that bridge. Only the provider host route
+# is installed; DHCP default routes and DNS settings are ignored.
+# Advanced static overrides: do not change unless you understand the network.
+# Set BOTH only when DHCP is unavailable, using a reserved address and real gateway.
+# llm_interface_cidr=
+# llm_gateway=
 # Existing uplink bridge with access to the provider, separate from HITL/management.
 # Empty uses uplink_bridge; a supplied bridge must already exist.
 llm_bridge=

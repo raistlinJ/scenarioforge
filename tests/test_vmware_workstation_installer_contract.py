@@ -328,7 +328,7 @@ def test_progress_credentials_and_cleanup_guards_are_present() -> None:
     root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for expected in (
-        "Guest bootstrap (elapsed $elapsed): CORE=${cp}% APP=${ap}% PARTICIPANT=${pp}%",
+        "Guest bootstrap (elapsed $elapsed): CORE=${cp}%${cp_availability} APP=${ap}%${ap_availability} PARTICIPANT=${pp}%${pp_availability}",
         "ScenarioForge VMware lab installation complete",
         "CORE VM:",
         "APP VM:",
@@ -371,6 +371,7 @@ SCENARIOFORGE_VMWARE_RUNTIME_STATUS_FILE={shlex.quote(str(runtime))}
 source {shlex.quote(str(INSTALLER))}
 parse_args install --dry-run --yes --lab-dir {shlex.quote(str(lab_dir))}
 require_linux_workstation() {{ :; }}
+derive_workstation_management_addresses() {{ APP_MANAGEMENT_CIDR=172.31.250.2/24; CORE_MANAGEMENT_CIDR=172.31.250.3/24; }}
 host_network_exists() {{ return 0; }}
 validate_hitl_isolation() {{ :; }}
 workstation_hitl_network_is_safe() {{ return 0; }}

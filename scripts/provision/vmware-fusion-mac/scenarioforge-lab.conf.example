@@ -7,13 +7,23 @@
 # Precedence: built-in defaults < this file < SF_* environment < CLI flags.
 # If passwords are stored here, protect the copy with: chmod 600 FILE
 
+# --- Lab files and storage ---
 # Omit lab_dir to use: ~/Virtual Machines.localized/ScenarioForge-Lab
 # lab_dir="/absolute/path/to/ScenarioForge-Lab"
+
+# --- Management network ---
 # Management connects APP and CORE; an enabled host virtual adapter also
 # lets your host reach those VMs. This network must already be configured:
 # setting management_vmnet=vmnet3 does NOT create vmnet3 automatically.
 management_vmnet=vmnet1
+# APP/CORE management addresses are derived from this network's subnet,
+# outside its DHCP pool and known reservations. Responding hosts are skipped;
+# offline or silent static hosts cannot be detected, so reserve these addresses.
+# Advanced overrides must match that subnet and avoid DHCP/reserved addresses:
+# app_management_cidr=
+# core_management_cidr=
 
+# --- Isolated HITL exercise network ---
 # HITL connects CORE and the participant on a separate exercise network.
 # With managed HITL creation enabled (see manage_hitl_network), an unused
 # hitl_vmnet=vmnet3 is created automatically with DHCP, NAT, and host access
@@ -25,11 +35,11 @@ hitl_vmnet=vmnet2
 # When omitted, interactive installs propose and confirm the change.
 # manage_hitl_network=true
 
-app_management_cidr=172.31.250.2/24
-core_management_cidr=172.31.250.3/24
+# --- VM network addresses ---
 core_hitl_cidr=10.254.200.3/24
 participant_cidr=10.254.200.10/24
 
+# --- SSH access and login credentials ---
 ssh_public_key=
 # CORE VM login username: corevm
 core_password=
@@ -40,43 +50,63 @@ participant_password=
 # ScenarioForge Web UI administrator username: coreadmin
 web_admin_password=
 
+# --- Source versions ---
 core_minimal_ref=main
 core_ref=master
 scenarioforge_ref=main
 flag_generators_ref=5f612eecb8ff5df74a0e517d0de1e54385a62044
 
+# --- Optional lab content ---
 flag_generators=true
 vulnhub=true
+
+# --- Provisioning wait behavior ---
 wait_minutes=90
 no_wait=false
+
+# --- VM display and host shortcuts ---
 headless=false
 # Host shortcuts for the web UI and participant VM (independent of headless).
 desktop_shortcut=true
+
+# --- Logging and status monitoring ---
 verbose=false
 watch=false
 interval=10
+
+# --- Confirmation and execution controls ---
 yes=false
 dry_run=false
 force=false
 
+# --- Participant operating system ---
 # Participant: debian (default) or kali; both use 2048 MB RAM.
 participant_os=debian
 
 # --- Optional CyberAgentFlow and dedicated LLM interface (Kali only) ---
-# Set participant_os=kali above and enable this to install the application.
+# Enabling CyberAgentFlow allocates at least 4096 MB RAM to the participant.
+# Enabling this selects Kali automatically, even if participant_os is left at
+# its default Debian value above.
 # Source is the project at ../cyber-agent-flow; guests clone its upstream repo.
 cyber_agent_flow=false
 cyber_agent_flow_url=https://github.com/raistlinJ/cyber-agent-flow.git
 cyber_agent_flow_ref=main
-# Fixed IPv4 destination; the URL must use this same IP (no hostname resolution).
+
+# --- LLM provider connection ---
+# Fixed IPv4 route destination. The URL can use this IP or a hostname that
+# resolves to it when the Kali guest is provisioned.
 llm_provider_address=
 llm_provider_url=
 llm_provider_type=ollama_direct
 llm_model=
-# Reserve an unused static guest address on the selected egress network.
-# Set its real gateway; no default route or DHCP is enabled on this interface.
-llm_interface_cidr=
-llm_gateway=
+
+# --- Dedicated LLM interface and routing ---
+# The installer selects an address outside the NAT vmnet's DHCP pool and reads
+# its actual NAT gateway. Provider address/URL above are still required.
+# Advanced overrides: do not change unless you understand this vmnet's routing.
+# Overrides must match its subnet/gateway; silent/offline hosts may not be detected.
+# llm_interface_cidr=
+# llm_gateway=
 # Existing NAT/custom network with access to the provider, separate from HITL/management.
 llm_vmnet=vmnet8
 # Example: provider 192.0.2.20, URL https://192.0.2.20:443/v1.

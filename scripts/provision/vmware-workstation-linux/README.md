@@ -1,5 +1,17 @@
 # ScenarioForge three-VM installer for VMware Workstation on Linux
 
+CyberAgentFlow provisioning installs and verifies the guest Python environment before
+marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
+participant desktop and in its applications menu. These changes apply when the
+guest is provisioned; existing VMs are not automatically updated.
+
+Host app and participant VM shortcuts are created immediately after VM creation,
+before bootstrap waits. Run `status` to recreate missing owned shortcuts. Management
+addresses default to selection from `management_vmnet`, outside DHCP pools and
+known reservations. Remove old `app_management_cidr` / `core_management_cidr` entries
+to opt in; explicit overrides must match the network. Ping checks cannot detect
+silent or offline hosts, so reserve the selected addresses.
+
 This installer creates the same graphical lab as the Proxmox installer on an
 x86_64 Linux workstation:
 
@@ -383,9 +395,9 @@ and retry. Review the error and run cleanup again after resolving the failure.
 
 ## Optional CyberAgentFlow on Kali
 
-Set `participant_os=kali` and `cyber_agent_flow=true` in the grouped example
-config section (Windows JSON uses `"participant_os": "kali"` and
-`"cyber_agent_flow": true`). The shell installers also accept
+Set `cyber_agent_flow=true` in the grouped example config section (Windows JSON
+uses `"cyber_agent_flow": true`). This selects a Kali participant automatically.
+The shell installers also accept
 `--cyber-agent-flow`; Windows accepts `-CyberAgentFlow`.
 
 Setup clones `https://github.com/raistlinJ/cyber-agent-flow.git`, the upstream
@@ -399,7 +411,7 @@ Configure these values before enabling the option:
 | Setting | Meaning |
 | --- | --- |
 | `llm_provider_address` | Fixed IPv4 address of the external LLM provider |
-| `llm_provider_url` | Full HTTP(S) endpoint using that same IP, including port/path |
+| `llm_provider_url` | Full HTTP(S) endpoint, using the IP or a hostname that resolves to it |
 | `llm_provider_type` | `ollama_direct`, `litellm`, `openai`, or `claude` |
 | `llm_model` | Model name used by CyberAgentFlow |
 | `llm_interface_cidr` | Reserved, unused static address/prefix for Kali on the egress network |
@@ -424,10 +436,9 @@ automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are
-placed in the provisioning config. The WebUI uses `configs/cli.json` for initial provider, URL, model, TLS, and
-limit settings; existing browser-saved settings take precedence. API keys are
-not embedded in the page. Provisioning applies a bundled compatibility patch
-for this behavior and skips it if the same patch is already present upstream.
+placed in the provisioning config. The WebUI uses `configs/cli.json` for initial
+provider, URL, model, TLS, and limit settings; existing browser-saved settings
+take precedence. API keys are not embedded in the page.
 
 This option applies to new labs; cleanup removes the extra NIC with its VM and
 preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existing
