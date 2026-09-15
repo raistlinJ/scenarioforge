@@ -16,6 +16,17 @@ INSTALLER = ROOT / "scripts" / "provision" / "proxmox" / "install-scenarioforge-
 CONFIG_EXAMPLE = ROOT / "scripts" / "provision" / "proxmox" / "scenarioforge-lab.conf.example"
 
 
+@pytest.mark.parametrize('seat,xorg,lightdm,expected', [('no', 1, 0, 1), ('yes', 1, 0, 1), ('yes', 0, 1, 1), ('yes', 0, 0, 0)])
+def test_participant_display_requires_graphical_seat_and_xserver(seat, xorg, lightdm, expected):
+    source = INSTALLER.read_text()
+    function = source.split('participant_display_ready() {', 1)[1].split('\n}', 1)[0]
+    script = (f'systemctl() {{ return {lightdm}; }}\n'
+              f'loginctl() {{ echo {seat}; }}\n'
+              f'pgrep() {{ return {xorg}; }}\n'
+              'participant_display_ready() {' + function + '\n}\nparticipant_display_ready')
+    assert subprocess.run(['bash', '-c', script]).returncode == expected
+
+
 def test_installer_has_valid_bash_syntax() -> None:
     result = subprocess.run(
         ["bash", "-n", str(INSTALLER)],

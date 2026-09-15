@@ -1655,11 +1655,11 @@ else
         dbus-x11 lightdm lightdm-gtk-greeter xfce4 xorg \
         xserver-xorg-input-all xserver-xorg-video-all xterm
 fi
-if [[ "$ID" == kali ]] && systemd-detect-virt --quiet --vm \
-    && [[ "$(systemd-detect-virt)" == vmware && "$(uname -r)" == *cloud* ]]; then
+# All participant desktops need graphics drivers, including Proxmox/KVM.
+if [[ "$ID" == kali && "$(uname -r)" == *cloud* ]]; then
     [[ ! -f /var/lib/scenarioforge/participant-kernel-reboot ]] \
         || fail_bootstrap 'Kali did not boot the full kernel after reboot'
-    set_bootstrap_status 75 'installing the full Kali kernel for VMware graphics'
+    set_bootstrap_status 75 'installing the full Kali kernel for desktop graphics'
     architecture="$(dpkg --print-architecture)"
     case "$architecture" in amd64|arm64) ;; *) fail_bootstrap 'unsupported Kali architecture' ;; esac
     apt-get install -y "linux-image-$architecture"
@@ -1702,6 +1702,22 @@ if ! systemctl is-active --quiet lightdm; then
     journalctl -u lightdm -n 100 --no-pager || true
     tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
     fail_bootstrap 'participant XFCE graphical login did not become active'
+fi
+
+participant_display_ready() {
+    systemctl is-active --quiet lightdm \
+        && [[ "$(loginctl show-seat seat0 -p CanGraphical --value 2>/dev/null)" == yes ]] \
+        && pgrep -x Xorg >/dev/null
+}
+for attempt in $(seq 1 30); do
+    participant_display_ready && break
+    sleep 2
+done
+if ! participant_display_ready; then
+    uname -r
+    loginctl seat-status seat0 || true
+    tail -n 100 /var/log/lightdm/lightdm.log /var/log/lightdm/x-0.log 2>/dev/null || true
+    fail_bootstrap 'participant has no running graphical display; check the kernel graphics driver and LightDM logs'
 fi
 
 if [[ -f /etc/systemd/system/scenarioforge-participant-bootstrap.service ]]; then
@@ -2199,6 +2215,8 @@ detach_participant_bootstrap_uplink() {
     fi
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
     write_state
+    log "Rebooting participant into its graphical login after removing the temporary uplink"
+    run qm reboot "$PARTICIPANT_VMID" --timeout 120
 }
 
 wait_for_provisioning() {

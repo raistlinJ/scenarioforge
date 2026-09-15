@@ -66,6 +66,13 @@ the uplink bridge. The installer removes that virtual NIC before declaring the
 lab complete. Even with `--no-wait`, it waits for this isolation-critical step;
 only the longer CORE and app provisioning continue in the background.
 
+For Kali, the installer replaces the cloud kernel with the full architecture
+kernel and reboots before finishing desktop setup. The cloud kernel can leave
+LightDM running without a graphical seat or X server. The installer checks both
+before marking the participant ready and removing its temporary Internet adapter.
+After adapter removal, it reboots the participant into the graphical login.
+Use Proxmox's noVNC console to view the desktop; the serial console remains text-only.
+
 ## Before running
 
 Run on the target Proxmox node as `root`. The node needs:

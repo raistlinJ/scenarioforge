@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -180,9 +181,26 @@ create_vms
 def test_launcher_starts_web_mode(config, tmp_path):
     generated = caf.inject('touch /var/lib/scenarioforge/participant-ready\n', config)
     launcher = generated.split("<<'CAF_LAUNCH'\n", 1)[1].split('\nCAF_LAUNCH', 1)[0]
-    (tmp_path / 'start_ws.sh').write_text('#!/bin/bash\nprintf "web mode:%s\\n" "$*"\n')
+    (tmp_path / 'start_ws.sh').write_text('#!/bin/bash\n[[ "$VIRTUAL_ENV" == /opt/cyber-agent-flow/venv ]] || exit 91\n[[ "$PATH" == "$VIRTUAL_ENV/bin:"* ]] || exit 92\nprintf "web mode:%s\\n" "$*"\n')
     path = tmp_path / 'launcher'
     path.write_text(launcher.replace('cd /opt/cyber-agent-flow', f'cd {shlex.quote(str(tmp_path))}'))
     result = subprocess.run(['bash', str(path), '--build'], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'web mode:--build'
+
+
+def test_launcher_child_resolves_python_from_virtual_environment(config, tmp_path):
+    generated = caf.inject('touch /var/lib/scenarioforge/participant-ready\n', config)
+    launcher = generated.split("<<'CAF_LAUNCH'\n", 1)[1].split('\nCAF_LAUNCH', 1)[0]
+    bindir = tmp_path / 'venv/bin'
+    bindir.mkdir(parents=True)
+    python = bindir / 'python3'
+    python.write_text('#!/bin/bash\n[[ -z "${PYTHONHOME+x}" ]] || exit 93\necho venv-child\n')
+    python.chmod(0o755)
+    (tmp_path / 'start_ws.sh').write_text('#!/bin/bash\nbash -c "python3"\n')
+    path = tmp_path / 'launcher'
+    path.write_text(launcher.replace('/opt/cyber-agent-flow', str(tmp_path)))
+    result = subprocess.run(['bash', str(path)], env={**os.environ, 'PYTHONHOME': '/invalid'},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'venv-child'

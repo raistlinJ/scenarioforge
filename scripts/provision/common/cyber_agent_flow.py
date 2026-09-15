@@ -125,7 +125,7 @@ done
     addition = f'''
 set_bootstrap_status 90 'installing CyberAgentFlow'
 [[ "$ID" == kali ]] || fail_bootstrap 'CyberAgentFlow requires Kali'
-apt-get install -y git ca-certificates python3-venv python3-dev build-essential xdotool x11-utils python3-psutil npm
+apt-get install -y git ca-certificates python3-venv python3-dev python3-yaml build-essential xdotool x11-utils python3-psutil npm curl xdg-utils
 if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed ]]; then
     if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-source-ready ]]; then
         [[ ! -e /opt/cyber-agent-flow ]] || fail_bootstrap '/opt/cyber-agent-flow already exists; inspect the incomplete installation'
@@ -134,10 +134,14 @@ if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed ]]; then
     fi
     git -C /opt/cyber-agent-flow fetch origin {q(c['cyber_agent_flow_ref'])}
     git -C /opt/cyber-agent-flow checkout --detach FETCH_HEAD
+    # CyberAgentFlow uses the MCP v1 decorator API; v2 is incompatible.
+    printf 'mcp>=1.28,<2\n' > /opt/cyber-agent-flow/scenarioforge-constraints.txt
+    export PIP_CONSTRAINT=/opt/cyber-agent-flow/scenarioforge-constraints.txt
     bash /opt/cyber-agent-flow/install_prerequisites.sh
     # Do not trust prerequisite scripts that can warn and skip pip setup.
     /opt/cyber-agent-flow/venv/bin/python -m pip install -r /opt/cyber-agent-flow/requirements.txt
     /opt/cyber-agent-flow/venv/bin/python -m pip check
+    /opt/cyber-agent-flow/venv/bin/python -c "from mcp.server import Server; assert callable(Server('provision-check').list_tools)"
     /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'"
     cat > /opt/cyber-agent-flow/configs/cli.json <<'CAF_CONFIG'
 {json.dumps(cli, indent=2)}
@@ -158,17 +162,26 @@ fi
 ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev ens20( |$)' || fail_bootstrap 'LLM provider traffic is not routed through ens20'
 cat > /usr/local/bin/cyber-agent-flow <<'CAF_LAUNCH'
 #!/bin/bash
+set -e
 cd /opt/cyber-agent-flow
+# MCP children invoke Python through PATH, so export the environment to them.
+unset PYTHONHOME
+export VIRTUAL_ENV=/opt/cyber-agent-flow/venv
+export PATH="$VIRTUAL_ENV/bin:$PATH"
 exec bash ./start_ws.sh "$@"
 CAF_LAUNCH
 chmod 0755 /usr/local/bin/cyber-agent-flow
+cat > /usr/local/bin/cyber-agent-flow-desktop <<'CAF_DESKTOP_LAUNCH'
+{Path(__file__).with_name('cyber-agent-flow-desktop.sh').read_text()}
+CAF_DESKTOP_LAUNCH
+chmod 0755 /usr/local/bin/cyber-agent-flow-desktop
 install -d -o participant -g participant -m 0755 /home/participant/Desktop
 cat > /home/participant/Desktop/cyber-agent-flow.desktop <<'CAF_DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=CyberAgentFlow Web
 Comment=Start the CyberAgentFlow web server
-Exec=/usr/local/bin/cyber-agent-flow
+Exec=/usr/local/bin/cyber-agent-flow-desktop
 Path=/opt/cyber-agent-flow
 Icon=utilities-terminal
 Terminal=true
@@ -178,6 +191,23 @@ CAF_DESKTOP
 chown participant:participant /home/participant/Desktop/cyber-agent-flow.desktop
 chmod 0755 /home/participant/Desktop/cyber-agent-flow.desktop
 install -m 0644 /home/participant/Desktop/cyber-agent-flow.desktop /usr/share/applications/cyber-agent-flow.desktop
+cat > /usr/local/sbin/update-llm-destination <<'CAF_UPDATE_SCRIPT'
+{Path(__file__).with_name('update-llm-destination.py').read_text()}
+CAF_UPDATE_SCRIPT
+chmod 0755 /usr/local/sbin/update-llm-destination
+cat > /home/participant/Desktop/update-llm-destination.desktop <<'CAF_UPDATE_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Update LLM Destination
+Comment=Update CyberAgentFlow endpoint and dedicated route
+Exec=sudo /usr/local/sbin/update-llm-destination
+Icon=network-wired
+Terminal=true
+Categories=Network;
+CAF_UPDATE_DESKTOP
+chown participant:participant /home/participant/Desktop/update-llm-destination.desktop
+chmod 0755 /home/participant/Desktop/update-llm-destination.desktop
+install -m 0644 /home/participant/Desktop/update-llm-destination.desktop /usr/share/applications/update-llm-destination.desktop
 '''
     marker = 'touch /var/lib/scenarioforge/participant-ready'
     if script.count(marker) != 1:
