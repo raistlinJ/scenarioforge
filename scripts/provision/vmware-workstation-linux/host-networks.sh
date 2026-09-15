@@ -8,6 +8,25 @@ WORKSTATION_PLANNED_HITL_SUBNET=""
 WORKSTATION_PLANNED_HITL_NETMASK=""
 KEEP_HITL_NETWORK=0
 
+workstation_require_network_inventory() {
+    [[ -f "$VMWARE_NETWORKING_FILE" && -r "$VMWARE_NETWORKING_FILE" \
+        && -r "${VMWARE_NETWORKING_FILE%/*}" && -x "${VMWARE_NETWORKING_FILE%/*}" ]] \
+        || die "cannot inspect VMware host networks: cannot read $VMWARE_NETWORKING_FILE or its directory"
+    grep -Eq '^VERSION=1,0[[:space:]]*$' "$VMWARE_NETWORKING_FILE" \
+        || die "cannot inspect VMware host networks: invalid or unsupported configuration in $VMWARE_NETWORKING_FILE"
+}
+
+workstation_vmnet_is_bridged() {
+    local number="${1#vmnet}"
+    # Linux stores explicit mappings separately from VNET_N_* settings.
+    [[ "$number" == 0 ]] || awk -v number="$number" '
+        $1 == "add_bridge_mapping" && $3 == number { found=1 }
+        $1 == "answer" && $2 == "VNL_DEFAULT_BRIDGE_VNET" && $3 == number { found=1 }
+        $1 == "answer" && $2 == "VNET_" number "_INTERFACE" { found=1 }
+        END { exit !found }
+    ' "$VMWARE_NETWORKING_FILE"
+}
+
 workstation_network_config_value() {
     local vmnet="$1" key="$2" number
     number="${vmnet#vmnet}"
@@ -17,29 +36,27 @@ workstation_network_config_value() {
 }
 
 workstation_hitl_network_is_safe() {
-    local vmnet="$1" row dhcp nat adapter subnet
+    local vmnet="$1" dhcp nat adapter subnet
     [[ "$vmnet" =~ ^vmnet[0-9]+$ && -r "$VMWARE_NETWORKING_FILE" ]] || return 1
-    row="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null \
-        | awk -v wanted="$vmnet" '$2 == wanted {print; exit}')" || return 1
-    [[ -n "$row" ]] || return 1
-    if [[ -n "$row" ]]; then
-        [[ "$(awk '{print $4}' <<<"$row")" == false ]] || return 1
-        [[ "$(awk '{print $3}' <<<"$row")" != nat \
-            && "$(awk '{print $3}' <<<"$row")" != bridged ]] || return 1
+    workstation_require_network_inventory
+    workstation_vmnet_is_bridged "$vmnet" && return 1
+    # Reject conflicting enabled entries even if a later duplicate says no.
+    if grep -Eq "^[[:space:]]*answer[[:space:]]+VNET_${vmnet#vmnet}_(DHCP|NAT|VIRTUAL_ADAPTER)[[:space:]]+yes([[:space:]]|$)" "$VMWARE_NETWORKING_FILE"; then
+        return 1
     fi
     dhcp="$(workstation_network_config_value "$vmnet" DHCP)"
     nat="$(workstation_network_config_value "$vmnet" NAT)"
     adapter="$(workstation_network_config_value "$vmnet" VIRTUAL_ADAPTER)"
     subnet="$(workstation_network_config_value "$vmnet" HOSTONLY_SUBNET)"
-    [[ "$dhcp" == no && "$nat" != yes && "$adapter" == no && -n "$subnet" ]]
+    [[ "$dhcp" == no && ( "$nat" == no || -z "$nat" ) && "$adapter" == no && -n "$subnet" ]]
 }
 
 workstation_vmnet_is_configured() {
-    local vmnet="$1" number networks
+    local vmnet="$1" number
+    [[ "$vmnet" =~ ^vmnet[0-9]+$ ]] || return 1
+    workstation_require_network_inventory
     number="${vmnet#vmnet}"
-    networks="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null)" || die "cannot inspect VMware host networks"
-    [[ "$networks" == *"Total host networks:"* ]] || die "invalid VMware host network inventory"
-    awk '$2 ~ /^vmnet[0-9]+$/ {print $2}' <<<"$networks" | grep -Fxq -- "$vmnet" \
+    workstation_vmnet_is_bridged "$vmnet" \
         || grep -Eq "^[[:space:]]*answer[[:space:]]+VNET_${number}_" \
             "$VMWARE_NETWORKING_FILE" 2>/dev/null \
         || [[ -e "${VMWARE_NETWORKING_FILE%/*}/$vmnet" ]]
@@ -111,12 +128,7 @@ prepare_host_network_plan() {
     local values inventory inventory_status=0
     # Check in the parent shell before entering command substitution below.
     # Otherwise die() inside the selector is misreported as pool exhaustion.
-    inventory="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>&1)" || inventory_status=$?
-    [[ "$inventory_status" -eq 0 ]] \
-        || die "cannot inspect VMware host networks: vmrun -T $VMRUN_TYPE listHostNetworks exited $inventory_status. VMware output: ${inventory:-<no output>}. Verify Workstation networking and command support before retrying."
-    [[ "$inventory" == *"Total host networks:"* ]] \
-        || die "cannot inspect VMware host networks: unexpected listHostNetworks output: ${inventory:-<empty>}"
-    inventory_status=0
+    workstation_require_network_inventory
     inventory="$(vmrun -T "$VMRUN_TYPE" list 2>&1)" || inventory_status=$?
     [[ "$inventory_status" -eq 0 && "$inventory" == "Total running VMs:"* ]] \
         || die "cannot inspect running VMware VMs (exit $inventory_status): ${inventory:-<empty>}"

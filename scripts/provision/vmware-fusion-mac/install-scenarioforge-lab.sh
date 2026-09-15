@@ -292,6 +292,11 @@ create_seed_iso() {
         -o "$output" "$seed_dir"
 }
 
+host_network_exists() {
+    vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null \
+        | awk '$2 ~ /^vmnet[0-9]+$/ {print $2}' | grep -Fxq -- "$1"
+}
+
 fusion_network_config_value() {
     local vmnet="$1" key="$2" number
     number="${vmnet#vmnet}"

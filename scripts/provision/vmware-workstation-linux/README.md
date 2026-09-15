@@ -391,8 +391,12 @@ Image and checksum URLs can also be pinned with `SF_DEBIAN_IMAGE_URL`,
 
 This first version targets VMware Workstation on x86_64 Linux. It does not yet
 cover VMware Fusion on macOS, Workstation on Windows, or ARM guests. VM lifecycle and guest-status behavior depend on the
-current Workstation `vmrun` CLI, including `listHostNetworks`,
-`listNetworkAdapters`, and `deleteNetworkAdapter`.
+current Workstation `vmrun` CLI. Linux host-network discovery reads
+`/etc/vmware/networking` and its per-vmnet directories; it does not require
+`vmrun listHostNetworks` (unavailable on some Linux releases). Isolation checks
+reject DHCP, NAT, host adapters, and bridge mappings. Network allocation also
+checks running VMs with `vmrun list` before choosing a free vmnet. An unreadable
+or unsupported networking configuration stops installation.
 
 
 ## Kali participant

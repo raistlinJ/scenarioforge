@@ -437,36 +437,12 @@ ensure_linux_host_dependencies() {
 }
 
 host_network_exists() {
-    vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null \
-        | awk '$2 ~ /^vmnet[0-9]+$/ {print $2}' | grep -Fxq -- "$1"
-}
-validate_hitl_isolation() {
-    local number config="$VMWARE_NETWORKING_FILE" network_row
-    number="${HITL_VMNET#vmnet}"
-    [[ "$number" =~ ^[0-9]+$ ]] || die "HITL network must be named vmnetN, got: $HITL_VMNET"
-    network_row="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>/dev/null \
-        | awk -v wanted="$HITL_VMNET" '$2 == wanted {print; exit}')"
-    [[ -n "$network_row" ]] || die "could not inspect $HITL_VMNET"
-    [[ "$(awk '{print $4}' <<<"$network_row")" == false ]] \
-        || die "$HITL_VMNET has DHCP enabled; disable it in $VMWARE_NETWORK_EDITOR_NAME"
-    [[ "$(awk '{print $3}' <<<"$network_row")" != nat && "$(awk '{print $3}' <<<"$network_row")" != bridged ]] \
-        || die "$HITL_VMNET is not an isolated custom/host-only network"
-    if [[ -r "$config" ]]; then
-        if grep -Eq "^[[:space:]]*answer[[:space:]]+VNET_${number}_(DHCP|NAT|VIRTUAL_ADAPTER)[[:space:]]+yes([[:space:]]|$)" "$config"; then
-            die "$HITL_VMNET is not isolated; disable its DHCP, NAT, and host virtual adapter in $VMWARE_NETWORK_EDITOR_NAME"
-        fi
-        verbose "Verified no DHCP, NAT, or host adapter is enabled for $HITL_VMNET"
-    else
-        warn "cannot read $config; verify $HITL_VMNET has DHCP, NAT, and its host adapter disabled"
-    fi
+    workstation_vmnet_is_configured "$1"
 }
 
-validate_host_networks() {
-    host_network_exists "$MANAGEMENT_VMNET" \
-        || die "management network $MANAGEMENT_VMNET was not found in $VMWARE_PRODUCT_NAME"
-    host_network_exists "$HITL_VMNET" \
-        || die "HITL network $HITL_VMNET was not found; create it in $VMWARE_NETWORK_EDITOR_NAME first"
-    validate_hitl_isolation
+validate_hitl_isolation() {
+    workstation_hitl_network_is_safe "$HITL_VMNET" \
+        || die "$HITL_VMNET is not isolated; disable its DHCP, NAT, host adapter, and bridge mappings in $VMWARE_NETWORK_EDITOR_NAME"
 }
 
 # Fusion overrides these hooks after sourcing this installer.

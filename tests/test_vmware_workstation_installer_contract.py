@@ -290,17 +290,16 @@ write_vmware_cloud_init_files
     assert "CORE_USE_SYSTEMD_RESOLVED_STUB=1" in core_environment
 
 
-def test_host_network_table_parsing_and_hitl_dhcp_guard() -> None:
-    vmrun_output = """\
-Total host networks: 3
-INDEX  NAME         TYPE         DHCP         SUBNET           MASK
-0      vmnet0       bridged      false        empty            empty
-1      vmnet1       hostOnly     true         192.168.10.0     255.255.255.0
-2      vmnet2       hostOnly     false        10.254.200.0     255.255.255.0
-"""
+def test_host_network_config_parsing_and_hitl_dhcp_guard(tmp_path) -> None:
+    config = tmp_path / "networking"
+    safe = ("VERSION=1,0\nanswer VNET_2_DHCP no\n"
+            "answer VNET_2_VIRTUAL_ADAPTER no\n"
+            "answer VNET_2_HOSTONLY_SUBNET 10.254.200.0\n")
+    config.write_text(safe)
     probe = f"""
 source {shlex.quote(str(INSTALLER))}
-vmrun() {{ printf '%s' {shlex.quote(vmrun_output)}; }}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmrun() {{ echo 'unrecognized command' >&2; return 1; }}
 host_network_exists vmnet2
 HITL_VMNET=vmnet2
 validate_hitl_isolation
@@ -308,18 +307,10 @@ validate_hitl_isolation
     result = run_bash(probe)
     assert result.returncode == 0, result.stderr
 
-    unsafe_output = vmrun_output.replace(
-        "vmnet2       hostOnly     false", "vmnet2       hostOnly     true "
-    )
-    probe = f"""
-source {shlex.quote(str(INSTALLER))}
-vmrun() {{ printf '%s' {shlex.quote(unsafe_output)}; }}
-HITL_VMNET=vmnet2
-validate_hitl_isolation
-"""
+    config.write_text(safe.replace("DHCP no", "DHCP yes"))
     result = run_bash(probe)
     assert result.returncode != 0
-    assert "has DHCP enabled" in result.stderr
+    assert "not isolated" in result.stderr
 
 
 def test_progress_credentials_and_cleanup_guards_are_present() -> None:

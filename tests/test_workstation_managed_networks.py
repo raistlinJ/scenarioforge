@@ -14,7 +14,7 @@ LINUX = ROOT / "scripts/provision/vmware-workstation-linux/install-scenarioforge
 @pytest.mark.parametrize("force", [False, True])
 def test_linux_creates_free_network_and_removes_its_directory(tmp_path, force):
     config = tmp_path / "networking"
-    original = "VERSION=1,0\nanswer VNET_2_DHCP yes\nanswer VNET_2_HOSTONLY_SUBNET 192.168.99.0\n"
+    original = "VERSION=1,0\nanswer VNET_1_DHCP yes\nanswer VNET_8_NAT yes\nanswer VNET_2_DHCP yes\nanswer VNET_2_HOSTONLY_SUBNET 192.168.99.0\n"
     config.write_text(original)
     state = tmp_path / "state"
     work = tmp_path / "work"
@@ -28,14 +28,8 @@ WORK_DIR={shlex.quote(str(work))}
 vmware-networks() {{ :; }}
 vmrun() {{
     if [[ "$3" == list ]]; then echo 'Total running VMs: 0'; return; fi
-    echo 'Total host networks: 4'
-    echo 'INDEX NAME TYPE DHCP SUBNET MASK'
-    echo '1 vmnet1 hostOnly false 172.31.250.0 255.255.255.0'
-    echo '2 vmnet2 hostOnly true 192.168.99.0 255.255.255.0'
-    echo '8 vmnet8 nat true 192.168.20.0 255.255.255.0'
-    if grep -q VNET_3_ "$VMWARE_NETWORKING_FILE"; then
-        echo '3 vmnet3 hostOnly false 10.254.200.0 255.255.255.0'
-    fi
+    echo 'unrecognized command' >&2
+    return 1
 }}
 write_state() {{ printf '%s\\n' "$INSTALLER_CREATED_HITL_VMNET" > "$STATE_DIR/owner"; }}
 sudo() {{
@@ -133,3 +127,83 @@ def test_windows_install_plans_before_validation_and_persists_selected_vmnet():
     resume = source[source.index("if ($Command -eq 'resume')"):source.index('        do {')]
     assert 'Plan-HitlNetwork' not in resume
     assert '$config.' not in resume
+
+
+@pytest.mark.parametrize("extra", [
+    "answer VNET_2_DHCP yes\n",
+    "answer VNET_2_NAT yes\n",
+    "answer VNET_2_VIRTUAL_ADAPTER yes\n",
+    "add_bridge_mapping eth0 2\n",
+    "answer VNL_DEFAULT_BRIDGE_VNET 2\n",
+    "answer VNET_2_INTERFACE eth0\n",
+])
+def test_linux_isolation_rejects_enabled_services_and_bridges(tmp_path, extra):
+    config = tmp_path / "networking"
+    # Keep conflicting entries to ensure a trailing 'no' cannot hide a 'yes'.
+    config.write_text("VERSION=1,0\n" + extra +
+                      "answer VNET_2_DHCP no\nanswer VNET_2_NAT no\n"
+                      "answer VNET_2_VIRTUAL_ADAPTER no\n"
+                      "answer VNET_2_HOSTONLY_SUBNET 10.254.200.0\n")
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+HITL_VMNET=vmnet2
+validate_hitl_isolation
+'''], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "not isolated" in result.stderr
+
+
+@pytest.mark.parametrize("contents", [None, "", "unexpected output\n", "VERSION=2,0\n"])
+def test_linux_unavailable_inventory_stops_before_allocation(tmp_path, contents):
+    config = tmp_path / "networking"
+    if contents is not None:
+        config.write_text(contents)
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmware-networks() {{ :; }}
+vmrun() {{ echo 'Total running VMs: 0'; }}
+prepare_host_network_plan
+'''], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "cannot inspect" in result.stderr
+    assert "no unused Workstation vmnet" not in result.stderr
+
+
+def test_linux_allocation_skips_bridges_directories_and_running_vms(tmp_path):
+    config = tmp_path / "networking"
+    config.write_text("VERSION=1,0\nadd_bridge_mapping eth0 2\n"
+                      "answer VNL_DEFAULT_BRIDGE_VNET 3\n")
+    (tmp_path / "vmnet4").mkdir()
+    vmx = tmp_path / "other.vmx"
+    vmx.write_text('ethernet0.vnet = "vmnet5"\n')
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmware-networks() {{ :; }}
+vmrun() {{
+    [[ "$3" == list ]] || {{ echo 'unrecognized command' >&2; return 1; }}
+    printf 'Total running VMs: 1\\n%s\\n' {shlex.quote(str(vmx))}
+}}
+prepare_host_network_plan
+[[ "$HITL_VMNET" == vmnet6 ]]
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_linux_reuses_isolated_config_without_host_network_command(tmp_path):
+    config = tmp_path / "networking"
+    config.write_text("VERSION=1,0\nanswer VNET_1_DHCP yes\nanswer VNET_8_NAT yes\n"
+                      "answer VNET_2_DHCP no\nanswer VNET_2_VIRTUAL_ADAPTER no\n"
+                      "answer VNET_2_HOSTONLY_SUBNET 10.254.200.0\n")
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmrun() {{ echo 'unrecognized command' >&2; return 1; }}
+prepare_host_network_plan
+validate_host_network_plan
+[[ "$WORKSTATION_NETWORK_PLAN" == 0 ]]
+[[ "$INSTALLER_CREATED_HITL_VMNET" == "" ]]
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
