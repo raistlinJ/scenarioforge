@@ -151,6 +151,8 @@ CAF_CONFIG
     touch /var/lib/scenarioforge/cyber-agent-flow-installed
 fi
 # Verify existing installations too, before declaring the participant ready.
+/opt/cyber-agent-flow/venv/bin/python -c "from mcp.server import Server; assert callable(Server('provision-check').list_tools)" \\
+    || fail_bootstrap 'CyberAgentFlow requires MCP v1; install mcp>=1.28,<2 in its virtual environment'
 /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
     || fail_bootstrap 'CyberAgentFlow dependency verification failed; inspect the Python error above'
 {automatic_setup}

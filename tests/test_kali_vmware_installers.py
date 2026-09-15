@@ -95,10 +95,11 @@ printf 'VALUES|%s|%s|%s\n' "$PARTICIPANT_OS" "$PARTICIPANT_MEMORY_MB" "$PARTICIP
 
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64"])
-def test_vmware_kernel_reboot_and_loop_guard(tmp_path, architecture):
+@pytest.mark.parametrize("hypervisor", ["vmware", "kvm"])
+def test_vmware_kernel_reboot_and_loop_guard(tmp_path, architecture, hypervisor):
     shared = (ROOT / "scripts/provision/proxmox/install-scenarioforge-lab.sh").read_text()
-    block = shared.split('if [[ "$ID" == kali ]] && systemd-detect-virt', 1)[1]
-    block = 'if [[ "$ID" == kali ]] && systemd-detect-virt' + block.split(
+    block = shared.split('if [[ "$ID" == kali && "$(uname -r)" == *cloud* ]]', 1)[1]
+    block = 'if [[ "$ID" == kali && "$(uname -r)" == *cloud* ]]' + block.split(
         "set_bootstrap_status 85", 1
     )[0]
     # Run the real control flow against temporary paths and mocked guest commands.
@@ -114,7 +115,7 @@ def test_vmware_kernel_reboot_and_loop_guard(tmp_path, architecture):
     prefix = f"""
 set -eu
 ID=kali
-systemd-detect-virt() {{ if [[ "$*" != *--quiet* ]]; then echo vmware; fi; }}
+systemd-detect-virt() {{ if [[ "$*" != *--quiet* ]]; then echo {hypervisor}; fi; }}
 dpkg() {{ printf '%s\n' {architecture}; }}
 apt-get() {{ printf 'APT %s\n' "$*" >> {shlex.quote(str(log))}; }}
 systemctl() {{ printf 'SYSTEMCTL %s\n' "$*" >> {shlex.quote(str(log))}; }}
