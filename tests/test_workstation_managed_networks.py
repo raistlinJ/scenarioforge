@@ -207,3 +207,51 @@ validate_host_network_plan
 [[ "$INSTALLER_CREATED_HITL_VMNET" == "" ]]
 '''], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("output", [
+    "Total running VMs: 0\n",
+    "total running vms: 0\n",
+    "\r\n  TOTAL  RUNNING VMS : 0  \r\n\r\n",
+])
+def test_linux_accepts_empty_vm_inventory_with_stderr_warning(tmp_path, output):
+    config = tmp_path / "networking"
+    config.write_text("VERSION=1,0\n")
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmware-networks() {{ :; }}
+vmrun() {{
+    echo '[AppLoader] GLib warning' >&2
+    printf '%s' {shlex.quote(output)}
+}}
+prepare_host_network_plan
+[[ "$WORKSTATION_NETWORK_PLAN" == 1 ]]
+[[ "$HITL_VMNET" == vmnet2 ]]
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[AppLoader]" in result.stderr
+
+
+@pytest.mark.parametrize("output,status", [
+    ("Total running VMs: 0\n", 1),
+    ("", 0),
+    ("Error: unable to connect\n", 0),
+    ("Total running VMs: 1\n", 0),
+    ("Total running VMs: 0\n/unexpected.vmx\n", 0),
+    ("Total running VMs: 1\n/nonexistent/unreadable.vmx\n", 0),
+])
+def test_linux_bad_vm_inventory_stops_before_allocation(tmp_path, output, status):
+    config = tmp_path / "networking"
+    config.write_text("VERSION=1,0\n")
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+vmware-networks() {{ :; }}
+vmrun() {{ printf '%s' {shlex.quote(output)}; return {status}; }}
+prepare_host_network_plan
+'''], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "cannot inspect running VMware VMs" in result.stderr
+    assert "no unused Workstation vmnet" not in result.stderr
+    assert config.read_text() == "VERSION=1,0\n"

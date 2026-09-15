@@ -62,10 +62,36 @@ workstation_vmnet_is_configured() {
         || [[ -e "${VMWARE_NETWORKING_FILE%/*}/$vmnet" ]]
 }
 
+workstation_running_vm_inventory() {
+    local output status=0
+    # Keep loader warnings on stderr: they are not inventory records.
+    output="$(LC_ALL=C vmrun -T "$VMRUN_TYPE" list)" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+        printf 'cannot inspect running VMware VMs (exit %s): %s\n' "$status" "${output:-<no stdout>}" >&2
+        return 1
+    fi
+    printf '%s\n' "$output" | python3 -c '
+import os
+import re
+import sys
+
+output = sys.stdin.read()
+lines = [line for line in output.splitlines() if line.strip()]
+header = re.fullmatch(r"\s*Total\s+running\s+VMs\s*:\s*([0-9]+)\s*", lines[0], re.I) if lines else None
+if not header or int(header[1]) != len(lines) - 1:
+    sys.exit("invalid VMware running VM inventory: " + (output.strip() or "<empty>"))
+for vmx in lines[1:]:
+    if not os.path.isabs(vmx) or not os.path.isfile(vmx) or not os.access(vmx, os.R_OK):
+        sys.exit("cannot inspect running VM: " + vmx)
+print("Total running VMs: " + header[1])
+for vmx in lines[1:]:
+    print(vmx)
+'
+}
+
 workstation_vmnet_is_used_by_running_vm() {
     local vmnet="$1" vmx running
-    running="$(vmrun -T "$VMRUN_TYPE" list 2>/dev/null)" || die "cannot inspect running VMware VMs"
-    [[ "$running" == "Total running VMs:"* ]] || die "invalid VMware running VM inventory"
+    running="$(workstation_running_vm_inventory)" || die "cannot inspect running VMware VMs"
     while IFS= read -r vmx; do
         [[ -n "$vmx" ]] || continue
         [[ -r "$vmx" ]] || die "cannot inspect running VM: $vmx"
@@ -125,13 +151,11 @@ prepare_host_network_plan() {
         1|ask) ;;
         *) die "SF_VMWARE_MANAGE_HITL_NETWORK must be 0, 1, or unset" ;;
     esac
-    local values inventory inventory_status=0
+    local values
     # Check in the parent shell before entering command substitution below.
     # Otherwise die() inside the selector is misreported as pool exhaustion.
     workstation_require_network_inventory
-    inventory="$(vmrun -T "$VMRUN_TYPE" list 2>&1)" || inventory_status=$?
-    [[ "$inventory_status" -eq 0 && "$inventory" == "Total running VMs:"* ]] \
-        || die "cannot inspect running VMware VMs (exit $inventory_status): ${inventory:-<empty>}"
+    workstation_running_vm_inventory >/dev/null || die "cannot inspect running VMware VMs"
     WORKSTATION_ORIGINAL_HITL_VMNET="$HITL_VMNET"
     WORKSTATION_PLANNED_HITL_VMNET="$(workstation_choose_unused_vmnet "$HITL_VMNET")" \
         || die "no unused Workstation vmnet number is available for the isolated HITL network"
