@@ -655,6 +655,7 @@
   </div>
 </div>
 
+<script src="{{ url_for('static', filename='catalog_upload.js') }}"></script>
 <script>
   const VULN_CATALOG_RUNTIME_MODE = {{ (webui_runtime_mode or 'native')|tojson }};
   const VULN_CATALOG_VM_MODE = VULN_CATALOG_RUNTIME_MODE === 'vm';
@@ -3058,12 +3059,21 @@
         file = { name: `${folderLabel} (${folderFiles.length} files)`, size: totalSize };
         fd = new FormData();
         fd.append('repo_label', folderLabel);
-        folderFiles.forEach((item, index) => {
-          fd.append('repo_files', item, item.name);
-          fd.append('repo_paths', relativePaths[index]);
-        });
+        try {
+          if (importSubmitButton) { importSubmitButton.disabled = true; importSubmitButton.textContent = 'Packaging folder into ZIP…'; }
+          const archive = await window.catalogFolderZip(folderFiles);
+          fd.append('zip_file', archive, `${folderLabel}.zip`);
+          file = { name: `${folderLabel}.zip`, size: archive.size };
+        } catch (error) {
+          folderInput.setCustomValidity(`Unable to package folder: ${error.message}. Compress it and use ZIP file instead.`);
+          folderInput.reportValidity();
+          return;
+        } finally {
+          if (importSubmitButton) { importSubmitButton.disabled = false; importSubmitButton.textContent = 'Import'; }
+        }
       } else {
-        fd = new FormData(form);
+        fd = new FormData();
+        fd.append('zip_file', file, file.name);
       }
       fd.append('import_progress_id', progressId);
       fd.append('validate_architectures', vulnPackValidateArchitectures ? '1' : '0');
@@ -3118,16 +3128,8 @@
         }
         if (!msg) msg = ok ? 'Upload complete.' : `Upload failed (HTTP ${xhr.status}).`;
         if (!ok && folderFiles.length && uploadedBytes === 0) {
-          // Chromium-based browsers all report "Safari" in the UA string, so
-          // only treat this as Safari when no Chromium marker is present.
-          const ua = navigator.userAgent || '';
-          const onChromium = /Chrome|Chromium|CriOS|Edg\//.test(ua);
-          msg = `This browser did not send the upload body: ${folderFiles.length} files `
-            + `(${_fmtBytes(file.size)}) were prepared but 0 bytes were transmitted. `
-            + 'Safari cannot reliably serialize folder uploads this large. '
-            + (onChromium
-              ? 'Compress the folder and use the "ZIP file" import option instead.'
-              : 'Try again in Chrome, or compress the folder and use the "ZIP file" import option.');
+          msg = 'The browser sent no upload data. Reload the page and select the ZIP again. '
+            + 'If this repeats, check the connection and proxy upload settings.';
         }
         if (progressText) progressText.textContent = msg;
         if (progressBar) {

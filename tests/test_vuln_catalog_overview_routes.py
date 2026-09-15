@@ -49,7 +49,8 @@ def test_vuln_catalog_page_renders_active_catalog(monkeypatch):
     assert 'id="vulnPackFolderUploadForm"' in page
     assert 'id="vulnPackFolderInput"' in page
     assert 'webkitdirectory' in page
-    assert "fd.append('repo_paths', relativePaths[index]);" in page
+    assert "window.catalogFolderZip(folderFiles)" in page
+    assert "fd.append('zip_file', archive," in page
     assert 'function syncVulnPackImportMethod()' in page
     assert 'id="vulnPackImportSteps"' in page
     assert 'id="vulnPackImportActivity"' in page
