@@ -701,3 +701,20 @@ zip -r my_generator_pack.zip flag_generators/py_my_ssh_creds flag_node_generator
 ```
 
 Install it in the Web UI via the Flag Catalog page (upload/import URL).
+
+### Catalog metadata in uploaded archives
+
+Generator and vulnerability imports use the same metadata discovery rules. Metadata
+may be at the ZIP root or inside a repository wrapper folder. The shallowest match
+wins; equally shallow matches are rejected as ambiguous. Missing metadata is
+optional, while malformed JSON is reported as an import error.
+
+Include the complete catalog folder when uploading:
+
+- Generators use `pack.json`, with notes matched by generator kind and ID.
+- Vulnerabilities use `.scenarioforge/catalog_notes.json`,
+  `catalog_items.json`, and `catalog_layout.json`. Item paths are relative to
+  the folder containing `.scenarioforge`.
+
+Existing archive formats remain supported. Uploading only a content subfolder
+omits metadata stored in its parent.

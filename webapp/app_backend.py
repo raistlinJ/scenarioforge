@@ -49630,23 +49630,11 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
         content_dir = _vuln_catalog_pack_content_dir(catalog_id)
         _safe_extract_zip_to_dir(zip_path, content_dir)
 
-        def read_catalog_metadata(archive, filename):
-            # Folder uploads preserve their wrapper directory. Metadata paths
-            # are relative to that directory, rather than to the ZIP root.
-            suffix = '.scenarioforge/' + filename
-            candidates = [name for name in archive.namelist()
-                          if name == suffix or name.endswith('/' + suffix)]
-            if len(candidates) > 1:
-                raise ValueError(f'Ambiguous ScenarioForge metadata: {filename}')
-            if not candidates:
-                raise KeyError(suffix)
-            name = candidates[0]
-            prefix = name[:-len(suffix)]
-            return archive.read(name).decode('utf-8', errors='ignore'), prefix
+        from webapp.catalog_archive import read_archive_metadata
 
         try:
             with zipfile.ZipFile(zip_path, 'r') as archive:
-                raw_notes, metadata_prefix = read_catalog_metadata(archive, 'catalog_notes.json')
+                raw_notes, metadata_prefix = read_archive_metadata(archive, '.scenarioforge/catalog_notes.json')
             notes_doc = json.loads(raw_notes or '{}')
             note_entries = notes_doc.get('notes') if isinstance(notes_doc, dict) else []
             if isinstance(note_entries, list):
@@ -49672,7 +49660,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             raise ValueError(f'Invalid ScenarioForge catalog notes metadata: {exc}') from exc
         try:
             with zipfile.ZipFile(zip_path, 'r') as archive:
-                raw_layout, metadata_prefix = read_catalog_metadata(archive, 'catalog_layout.json')
+                raw_layout, metadata_prefix = read_archive_metadata(archive, '.scenarioforge/catalog_layout.json')
             layout_doc = json.loads(raw_layout or '{}')
             layout_entries = layout_doc.get('items') if isinstance(layout_doc, dict) else []
             if isinstance(layout_entries, list):
@@ -49691,7 +49679,7 @@ def _install_vuln_catalog_zip_file_single(*, zip_file_path: str, label: str, ori
             raise ValueError(f'Invalid ScenarioForge catalog layout metadata: {exc}') from exc
         try:
             with zipfile.ZipFile(zip_path, 'r') as archive:
-                raw_items, metadata_prefix = read_catalog_metadata(archive, 'catalog_items.json')
+                raw_items, metadata_prefix = read_archive_metadata(archive, '.scenarioforge/catalog_items.json')
             items_doc = json.loads(raw_items or '{}')
             item_entries = items_doc.get('items') if isinstance(items_doc, dict) else []
             imported_item_defaults = _portable_catalog_item_state(
@@ -52089,22 +52077,11 @@ def _read_generator_pack_zip_metadata(zip_path: str) -> dict[str, Any]:
         import zipfile
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
-            names_by_normalized = {
-                str(name or '').replace('\\', '/'): str(name or '')
-                for name in archive.namelist()
-            }
-            normalized_names = list(names_by_normalized)
-            candidates = [
-                name for name in normalized_names
-                if name == 'pack.json' or name.endswith('/pack.json')
-            ]
-            if not candidates:
-                return {}
-            metadata_path = 'pack.json' if 'pack.json' in candidates else sorted(candidates, key=lambda name: (name.count('/'), name))[0]
-            raw = archive.read(names_by_normalized[metadata_path]).decode('utf-8', errors='ignore')
+            from webapp.catalog_archive import read_archive_metadata
+            raw, _prefix = read_archive_metadata(archive, 'pack.json')
         data = json.loads(raw or '{}')
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except KeyError:
         return {}
 
 
