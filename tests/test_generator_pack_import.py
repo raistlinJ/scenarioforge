@@ -418,6 +418,11 @@ artifacts:
         ('repo_files', (io.BytesIO(b'print("ok")\n'), 'generator.py')),
     ])
 
+    # Exceed Flask's default 1,000 multipart parts with a valid repository.
+    for index in range(501):
+        upload.add('repo_paths', f'downloaded-generator-repo/docs/note-{index}.txt')
+        upload.add('repo_files', (io.BytesIO(b'documentation'), f'note-{index}.txt'))
+
     client = app.test_client()
     login_resp = client.post('/login', data={'username': 'coreadmin', 'password': 'coreadmin'})
     assert login_resp.status_code in (200, 302)

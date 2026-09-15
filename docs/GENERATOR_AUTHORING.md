@@ -718,3 +718,17 @@ Include the complete catalog folder when uploading:
 
 Existing archive formats remain supported. Uploading only a content subfolder
 omits metadata stored in its parent.
+
+### Catalog upload limits
+
+Generator and vulnerability catalog imports impose no configured byte,
+file-count, or multipart-field limits. URL imports also have no default byte cap.
+Available storage, browser capabilities, and server timeouts still determine
+whether a transfer can complete. Path and archive validation still apply.
+
+New lab provisioning sets nginx `client_max_body_size 0;`. On an existing APP
+VM, update `client_max_body_size` in
+`/etc/nginx/sites-available/scenarioforge` to `0`, run `sudo nginx -t`, then
+`sudo systemctl reload nginx`. Update and restart ScenarioForge as well to
+apply the application changes. Changing repository files alone does not update
+an already-running VM's nginx configuration.

@@ -49226,7 +49226,7 @@ def _is_safe_remote_zip_url(url: str) -> tuple[bool, str]:
         return False, 'URL validation failed'
 
 
-def _download_zip_from_url(url: str, *, max_bytes: int = 50_000_000) -> bytes:
+def _download_zip_from_url(url: str, *, max_bytes: int | None = None) -> bytes:
     ok, reason = _is_safe_remote_zip_url(url)
     if not ok:
         raise ValueError(reason)
@@ -49242,7 +49242,7 @@ def _download_zip_from_url(url: str, *, max_bytes: int = 50_000_000) -> bytes:
             if not chunk:
                 continue
             buf.extend(chunk)
-            if len(buf) > max_bytes:
+            if max_bytes is not None and len(buf) > max_bytes:
                 raise ValueError('Download too large')
         return bytes(buf)
     except Exception:
@@ -49250,8 +49250,8 @@ def _download_zip_from_url(url: str, *, max_bytes: int = 50_000_000) -> bytes:
         from urllib.request import urlopen
 
         with urlopen(u, timeout=20) as r:  # nosec - guarded by _is_safe_remote_zip_url
-            buf = r.read(max_bytes + 1)
-        if len(buf) > max_bytes:
+            buf = r.read() if max_bytes is None else r.read(max_bytes + 1)
+        if max_bytes is not None and len(buf) > max_bytes:
             raise ValueError('Download too large')
         return buf
 

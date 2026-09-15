@@ -3059,19 +3059,26 @@
         file = { name: `${folderLabel} (${folderFiles.length} files)`, size: totalSize };
         fd = new FormData();
         fd.append('repo_label', folderLabel);
-        try {
-          if (importSubmitButton) { importSubmitButton.disabled = true; importSubmitButton.textContent = 'Packaging folder into ZIP…'; }
-          const archive = await window.catalogFolderZip(folderFiles, ({ current, total, path }) => {
-            if (importSubmitButton) importSubmitButton.textContent = `Packaging ${current} / ${total}…`;
-            if (importMethodHelp) importMethodHelp.textContent = `Reading ${path}`;
+        if (window.catalogFolderNeedsMultipart(folderFiles)) {
+          folderFiles.forEach((item, index) => {
+            fd.append('repo_files', item, item.name);
+            fd.append('repo_paths', relativePaths[index]);
           });
-          fd.append('zip_file', archive, `${folderLabel}.zip`);
-          file = { name: `${folderLabel}.zip`, size: archive.size };
-        } catch (error) {
-          if (importMethodHelp) importMethodHelp.textContent = `Unable to package folder: ${error.message}. Ensure the file is available locally and readable, then reselect the folder, or upload a ZIP.`;
-          return;
-        } finally {
-          if (importSubmitButton) { importSubmitButton.disabled = false; importSubmitButton.textContent = 'Import'; }
+        } else {
+          try {
+            if (importSubmitButton) { importSubmitButton.disabled = true; importSubmitButton.textContent = 'Packaging folder into ZIP…'; }
+            const archive = await window.catalogFolderZip(folderFiles, ({ current, total, path }) => {
+              if (importSubmitButton) importSubmitButton.textContent = `Packaging ${current} / ${total}…`;
+              if (importMethodHelp) importMethodHelp.textContent = `Reading ${path}`;
+            });
+            fd.append('zip_file', archive, `${folderLabel}.zip`);
+            file = { name: `${folderLabel}.zip`, size: archive.size };
+          } catch (error) {
+            if (importMethodHelp) importMethodHelp.textContent = `Unable to package folder: ${error.message}. Ensure the file is available locally and readable, then reselect the folder, or upload a ZIP.`;
+            return;
+          } finally {
+            if (importSubmitButton) { importSubmitButton.disabled = false; importSubmitButton.textContent = 'Import'; }
+          }
         }
       } else {
         fd = new FormData();
@@ -3150,7 +3157,7 @@
         }
         if (closeBtn) closeBtn.style.display = 'inline-block';
         if (!ok && xhr.status === 413 && progressText) {
-          progressText.textContent = msg || 'Upload rejected: catalog exceeds the configured byte or file-count limit (HTTP 413).';
+          progressText.textContent = msg || 'Upload rejected by the server or proxy (HTTP 413). Check its request-size configuration.';
         }
         if (ok) {
           try { _rememberVulnImportForCache(JSON.parse(xhr.responseText || '{}'), file.name); } catch (e) {}

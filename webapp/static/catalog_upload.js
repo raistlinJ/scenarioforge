@@ -23,6 +23,14 @@
       });
     }
   }
+  root.catalogFolderNeedsMultipart = function (files) {
+    // ZIP32 has format limits. Larger folders can still use the server's
+    // streaming multipart importer, whose ZIP writer supports ZIP64.
+    const encoder = new TextEncoder();
+    const size = files.reduce((sum, file) => sum + file.size + 76
+      + 2 * encoder.encode(file.webkitRelativePath || '').length, 22);
+    return files.length > 65535 || size >= 0xffffffff;
+  };
   root.catalogFolderZip = async function (files, onProgress = () => {}) {
     if (!files.length || files.length > 65535) throw new Error('Unsupported ZIP file count');
     const bodies = [], directory = [], names = new Set();

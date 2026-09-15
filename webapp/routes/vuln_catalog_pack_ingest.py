@@ -13,7 +13,6 @@ from flask import flash, jsonify, redirect, request, url_for
 from webapp.routes._registration import begin_route_registration, mark_routes_registered
 
 
-MAX_FOLDER_UPLOAD_FILES = 10000
 
 
 # Discovery walks every compose directory in the pack, which for a large
@@ -138,8 +137,6 @@ def _folder_upload_path(raw_path: str) -> str:
 def _folder_upload_to_zip(repo_files: list[Any], repo_paths: list[str], zip_path: str) -> None:
     if not repo_files:
         raise ValueError('No vulnerability catalog folder selected.')
-    if len(repo_files) > MAX_FOLDER_UPLOAD_FILES:
-        raise ValueError('Vulnerability catalog folder contains more than 10,000 files; upload a ZIP instead.')
     if len(repo_paths) != len(repo_files):
         raise ValueError(
             'The browser did not provide folder-relative paths. '
@@ -157,7 +154,7 @@ def _folder_upload_to_zip(repo_files: list[Any], repo_paths: list[str], zip_path
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
         for file_obj, relative_path in zip(repo_files, normalized_paths):
-            with archive.open(relative_path, 'w') as destination:
+            with archive.open(relative_path, 'w', force_zip64=True) as destination:
                 shutil.copyfileobj(file_obj.stream, destination, length=1024 * 1024)
 
 
@@ -178,6 +175,9 @@ def register(
     if not begin_route_registration(app, 'vuln_catalog_pack_ingest_routes'):
         return
 
+    from webapp.catalog_upload_limits import configure_catalog_uploads
+    configure_catalog_uploads(app)
+
     @app.get('/api/vuln-catalog-import-progress/<progress_id>')
     def vuln_catalog_import_progress(progress_id: str):
         if not PROGRESS_ID_RE.fullmatch(str(progress_id or '')):
@@ -192,33 +192,6 @@ def register(
         require_builder_or_admin()
         is_ajax = str(request.headers.get('X-Requested-With') or '').lower() == 'xmlhttprequest' or 'application/json' in str(request.headers.get('Accept') or '')
 
-        max_upload_bytes = 1024 * 1024 * 1024
-        try:
-            max_upload_bytes = int(os_module.getenv('CORETG_VULN_PACK_MAX_BYTES') or max_upload_bytes)
-        except Exception:
-            max_upload_bytes = 1024 * 1024 * 1024
-
-        # Flask 3.1 defaults MAX_FORM_PARTS to 1,000. Folder uploads send one
-        # file part and one repo_paths field per file, so otherwise a catalog
-        # with about 500 files is rejected before this route can validate it.
-        # Keep the override local to this endpoint and aligned with our own
-        # explicit file-count and byte limits.
-        #
-        # These are set in separate try blocks on purpose. On Flask 3.0.x
-        # `max_content_length` is a read-only property, so assigning it raises
-        # AttributeError; sharing one try block let that failure skip the
-        # `max_form_parts` assignment underneath it, silently leaving the
-        # 1,000-part default in place and rejecting every folder upload of
-        # more than ~500 files.
-        try:
-            request.max_form_parts = (MAX_FOLDER_UPLOAD_FILES * 2) + 10
-        except Exception:
-            pass
-        try:
-            request.max_content_length = max_upload_bytes
-        except Exception:
-            pass
-
         try:
             upload_file = request.files.get('zip_file')
             repo_files = [
@@ -226,10 +199,7 @@ def register(
                 if item and str(item.filename or '').strip()
             ]
         except request_entity_too_large_type:
-            msg = (
-                'Upload exceeds the vulnerability catalog limits '
-                f'(max {max_upload_bytes // (1024 * 1024)}MB or {MAX_FOLDER_UPLOAD_FILES:,} folder files).'
-            )
+            msg = 'The server rejected the upload. Check reverse-proxy upload limits.'
             if is_ajax:
                 return jsonify({'ok': False, 'error': msg}), 413
             flash(msg)
@@ -277,17 +247,6 @@ def register(
                 return jsonify({'ok': False, 'error': msg}), 400
             flash(msg)
             return redirect(url_for('vuln_catalog_page'))
-
-        try:
-            req_len = request.content_length
-            if isinstance(req_len, int) and req_len > max_upload_bytes:
-                msg = f'File too large (max {max_upload_bytes // (1024 * 1024)}MB).'
-                if is_ajax:
-                    return jsonify({'ok': False, 'error': msg}), 413
-                flash(msg)
-                return redirect(url_for('vuln_catalog_page'))
-        except Exception:
-            pass
 
         tmp_path = ''
         uploaded_file_count = 0

@@ -28,6 +28,9 @@ def test_folder_zip_webkit(retry):
                 });
                 if (retry) files[0].arrayBuffer = async () => { throw new Error('I/O operation failed'); };
                 let progress = null;
+                if (catalogFolderNeedsMultipart(files)) throw Error('Small folder should use ZIP');
+                if (!catalogFolderNeedsMultipart([{size: 0xffffffff, webkitRelativePath: 'repo/big'}])) throw Error('Large folder needs multipart');
+                if (!catalogFolderNeedsMultipart(Array(65536).fill({size: 0, webkitRelativePath: 'repo/file'}))) throw Error('Many files need multipart');
                 const zip = await catalogFolderZip(files, item => { progress = item; });
                 if (progress.current !== 9703 || progress.total !== 9703) throw Error('Missing progress');
                 const form = new FormData();

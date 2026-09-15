@@ -1534,7 +1534,7 @@ server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
     server_name _;
-    client_max_body_size 1024m;
+    client_max_body_size 0;
 
     ssl_certificate /etc/nginx/scenarioforge/server.crt;
     ssl_certificate_key /etc/nginx/scenarioforge/server.key;

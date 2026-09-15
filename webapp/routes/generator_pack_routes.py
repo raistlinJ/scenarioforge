@@ -73,6 +73,9 @@ def register(
     if not begin_route_registration(app, 'generator_pack_routes'):
         return
 
+    from webapp.catalog_upload_limits import configure_catalog_uploads
+    configure_catalog_uploads(app)
+
     def _folder_upload_path(raw_path: str) -> str:
         normalized = str(raw_path or '').replace('\\', '/').strip()
         if not normalized or '\x00' in normalized:
@@ -87,8 +90,6 @@ def register(
     def _repository_folder_to_zip(repo_files: list[Any], repo_paths: list[str], zip_path: str) -> None:
         if not repo_files:
             raise ValueError('No repository folder selected.')
-        if len(repo_files) > 10000:
-            raise ValueError('Repository folder contains more than 10,000 files; upload a ZIP instead.')
         if len(repo_paths) != len(repo_files):
             raise ValueError(
                 'The browser did not provide repository-relative paths. '
@@ -106,7 +107,7 @@ def register(
 
         with zipfile_module.ZipFile(zip_path, 'w', zipfile_module.ZIP_DEFLATED) as archive:
             for file_obj, relative_path in zip(repo_files, normalized_paths):
-                with archive.open(relative_path, 'w') as destination:
+                with archive.open(relative_path, 'w', force_zip64=True) as destination:
                     shutil_module.copyfileobj(file_obj.stream, destination, length=1024 * 1024)
 
     def _latest_pack_success_payload(note: str) -> dict[str, Any]:
