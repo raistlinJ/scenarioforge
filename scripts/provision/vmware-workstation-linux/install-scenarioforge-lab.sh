@@ -210,6 +210,8 @@ Repository overrides:
 Before installation, create vmnet2 in Workstation's Virtual Network Editor as a
 custom network with DHCP, NAT, and the host virtual adapter disabled. See the
 adjacent README for prerequisites and all SF_* environment overrides.
+Missing non-VMware host tools are installed with sudo using apt-get, dnf, or yum.
+Dry runs print package commands without installing anything.
 EOF
 }
 
@@ -378,13 +380,60 @@ require_workstation_runtime() {
 }
 require_linux_workstation() {
     require_workstation_runtime
-    local command
-    for command in vmware-vdiskmanager qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz; do
-        command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
-    done
-    if ! command -v xorriso >/dev/null 2>&1 && ! command -v genisoimage >/dev/null 2>&1; then
-        die "xorriso or genisoimage is required to create Cloud-Init seed ISOs"
+    command -v vmware-vdiskmanager >/dev/null 2>&1 || die "required VMware command not found: vmware-vdiskmanager"
+    ensure_linux_host_dependencies
+}
+
+host_command_available() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_linux_host_dependencies() {
+    local tool_name manager="" package_name existing_package duplicate
+    local -a required_tools=(qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz gzip awk sed grep)
+    local -a missing_tools=() packages=(ca-certificates)
+    if [[ "$INSTALL_FLAG_GENERATORS" == 1 || "$INSTALL_VULNHUB" == 1 ]]; then
+        required_tools+=(git ssh ssh-keygen scp)
     fi
+    if ! host_command_available xorriso && ! host_command_available genisoimage; then
+        required_tools+=(xorriso)
+    fi
+    for tool_name in "${required_tools[@]}"; do
+        host_command_available "$tool_name" || missing_tools+=("$tool_name")
+    done
+    [[ ${#missing_tools[@]} -gt 0 ]] || return 0
+
+    for tool_name in apt-get dnf yum; do
+        if host_command_available "$tool_name"; then manager="$tool_name"; break; fi
+    done
+    [[ -n "$manager" ]] || die "missing host tools: ${missing_tools[*]}; install them with your distribution's package manager and rerun (automatic installation supports apt-get, dnf, and yum)"
+    host_command_available sudo || die "sudo is required to install missing host tools: ${missing_tools[*]}; have an administrator install them and rerun as your desktop user"
+
+    for tool_name in "${missing_tools[@]}"; do
+        case "$tool_name" in
+            qemu-img) if [[ "$manager" == apt-get ]]; then package_name=qemu-utils; else package_name=qemu-img; fi ;;
+            xz) if [[ "$manager" == apt-get ]]; then package_name=xz-utils; else package_name=xz; fi ;;
+            ssh|ssh-keygen|scp) if [[ "$manager" == apt-get ]]; then package_name=openssh-client; else package_name=openssh-clients; fi ;;
+            timeout|sha256sum|sha512sum) package_name=coreutils ;;
+            awk) package_name=gawk ;;
+            *) package_name="$tool_name" ;;
+        esac
+        duplicate=0
+        for existing_package in "${packages[@]}"; do
+            [[ "$existing_package" != "$package_name" ]] || duplicate=1
+        done
+        [[ "$duplicate" == 1 ]] || packages+=("$package_name")
+    done
+    log "Missing host tools: ${missing_tools[*]}"
+    log "Installing host packages with $manager: ${packages[*]} (sudo may request your password)"
+    if [[ "$manager" == apt-get ]]; then
+        run sudo apt-get update || die "host package index update failed; resolve the package-manager error and rerun"
+    fi
+    run sudo "$manager" install -y "${packages[@]}" \
+        || die "host dependency installation failed; resolve the package-manager error and rerun"
+    [[ "$DRY_RUN" -eq 0 ]] || die "dry run only: the package commands above were not executed; install the missing dependencies before full validation"
+    hash -r
+    for tool_name in "${missing_tools[@]}"; do
+        host_command_available "$tool_name" || die "required command still missing after package installation: $tool_name"
+    done
 }
 
 host_network_exists() {

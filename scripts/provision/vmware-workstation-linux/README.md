@@ -77,22 +77,31 @@ participant VM. See the example config alongside this README for the other optio
 - Approximately 140 GB of free disk space for the default expanded VM disks,
   plus enough RAM to run the selected guests. The defaults allocate 8 GB to
   CORE, 4 GB to APP, and 2 GB to PARTICIPANT.
-- `qemu-img`, `xorriso` (or `genisoimage`), `curl`, `openssl`, Python 3,
-  GNU `timeout`, `sha256sum`, and `sha512sum`.
+- The installer installs missing host tools using `sudo apt-get`, `sudo dnf`,
+  or `sudo yum`: `qemu-img`, `xorriso` (or an existing `genisoimage`), `curl`,
+  `openssl`, Python 3, GNU `timeout`/checksums, `tar`, `xz`, `gzip`, `awk`, `sed`,
+  and `grep`. Optional catalog imports also require Git and OpenSSH clients,
+  which are installed when needed. VMware remains a manual prerequisite.
 - Internet access from VMware's NAT network while the guests provision.
 
-On Debian or Ubuntu hosts, the non-VMware dependencies can usually be installed
-with:
+The installer runs as your desktop user and uses sudo only for package
+installation. It checks the commands again afterward and stops if installation
+fails. When all required commands exist, it makes no package-manager calls.
+`--dry-run` prints the required package commands without executing them; if
+tools are missing, it stops before validation that needs those tools. Status
+and cleanup do not trigger package installation.
+
+To preinstall dependencies on Debian or Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y qemu-utils xorriso curl openssl python3 coreutils
+sudo apt-get install -y qemu-utils xorriso curl openssl python3 coreutils tar xz-utils gzip gawk sed grep ca-certificates git openssh-client
 ```
 
 On Fedora-family hosts:
 
 ```bash
-sudo dnf install -y qemu-img xorriso curl openssl python3 coreutils
+sudo dnf install -y qemu-img xorriso curl openssl python3 coreutils tar xz gzip gawk sed grep ca-certificates git openssh-clients
 ```
 
 VMware documents its [supported Workstation host operating systems](https://knowledge.broadcom.com/external/article/315653/supported-host-operating-systems-for-wor.html),
