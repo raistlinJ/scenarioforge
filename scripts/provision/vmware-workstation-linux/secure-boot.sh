@@ -82,7 +82,7 @@ workstation_sign_modules_as_root() {
     # Called only by the root entry point after the desktop user's approval.
     # This directory is separate from lab state and is retained by lab cleanup.
     local key_dir=/var/lib/scenarioforge-vmware-secure-boot
-    local kernel sign_tool module path fingerprint pending key_public cert_public
+    local kernel sign_tool module path fingerprint pending enrolled key_public cert_public
     local -a module_paths=()
     umask 077
     kernel="$(uname -r)"
@@ -129,14 +129,22 @@ workstation_sign_modules_as_root() {
             || cp -p -- "$path" "$key_dir/$kernel-${path##*/}.before-signing" || return 1
         "$sign_tool" sha256 "$key_dir/MOK.priv" "$key_dir/MOK.der" "$path" || return 1
     done
-    if mokutil --test-key "$key_dir/MOK.der"; then return 0; fi
-    # Avoid asking for another password when this exact certificate is pending.
+    # --test-key exit codes differ across mokutil releases. Check the actual
+    # enrolled certificate inventory, never infer trust from exit status alone.
     fingerprint="$(openssl x509 -inform DER -in "$key_dir/MOK.der" -fingerprint -sha1 -noout)" || return 1
     fingerprint="${fingerprint#*=}"
+    [[ "$fingerprint" =~ ^([[:xdigit:]]{2}:){19}[[:xdigit:]]{2}$ ]] \
+        || { echo "Could not read signing certificate fingerprint" >&2; return 1; }
+    enrolled="$(LC_ALL=C mokutil --list-enrolled)" || return 1
+    if grep -Fiq -- "$fingerprint" <<<"$enrolled"; then return 0; fi
+    # Avoid asking for another password when this exact certificate is pending.
     pending="$(LC_ALL=C mokutil --list-new)" || return 1
     if ! grep -Fiq -- "$fingerprint" <<<"$pending"; then
         echo "Choose a temporary password for approval at the MOK Manager console."
         mokutil --import "$key_dir/MOK.der" || return 1
+        pending="$(LC_ALL=C mokutil --list-new)" || return 1
+        grep -Fiq -- "$fingerprint" <<<"$pending" \
+            || { echo "Certificate enrollment request was not found after import; inspect mokutil --list-new" >&2; return 1; }
     fi
     return 20
 }

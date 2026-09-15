@@ -80,13 +80,14 @@ participant VM. See the example config alongside this README for the other optio
 - The installer installs missing host tools using `sudo apt-get`, `sudo dnf`,
   or `sudo yum`: `qemu-img`, `xorriso` (or an existing `genisoimage`), `curl`,
   `openssl`, Python 3, GNU `timeout`/checksums, `tar`, `xz`, `gzip`, `awk`, `sed`,
-  `grep`, and `kmod` (`modinfo`/`modprobe`). EFI hosts also need `mokutil`. Optional catalog imports also require Git and OpenSSH clients,
+  `grep`, and `kmod` (`modinfo`/`modprobe`). EFI hosts also need `mokutil`.
+  Optional catalog imports also require Git and OpenSSH clients,
   which are installed when needed. VMware remains a manual prerequisite.
 - Internet access from VMware's NAT network while the guests provision.
 
-The installer runs as your desktop user and uses sudo only for package
-installation. It checks the commands again afterward and stops if installation
-fails. When all required commands exist, it makes no package-manager calls.
+The installer runs as your desktop user and uses sudo for host packages,
+VMware module loading, network management, and approved Secure Boot setup.
+It rechecks required commands after package installation and stops if it fails. When all required commands exist, it makes no package-manager calls.
 `--dry-run` prints the required package commands without executing them; if
 tools are missing, it stops before validation that needs those tools. Status
 and cleanup do not trigger package installation.
@@ -95,13 +96,13 @@ To preinstall dependencies on Debian or Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y qemu-utils xorriso curl openssl python3 coreutils tar xz-utils gzip gawk sed grep ca-certificates git openssh-client
+sudo apt-get install -y qemu-utils xorriso curl openssl python3 coreutils tar xz-utils gzip gawk sed grep ca-certificates git openssh-client kmod mokutil
 ```
 
 On Fedora-family hosts:
 
 ```bash
-sudo dnf install -y qemu-img xorriso curl openssl python3 coreutils tar xz gzip gawk sed grep ca-certificates git openssh-clients
+sudo dnf install -y qemu-img xorriso curl openssl python3 coreutils tar xz gzip gawk sed grep ca-certificates git openssh-clients kmod mokutil
 ```
 
 VMware documents its [supported Workstation host operating systems](https://knowledge.broadcom.com/external/article/315653/supported-host-operating-systems-for-wor.html),

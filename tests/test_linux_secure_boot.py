@@ -115,9 +115,14 @@ stat() {{ echo 0:700; }}
 install() {{ mkdir -m 700 "$8"; }}
 mokutil() {{
     case "$1" in
-        --test-key) [[ "$TEST_ENROLLED" == 1 ]] ;;
+        # Reproduce releases reporting success even when the key is absent.
+        --test-key) echo "$2 is not enrolled"; return 0 ;;
+        --list-enrolled)
+            if [[ "$TEST_ENROLLED" == 1 ]]; then
+                openssl x509 -inform DER -in {shlex.quote(str(key_dir / 'MOK.der'))} -fingerprint -sha1 -noout
+            fi ;;
         --list-new)
-            if [[ "$TEST_PENDING" == 1 ]]; then
+            if [[ "$TEST_PENDING" == 1 ]] || grep -q IMPORT "$TEST_TRACE" 2>/dev/null; then
                 openssl x509 -inform DER -in {shlex.quote(str(key_dir / 'MOK.der'))} -fingerprint -sha1 -noout
             fi ;;
         --import) echo IMPORT >> "$TEST_TRACE" ;;
@@ -199,3 +204,17 @@ ensure_vmware_kernel_modules
     assert result.returncode != 0
     assert 'SIGNING_APPROVED' in result.stdout
     assert 'enrollment pending' in result.stderr
+
+
+@pytest.mark.parametrize('failure', ['inventory', 'import_no_effect'])
+def test_enrollment_inventory_failures_do_not_claim_success(tmp_path, failure):
+    shell, env, key_dir, trace = signing_fixture(tmp_path)
+    if failure == 'inventory':
+        shell = shell.replace('--list-enrolled)\n', '--list-enrolled) return 9;\n')
+    else:
+        shell = shell.replace('--import) echo IMPORT >> "$TEST_TRACE"', '--import) return 0')
+    result = subprocess.run(['bash', '-c', shell], env=env, capture_output=True, text=True)
+    assert result.returncode not in (0, 20)
+    if failure == 'import_no_effect':
+        assert 'enrollment request was not found' in result.stderr
+    assert 'IMPORT' not in trace.read_text()
