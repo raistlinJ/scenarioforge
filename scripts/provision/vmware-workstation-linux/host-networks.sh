@@ -7,6 +7,7 @@ WORKSTATION_PLANNED_HITL_VMNET=""
 WORKSTATION_PLANNED_HITL_SUBNET=""
 WORKSTATION_PLANNED_HITL_NETMASK=""
 KEEP_HITL_NETWORK=0
+WORKSTATION_NETWORK_FAILURE=""
 
 workstation_require_network_inventory() {
     [[ -f "$VMWARE_NETWORKING_FILE" && -r "$VMWARE_NETWORKING_FILE" \
@@ -250,26 +251,46 @@ destination.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 PY
 }
 
+workstation_network_step() {
+    local label="$1" status=0 command_text
+    shift
+    "$@" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+        printf -v command_text '%q ' "$@"
+        WORKSTATION_NETWORK_FAILURE="$label failed (exit $status): $command_text"
+        warn "$WORKSTATION_NETWORK_FAILURE"
+    fi
+    return "$status"
+}
+
 workstation_configure_networking() {
     local candidate
-    candidate="$(mktemp "$STATE_DIR/networking-migrate.XXXXXX")"
-    cp -- "$VMWARE_NETWORKING_FILE" "$candidate"
+    candidate="$(mktemp "$STATE_DIR/networking-migrate.XXXXXX")" || {
+        WORKSTATION_NETWORK_FAILURE="could not create network migration file in $STATE_DIR"
+        return 1
+    }
     local status=0
-    sudo "$WORKSTATION_VMNET_CLI" --migrate-network-settings "$candidate" || status=$?
+    if workstation_network_step "Copy network settings for migration" cp -- "$VMWARE_NETWORKING_FILE" "$candidate"; then
+        workstation_network_step "Migrate network settings" sudo "$WORKSTATION_VMNET_CLI" --migrate-network-settings "$candidate" || status=$?
+    else
+        status=$?
+    fi
     rm -f -- "$candidate"
     return "$status"
 }
 workstation_reload_networking() {
-    sudo "$WORKSTATION_VMNET_CLI" --stop \
+    workstation_network_step "Stop VMware networking" sudo "$WORKSTATION_VMNET_CLI" --stop \
         && workstation_configure_networking \
-        && sudo "$WORKSTATION_VMNET_CLI" --start
+        && workstation_network_step "Start VMware networking" sudo "$WORKSTATION_VMNET_CLI" --start
 }
 
 workstation_restore_networking() {
     local backup="$1"
     warn "Restoring the previous VMware Workstation network configuration"
-    sudo install -o root -g root -m 0644 "$backup" "$VMWARE_NETWORKING_FILE" \
-        && workstation_reload_networking
+    workstation_network_step "Stop VMware networking for rollback" sudo "$WORKSTATION_VMNET_CLI" --stop \
+        && workstation_network_step "Restore network configuration" sudo install -o root -g root -m 0644 "$backup" "$VMWARE_NETWORKING_FILE" \
+        && workstation_configure_networking \
+        && workstation_network_step "Restart VMware networking after rollback" sudo "$WORKSTATION_VMNET_CLI" --start
 }
 
 apply_host_network_plan() {
@@ -285,23 +306,29 @@ apply_host_network_plan() {
     INSTALLER_CREATED_HITL_NETMASK="$WORKSTATION_PLANNED_HITL_NETMASK"
     write_state
     log "Creating isolated $HITL_VMNET; Linux may request an administrator password"
-    if ! sudo "$WORKSTATION_VMNET_CLI" --stop \
-        || ! sudo install -o root -g root -m 0644 "$candidate" "$VMWARE_NETWORKING_FILE" \
-        || ! workstation_reload_networking; then
-        workstation_restore_networking "$backup" || true
+    WORKSTATION_NETWORK_FAILURE=""
+    if ! workstation_network_step "Stop VMware networking" sudo "$WORKSTATION_VMNET_CLI" --stop \
+        || ! workstation_network_step "Install network configuration" sudo install -o root -g root -m 0644 "$candidate" "$VMWARE_NETWORKING_FILE" \
+        || ! workstation_configure_networking \
+        || ! workstation_network_step "Start VMware networking" sudo "$WORKSTATION_VMNET_CLI" --start; then
+        local failure="$WORKSTATION_NETWORK_FAILURE" rollback="Previous configuration restored and networking restarted."
+        workstation_restore_networking "$backup" \
+            || rollback="Rollback failed: $WORKSTATION_NETWORK_FAILURE. Backup retained at $backup."
         if ! workstation_vmnet_is_configured "$HITL_VMNET"; then INSTALLER_CREATED_HITL_VMNET=""; fi
         write_state
-        die "could not apply the VMware Workstation network configuration"
+        die "could not apply the VMware Workstation network configuration: $failure. $rollback"
     fi
     local attempt
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
         workstation_hitl_network_is_safe "$HITL_VMNET" && return
         sleep 1
     done
-    workstation_restore_networking "$backup" || true
+    local rollback="The previous configuration was restored and networking restarted."
+    workstation_restore_networking "$backup" \
+        || rollback="Rollback failed: $WORKSTATION_NETWORK_FAILURE. Backup retained at $backup."
     if ! workstation_vmnet_is_configured "$HITL_VMNET"; then INSTALLER_CREATED_HITL_VMNET=""; fi
     write_state
-    die "Workstation did not activate $HITL_VMNET as an isolated network; the previous configuration was restored"
+    die "Workstation did not activate $HITL_VMNET as an isolated network. $rollback"
 }
 
 describe_host_network_cleanup() {

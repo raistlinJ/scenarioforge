@@ -80,7 +80,7 @@ participant VM. See the example config alongside this README for the other optio
 - The installer installs missing host tools using `sudo apt-get`, `sudo dnf`,
   or `sudo yum`: `qemu-img`, `xorriso` (or an existing `genisoimage`), `curl`,
   `openssl`, Python 3, GNU `timeout`/checksums, `tar`, `xz`, `gzip`, `awk`, `sed`,
-  and `grep`. Optional catalog imports also require Git and OpenSSH clients,
+  `grep`, and `kmod` (`modinfo`/`modprobe`). EFI hosts also need `mokutil`. Optional catalog imports also require Git and OpenSSH clients,
   which are installed when needed. VMware remains a manual prerequisite.
 - Internet access from VMware's NAT network while the guests provision.
 
@@ -108,6 +108,41 @@ VMware documents its [supported Workstation host operating systems](https://know
 [network types](https://knowledge.broadcom.com/external/article?legacyId=1006480),
 and [Virtual Network Editor](https://knowledge.broadcom.com/external/article/339371)
 separately.
+
+## Secure Boot and VMware kernel modules
+
+Before changing lab networks, the installer checks that `vmmon` and `vmnet`
+can load for the running kernel. Missing modules must first be built using
+VMware's `vmware-modconfig --console --install-all` tool.
+
+If Secure Boot prevents unsigned or untrusted VMware modules from loading,
+the installer offers a separate **default-no approval prompt**. `--yes` does
+not approve signing. Noninteractive runs stop with instructions, and dry runs
+perform no module loading, signing, or enrollment.
+
+Approving allows the installer to:
+
+1. Install matching kernel headers/development files if the signing tool is missing.
+2. Generate or reuse a root-protected signing key in
+   `/var/lib/scenarioforge-vmware-secure-boot` (directory mode `0700`).
+3. Back up and sign the installed, uncompressed `vmmon.ko` and `vmnet.ko` files.
+4. Request certificate enrollment through `mokutil`, unless the certificate is
+   already enrolled or its enrollment is pending. Enrolling the certificate
+   allows the kernel to trust modules signed with this key.
+
+For a new enrollment, choose the temporary password when `mokutil` asks.
+The installer stops before provisioning lab networks or VMs. It does not reboot
+the machine. Reboot when ready and use the machine's console to choose
+**Enroll MOK → Continue → Yes**, enter that password, and reboot again. Then
+rerun the same installer command as your normal desktop user.
+
+After enrollment, the installer can load the signed modules and continue.
+Kernel or VMware updates can replace the modules; signing can be approved again
+using the same key, without another enrollment if it remains trusted. Lab cleanup
+preserves the protected signing directory and its module backups. Compressed
+modules are not modified automatically; build uncompressed VMware modules first.
+
+This follows [Broadcom's module-signing procedure](https://knowledge.broadcom.com/external/article/315309/cannot-open-devvmmon-no-such-file-or-dir.html).
 
 ## One-time network setup
 

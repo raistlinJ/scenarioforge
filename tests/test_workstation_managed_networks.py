@@ -255,3 +255,70 @@ prepare_host_network_plan
     assert "cannot inspect running VMware VMs" in result.stderr
     assert "no unused Workstation vmnet" not in result.stderr
     assert config.read_text() == "VERSION=1,0\n"
+
+
+@pytest.mark.parametrize("stage,label", [
+    ("--stop", "Stop VMware networking"),
+    ("install", "Install network configuration"),
+    ("--migrate-network-settings", "Migrate network settings"),
+    ("--start", "Start VMware networking"),
+])
+def test_linux_network_failure_reports_step_and_rolls_back(tmp_path, stage, label):
+    config = tmp_path / "networking"
+    original = "VERSION=1,0\nanswer VNET_1_DHCP yes\n"
+    config.write_text(original)
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+WORK_DIR={shlex.quote(str(tmp_path))}
+STATE_DIR="$WORK_DIR"
+WORKSTATION_NETWORK_PLAN=1
+HITL_VMNET=vmnet2
+WORKSTATION_PLANNED_HITL_SUBNET=10.254.200.0
+WORKSTATION_PLANNED_HITL_NETMASK=255.255.255.0
+write_state() {{ :; }}
+failed_once=0
+sudo() {{
+    local operation="$1"
+    [[ "$1" != vmware-networks ]] || operation="$2"
+    if [[ "$operation" == {shlex.quote(stage)} && "$failed_once" == 0 ]]; then
+        failed_once=1
+        echo 'simulated VMware failure' >&2
+        return 23
+    fi
+    if [[ "$1" == install ]]; then cp "$8" "$9"; fi
+    return 0
+}}
+apply_host_network_plan
+'''], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert f"{label} failed (exit 23)" in result.stderr
+    assert "Previous configuration restored and networking restarted" in result.stderr
+    assert config.read_text() == original
+
+
+def test_linux_network_rollback_failure_is_reported(tmp_path):
+    config = tmp_path / "networking"
+    config.write_text("VERSION=1,0\n")
+    result = subprocess.run(["bash", "-c", f'''
+source {shlex.quote(str(LINUX))}
+VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
+WORK_DIR={shlex.quote(str(tmp_path))}
+STATE_DIR="$WORK_DIR"
+WORKSTATION_NETWORK_PLAN=1
+HITL_VMNET=vmnet2
+WORKSTATION_PLANNED_HITL_SUBNET=10.254.200.0
+WORKSTATION_PLANNED_HITL_NETMASK=255.255.255.0
+write_state() {{ :; }}
+sudo() {{
+    if [[ "$1" == install ]]; then cp "$8" "$9"; return; fi
+    [[ "$2" != --start ]] || return 24
+    return 0
+}}
+apply_host_network_plan
+'''], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Start VMware networking failed (exit 24)" in result.stderr
+    assert "Rollback failed: Restart VMware networking after rollback failed (exit 24)" in result.stderr
+    assert "Previous configuration restored and networking restarted" not in result.stderr
+    assert (tmp_path / "workstation-networking.before").exists()

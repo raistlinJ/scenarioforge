@@ -190,7 +190,7 @@ Important options:
   --verbose                   show detailed commands and guest progress
   --watch                     keep printing status until provisioning completes
   --interval SECONDS          status interval (default: 10, minimum: 2)
-  --yes                       do not ask for confirmation
+  --yes                       skip lab confirmation (Secure Boot still asks)
   --dry-run                   validate and show the plan without changing files or VMs
   --cleanup                   alias for the cleanup command
   --force                     allow cleanup of a complete, running lab
@@ -382,14 +382,16 @@ require_linux_workstation() {
     require_workstation_runtime
     command -v vmware-vdiskmanager >/dev/null 2>&1 || die "required VMware command not found: vmware-vdiskmanager"
     ensure_linux_host_dependencies
+    ensure_vmware_kernel_modules
 }
 
 host_command_available() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_linux_host_dependencies() {
     local tool_name manager="" package_name existing_package duplicate
-    local -a required_tools=(qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz gzip awk sed grep)
+    local -a required_tools=(qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz gzip awk sed grep modinfo modprobe)
     local -a missing_tools=() packages=(ca-certificates)
+    [[ ! -d /sys/firmware/efi ]] || required_tools+=(mokutil)
     if [[ "$INSTALL_FLAG_GENERATORS" == 1 || "$INSTALL_VULNHUB" == 1 ]]; then
         required_tools+=(git ssh ssh-keygen scp)
     fi
@@ -414,6 +416,7 @@ ensure_linux_host_dependencies() {
             ssh|ssh-keygen|scp) if [[ "$manager" == apt-get ]]; then package_name=openssh-client; else package_name=openssh-clients; fi ;;
             timeout|sha256sum|sha512sum) package_name=coreutils ;;
             awk) package_name=gawk ;;
+            modinfo|modprobe) package_name=kmod ;;
             *) package_name="$tool_name" ;;
         esac
         duplicate=0
@@ -447,6 +450,7 @@ validate_hitl_isolation() {
 
 # Fusion overrides these hooks after sourcing this installer.
 source "${BASH_SOURCE[0]%/*}/host-networks.sh"
+source "${BASH_SOURCE[0]%/*}/secure-boot.sh"
 
 validate_inputs() {
     if declare -F derive_fusion_management_addresses >/dev/null; then
