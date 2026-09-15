@@ -164,7 +164,7 @@ def _default_hint_levels_for_outputs(produces: Any, *, plugin_type: str = '') ->
     return {
         'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
-        'high': ['Work through the access instructions for this step in order.'],
+        'high': ['Answer: {{OUTPUT.Flag(flag_id)}}'],
     }
 
 
@@ -1687,7 +1687,7 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         inferred['hint_levels'] = {
             'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
             'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
-            'high': ['Work through the access instructions for this step in order.'],
+            'high': ['Answer: {{OUTPUT.Flag(flag_id)}}'],
         }
         notes['write_file_under_outputs_artifacts'] = True
         notes['readme_mentions'] = list(dict.fromkeys(notes['readme_mentions'] + ['determinism', 'local runner testing']))
@@ -1702,7 +1702,7 @@ def _compile_prompt_intent(prompt: str, plugin_type: str) -> dict[str, Any]:
         inferred.setdefault('hint_levels', {
             'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
             'medium': ['Credential: {{OUTPUT.Credential(user,password)}}'],
-            'high': ['Work through the access instructions for this step in order.'],
+            'high': ['Answer: {{OUTPUT.Flag(flag_id)}}'],
         })
         notes['write_file_under_outputs_artifacts'] = True
 
@@ -2229,7 +2229,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
             '- outputs.json must include generator_id and Flag(flag_id).',
             '- Keep outputs deterministic and ensure all declared outputs exist.',
             '- Include access_instructions for interactive service/file/credential artifacts.',
-            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should state the solving workflow outright. Never reference a README, the generator manifest, or docker-compose.yml in a hint: participants cannot open those and Flow filters such lines out.',
+            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should provide the answer directly using {{OUTPUT.Flag(flag_id)}}. Never reference a README, the generator manifest, or docker-compose.yml in a hint: participants cannot open those and Flow filters such lines out.',
         ]
         if plugin_type == 'flag-node-generator':
             kind_requirements.extend([
@@ -2255,7 +2255,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
         '  "optional_requires": ["Knowledge(hostname)"],',
         '  "produces": ["Flag(flag_id)", "Credential(user,password)", "FlagDelivery(mode)", "FlagFile(path)"],',
         '  "runtime_inputs": [{"name": "seed", "type": "string", "required": true, "description": "Deterministic run seed"}, {"name": "flag_prefix", "type": "string", "required": false, "default": "FLAG", "description": "Flag wrapper prefix"}, {"name": "unlock_code", "type": "string", "required": true, "sensitive": true, "flow_supply_when_first": true}],',
-        '  "hint_levels": {"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Work through the access instructions for this step in order."]},',
+        '  "hint_levels": {"low": ["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."], "medium": ["Service/artifact: {{OUTPUT.File(path):basename}}"], "high": ["Answer: {{OUTPUT.Flag(flag_id)}}"]},',
         '  "inject_files": ["File(path)"],',
         '  "inject_candidate_paths": ["/opt/uploads", "/var/www/html"],',
         '  "access_instructions": {"title": "How to Access", "steps": [{"step": 1, "title": "Connect", "instructions": "Use {{NODE}} and {{PORT}}.", "vars": {"NODE": "node_name", "PORT": "PortForward(host, port)"}}]},',
@@ -2267,7 +2267,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
     ]
     if ultra_compact_prompt:
         schema_lines = [
-            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact or service: {{OUTPUT.File(path)}}"],"high":["Work through the access instructions for this step in order."]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
+            '{"plugin_id":"source_identifier","folder_name":"py_source_identifier","name":"Human-readable name","description":"One sentence summary","requires":[{"artifact":"Knowledge(ip)","optional":false}],"optional_requires":[],"produces":["Flag(flag_id)"],"runtime_inputs":[],"hint_levels":{"low":["Inspect the exposed service before moving to {{NEXT_NODE_NAME}}."],"medium":["Artifact or service: {{OUTPUT.File(path)}}"],"high":["Answer: {{OUTPUT.Flag(flag_id)}}"]},"inject_files":[],"inject_candidate_paths":[],"access_instructions":{},"env":{},"readme_text":"full README.md text","generator_py_text":"full generator.py text","compose_text":"full docker-compose.yml text if needed"}',
         ]
     elif compact_grounding:
         schema_lines = [

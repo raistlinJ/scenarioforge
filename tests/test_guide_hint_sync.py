@@ -116,3 +116,30 @@ def test_hint_level_templates_are_a_fallback_not_an_override() -> None:
         assert guard in body[templates_at:], (
             f"{path.name} merges hint_level_templates over an existing level"
         )
+
+
+def test_legacy_workflow_redirects_become_answer_templates() -> None:
+    import ast
+
+    # Exercise the backend normalizer without starting the web application.
+    source = _read(REPO_ROOT / "webapp" / "app_backend.py")
+    function = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_flow_normalize_hint_levels")
+    namespace = {
+        "Any": object,
+        "re": re,
+        "_FLOW_HINT_LEVELS": ("low", "medium", "high"),
+        "_flow_norm_string_list": lambda value: value or [],
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "hints", "exec"), namespace)
+    normalize = namespace["_flow_normalize_hint_levels"]
+    for redirect in (
+        "Inspect the generated artifact contents for the complete workflow.",
+        "Work through the access instructions for this step in order.",
+        "Use the access instructions in this generator manifest.",
+    ):
+        result = normalize({"low": ["Target: host"], "high": [redirect]})
+        assert result["high"] == ["Answer: {{OUTPUT.Flag(flag_id)}}"]
+        assert result["low"] == ["Target: host"]
+    assert normalize({"high": ["Answer: flag{example}"]})["high"] == ["Answer: flag{example}"]

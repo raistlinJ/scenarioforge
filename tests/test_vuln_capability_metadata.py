@@ -855,3 +855,27 @@ def test_only_the_first_assignment_gets_promoted_hints(monkeypatch):
     assert len(out) == 2
     assert out[0].get('promoted_first_step_hints'), 'first step should disclose the credential'
     assert not out[1].get('promoted_first_step_hints'), 'later steps must stay gated'
+
+
+def test_optional_guidance_preserves_commands_and_capabilities():
+    command = '```bash\ncurl http://{{NODE_IP}}:8080/\necho done\n```'
+    records, errors = validate_vuln_metadata_doc({'schema_version': 1, 'vulns': [{
+        'match': 'demo', 'impact': 'remote_code_execution',
+        'hint_levels': {'high': [command]},
+        'access_instructions': {'steps': [{'title': 'Inspect', 'instructions': command}]},
+    }]})
+    assert not errors
+    assert records[0].hint_levels == {'high': [command]}
+    assert records[0].access_instructions['steps'][0]['instructions'] == command
+    assert 'Shell(host)' in records[0].provides
+
+
+def test_invalid_optional_guidance_does_not_drop_capabilities():
+    records, errors = validate_vuln_metadata_doc({'schema_version': 1, 'vulns': [{
+        'match': 'demo', 'impact': 'remote_code_execution',
+        'hint_levels': {'high': [42]}, 'access_instructions': {'steps': ['invalid']},
+    }]})
+    assert len(errors) == 2
+    assert records[0].hint_levels == {}
+    assert records[0].access_instructions == {}
+    assert 'Shell(host)' in records[0].provides

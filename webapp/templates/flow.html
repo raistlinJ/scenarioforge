@@ -4,6 +4,7 @@
 {% block header_icon %}<i class="bi bi-bezier2 fs-4"></i>{% endblock %}
 {% block header_title %}Flag Sequencing{% endblock %}
 {% block extra_head %}
+<script src="{{ url_for('static', filename='vulnerability_guidance.js') }}"></script>
 <script async src="/static/vendor/mermaid-10.min.js"
   onload="window.dispatchEvent(new Event('coretg-mermaid-ready'))"></script>
 <style>
@@ -4291,6 +4292,9 @@
     const seen = new Set();
     const add = (level, value) => {
       const key = String(level || '').trim().toLowerCase();
+      if (key === 'high' && /complete workflow|access instructions|generator manifest|README/i.test(String(value || ''))) {
+        value = 'Answer: ' + flowTemplateToken('OUTPUT.Flag(flag_id)');
+      }
       if (!FLOW_HINT_LEVEL_ORDER.includes(key)) return;
       let text = _applyHintOutputTemplates(String(value || '').trim(), source);
       text = _applyHintNodeTemplateVars(text, source).trim();
@@ -4480,7 +4484,8 @@
     const outputs = (source.resolved_outputs && typeof source.resolved_outputs === 'object' && !Array.isArray(source.resolved_outputs)) ? source.resolved_outputs : {};
     const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
     addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the target details and access instructions for this step.');
-    addDefault('high', 'Work through the access instructions for this step in order.');
+    const answer = String(outputs['Flag(flag_id)'] || '').trim();
+    if (answer) addDefault('high', `Answer: ${answer}`);
     return out;
   }
 
@@ -12340,7 +12345,7 @@
     return null;
   }
 
-  async function _guideBuildVulnReadmeEntries(chain, assignments) {
+  async function _guideBuildVulnReadmeEntries(chain, assignments, includeReadmes = false) {
     try {
       const nodes = Array.isArray(chain) ? chain : [];
       const alignedAssignments = alignAssignmentsToChain(nodes, Array.isArray(assignments) ? assignments : []);
@@ -12368,6 +12373,17 @@
           if (!matched) continue;
           const itemId = Number(matched.id || 0);
           if (!Number.isFinite(itemId) || itemId <= 0) continue;
+          out.push({
+            step, itemId, vulnName,
+            hint_levels: matched.hint_levels || {},
+            access_instructions: matched.access_instructions || {},
+            templateVars: {
+              NODE_IP: String(node.ip4 || node.ipv4 || node.ip || assignment.node_ip || '').split('/')[0],
+              NODE_NAME: String(node.name || assignment.node_name || node.id || ''),
+            },
+          });
+          if (!includeReadmes) continue;
+
 
           if (!readmeCache.has(itemId)) {
             let payload = null;
@@ -13909,8 +13925,9 @@
       }
 
       const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
-      if (facilitatorMode && stepVulnReadmes.length) {
-        lines.push('### Reference Notes');
+      lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes));
+      if (facilitatorMode && stepVulnReadmes.some(entry => entry.content)) {
+        lines.push('### Publicly available documentation');
         lines.push('');
         stepVulnReadmes.forEach((entry) => {
           const label = String(entry.vulnName || `Vulnerability ${entry.itemId || ''}`).trim();
@@ -14691,7 +14708,7 @@
     if (kind === 'participant-guide' || kind === 'facilitator-guide') {
       const facilitator = kind === 'facilitator-guide';
       setFlowDownloadModalStatus('Collecting vulnerability notes…');
-      const vulnReadmeEntries = facilitator ? await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments) : [];
+      const vulnReadmeEntries = await _guideBuildVulnReadmeEntries(currentChain, currentFlagAssignments, facilitator);
       setFlowDownloadModalStatus('Collecting participant network setup…');
       const participantNetworkSetup = await loadParticipantNetworkSetupForGuide(scenario);
       setFlowDownloadModalStatus('Building guide HTML…');

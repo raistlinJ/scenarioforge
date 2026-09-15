@@ -214,3 +214,65 @@ existing catalog keeps working while you populate the file.
 
 - [`docs/FLAG_GENERATORS_ALLOWED_INPUTS_OUTPUTS.md`](FLAG_GENERATORS_ALLOWED_INPUTS_OUTPUTS.md) — the fact vocabulary generators use
 - [`schemas/facts/fact_ontology_reference.yaml`](../schemas/facts/fact_ontology_reference.yaml) — canonical fact signatures
+
+## Optional participant hints and walkthrough steps
+
+Vulnerability entries can also provide `hint_levels` and `access_instructions`.
+These fields are optional, including individual hint levels. Existing Vulhub-style
+packs need no changes. Add a `scenarioforge.vuln.yaml` alongside the vulnerability's
+compose file, or add the fields to its catalog/site-wide metadata entry. The same
+metadata precedence described above applies to the entire entry; guidance does
+not merge across precedence levels.
+
+````yaml
+schema_version: 1
+match: example/service
+hint_levels:
+  low:
+    - "Inspect the service on {{NODE_NAME}}."
+  medium:
+    - "Scan TCP port 8080 on {{NODE_IP}}."
+  high:
+    - |
+      Request the exposed diagnostic endpoint:
+      ```bash
+      curl http://{{NODE_IP}}:8080/diagnostics
+      ```
+access_instructions:
+  title: Inspect the exposed diagnostics
+  steps:
+    - title: Confirm the service
+      instructions: |
+        ```bash
+        curl -I http://{{NODE_IP}}:8080/
+        ```
+    - title: Retrieve the diagnostic data
+      instructions: |
+        ```bash
+        curl http://{{NODE_IP}}:8080/diagnostics
+        ```
+        Inspect the response for the challenge's disclosed information.
+````
+
+This example demonstrates the format; replace it with commands appropriate to
+that vulnerability. Retain any existing `impact`, `requires`, and `provides`
+fields when adding guidance to capability metadata.
+
+Both the Flow and Reports guide exports include available vulnerability hints
+at their respective low/medium/high levels. Ordered walkthrough steps appear in
+a separate collapsed **Vulnerability Walkthrough (Spoilers)** section in both
+participant and facilitator guides. Commands retain Markdown code fences and
+line breaks. No hint or walkthrough section is added when its metadata is absent.
+
+Supported substitutions are `{{NODE_IP}}` (the current target IP, without a CIDR
+suffix) and `{{NODE_NAME}}` (the current target name). Ports, paths, credentials,
+and payloads must be supplied explicitly by the metadata author; ports are not
+automatically inferred or remapped. A hint or step with unresolved placeholders
+is omitted to avoid publishing an incomplete command. These vulnerability fields
+do not use the flag generator's output substitution context.
+
+Guidance is read from the active installed catalog when a guide is exported.
+The catalog and matching vulnerability entry must remain available. The existing
+README reference section remains facilitator-only and is labeled **Publicly
+available documentation**. README text is not converted into participant hints
+or walkthrough steps automatically.

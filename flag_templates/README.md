@@ -9,7 +9,7 @@ hint_levels:
   medium:
     - "Service or artifact: {{OUTPUT.File(path)}}"
   high:
-    - "Use the access instructions and README.md for the complete workflow."
+    - "Answer: {{OUTPUT.Flag(flag_id)}}"
 ```
 
 Each level must contain at least one non-empty hint.

@@ -19637,6 +19637,15 @@ def _flow_normalize_hint_levels(value: Any) -> dict[str, list[str]]:
         return out
     for level in _FLOW_HINT_LEVELS:
         out[level] = _flow_norm_string_list(value.get(level))
+        # Replace legacy redirects before output placeholders are resolved.
+        out[level] = [
+            'Answer: {{OUTPUT.Flag(flag_id)}}'
+            if level == 'high' and re.search(
+                r'complete workflow|access instructions|generator manifest|README', text, re.I
+            ) else text
+            for text in out[level]
+        ]
+
     return out
 
 
@@ -47701,7 +47710,7 @@ def _default_scaffold_hint_levels(produces: list[str], *, plugin_type: str = '')
     return {
         'low': ['Inspect the exposed service before moving to {{NEXT_NODE_NAME}}.'],
         'medium': [medium],
-        'high': ['Work through the access instructions for this step in order.'],
+        'high': ['Answer: {{OUTPUT.Flag(flag_id)}}'],
     }
 
 

@@ -170,6 +170,16 @@ def register(
             return parts[-1] if parts else base
 
         base_dir = vuln_catalog_pack_content_dir(cid)
+        from scenarioforge.vulns.metadata import load_vuln_metadata_index
+        metadata_dirs = []
+        for item in items:
+            try:
+                metadata_dirs.append(safe_path_under(base_dir, str(item.get('dir_rel') or item.get('rel_dir') or '')))
+            except Exception:
+                continue
+        guidance_index = load_vuln_metadata_index(
+            entry_dirs=metadata_dirs, catalog_dirs=[base_dir, os_module.path.dirname(base_dir)], repo_root=get_repo_root(),
+        )
         out_items: list[dict[str, Any]] = []
         for item in items:
             readme_url = ''
@@ -215,7 +225,10 @@ def register(
                         log_download_url = url_for('vuln_catalog_item_test_log_download', item_id=int(item.get('id') or 0))
                 except Exception:
                     log_download_url = ''
+            guidance = guidance_index.lookup(item.get('dir_rel'), item.get('rel_dir'), item.get('name'), _display_name(item))
             out_items.append({
+                'hint_levels': guidance.hint_levels if guidance else {},
+                'access_instructions': guidance.access_instructions if guidance else {},
                 'id': int(item.get('id') or 0),
                 'name': _display_name(item),
                 'category': str(item.get('category') or '').strip() or None,

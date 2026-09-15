@@ -214,6 +214,8 @@ class VulnFacts:
     cve: str = ''
     notes: str = ''
     source_path: str = ''
+    hint_levels: Dict[str, List[str]] = field(default_factory=dict)
+    access_instructions: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def canonical_requires(self) -> Set[str]:
@@ -432,6 +434,35 @@ def validate_vuln_metadata_doc(
         if bad_fact:
             continue
 
+        # Guidance is optional and does not change solver capabilities. Invalid
+        # guidance is reported without discarding otherwise valid capability data.
+        hint_levels = {}
+        raw_hints = raw.get('hint_levels', {})
+        if not isinstance(raw_hints, dict):
+            errors.append(f'{label}.hint_levels must be a mapping')
+        else:
+            for level, values in raw_hints.items():
+                if level not in ('low', 'medium', 'high') or not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                    errors.append(f'{label}.hint_levels.{level} must be a low/medium/high list of strings')
+                    continue
+                cleaned = [v.strip() for v in values if v.strip()]
+                if cleaned:
+                    hint_levels[level] = cleaned
+        access_instructions = {}
+        raw_access = raw.get('access_instructions', {})
+        if not isinstance(raw_access, dict) or not isinstance(raw_access.get('steps', []), list):
+            errors.append(f'{label}.access_instructions must contain a steps list')
+        else:
+            steps = []
+            for position, step in enumerate(raw_access.get('steps', []), 1):
+                if not isinstance(step, dict) or not isinstance(step.get('instructions'), str) or not step['instructions'].strip():
+                    errors.append(f'{label}.access_instructions.steps[{position - 1}] needs instructions text')
+                    continue
+                steps.append({'title': str(step.get('title') or f'Step {position}').strip(),
+                              'instructions': step['instructions'].strip()})
+            if steps:
+                access_instructions = {'title': str(raw_access.get('title') or 'Walkthrough'), 'steps': steps}
+
         records.append(
             VulnFacts(
                 key=key or cve_value,
@@ -441,6 +472,8 @@ def validate_vuln_metadata_doc(
                 cve=cve_value,
                 notes=str(raw.get('notes') or '').strip(),
                 source_path=source,
+                hint_levels=hint_levels,
+                access_instructions=access_instructions,
             )
         )
 

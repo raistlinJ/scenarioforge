@@ -2,6 +2,7 @@
 {% block title %}Run Reports{% endblock %}
 {% block active_page %}{% set active_page='reports' %}{% endblock %}
 {% block extra_head %}
+<script src="{{ url_for('static', filename='vulnerability_guidance.js') }}"></script>
 <style>
   body { padding-bottom: 0; }
   /* Fill the remaining viewport below the app chrome (header+nav). */
@@ -1314,7 +1315,8 @@ function ensureReportGuideHintLevelCoverage(levels, assignment, context) {
   const outputs = reportHintOutputsForAssignment(source) || {};
   const outputEntry = Object.entries(outputs).find(([key, value]) => String(key || '').trim() && !/^Flag\(/i.test(String(key || '').trim()) && String(value ?? '').trim());
   addDefault('medium', outputEntry ? `${outputEntry[0]}: ${outputEntry[1]}` : 'Review the target details and access instructions for this step.');
-  addDefault('high', 'Work through the access instructions for this step in order.');
+  const answer = String(outputs['Flag(flag_id)'] || '').trim();
+  if (answer) addDefault('high', `Answer: ${answer}`);
   return out;
 }
 
@@ -1326,6 +1328,9 @@ function normalizeReportHintLevels(assignment, options) {
   const seen = new Set();
   const add = (level, value) => {
     const key = String(level || '').trim().toLowerCase();
+      if (key === 'high' && /complete workflow|access instructions|generator manifest|README/i.test(String(value || ''))) {
+        value = 'Answer: ' + _REPORT_TEMPLATE_OPEN + 'OUTPUT.Flag(flag_id)' + _REPORT_TEMPLATE_CLOSE;
+      }
     if (!REPORT_HINT_LEVEL_ORDER.includes(key)) return;
     const text = applyReportHintOutputTemplates(String(value || '').trim(), source).trim();
     if (!text) return;
@@ -2238,8 +2243,9 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     }
 
     const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
-    if (facilitatorMode && stepVulnReadmes.length) {
-      lines.push('### Reference Notes');
+    lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes));
+    if (facilitatorMode && stepVulnReadmes.some(entry => entry.content)) {
+      lines.push('### Publicly available documentation');
       lines.push('');
       stepVulnReadmes.forEach((entry) => {
         const label = String(entry.vulnName || `Vulnerability ${entry.itemId || ''}`).trim();
@@ -2325,7 +2331,7 @@ function _reportGuideMatchVulnCatalogItem(vulnName, items) {
   return null;
 }
 
-async function _reportGuideBuildVulnReadmeEntries(chain, assignments) {
+async function _reportGuideBuildVulnReadmeEntries(chain, assignments, includeReadmes = false) {
   try {
     const nodes = Array.isArray(chain) ? chain : [];
     const alignedAssignments = alignAssignmentsToChainLocal(nodes, assignments);
@@ -2353,6 +2359,17 @@ async function _reportGuideBuildVulnReadmeEntries(chain, assignments) {
         if (!matched) continue;
         const itemId = Number(matched.id || 0);
         if (!Number.isFinite(itemId) || itemId <= 0) continue;
+          out.push({
+            step, itemId, vulnName,
+            hint_levels: matched.hint_levels || {},
+            access_instructions: matched.access_instructions || {},
+            templateVars: {
+              NODE_IP: String(node.ip4 || node.ipv4 || node.ip || assignment.node_ip || '').split('/')[0],
+              NODE_NAME: String(node.name || assignment.node_name || node.id || ''),
+            },
+          });
+          if (!includeReadmes) continue;
+
 
         if (!readmeCache.has(itemId)) {
           try {
@@ -2607,7 +2624,7 @@ async function handleReportDownloadAction(link) {
   }
   if (kind === 'participant-guide' || kind === 'facilitator-guide') {
     setReportGenerationStatus('Collecting vulnerability notes…');
-    const vulnReadmeEntries = kind === 'facilitator-guide' ? await _reportGuideBuildVulnReadmeEntries(chain, assignments) : [];
+    const vulnReadmeEntries = await _reportGuideBuildVulnReadmeEntries(chain, assignments, kind === 'facilitator-guide');
     setReportGenerationStatus('Building guide HTML…');
     const markdown = buildReportGuideMarkdown(scenario, chain, assignments, { facilitator: kind === 'facilitator-guide', vulnReadmeEntries, participantNetworkSetup: preview.participant_network_setup, preview });
     const fname = kind === 'facilitator-guide'

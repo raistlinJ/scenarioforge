@@ -4,16 +4,23 @@
   "title": "ScenarioForge Vulnerability Capability Metadata",
   "description": "Declares what exploiting a catalog vulnerability requires and what it yields, in the fact vocabulary used by flag generators. Consumed by flag sequencing so chains are only built when every step is reachable.",
   "type": "object",
-  "required": ["schema_version"],
+  "required": [
+    "schema_version"
+  ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
     "catalog": {
       "type": "string",
       "description": "Optional label of the catalog these entries describe."
     },
     "vulns": {
       "type": "array",
-      "items": { "$ref": "#/definitions/vulnEntry" }
+      "items": {
+        "$ref": "#/definitions/vulnEntry"
+      }
     }
   },
   "additionalProperties": true,
@@ -62,18 +69,81 @@
         "requires": {
           "type": "array",
           "description": "Facts that must already hold before this vulnerability is exploitable. Unioned with the impact default.",
-          "items": { "$ref": "#/definitions/factRef" }
+          "items": {
+            "$ref": "#/definitions/factRef"
+          }
         },
         "provides": {
           "type": "array",
           "description": "Facts a solver gains by exploiting this vulnerability. Unioned with the impact default.",
-          "items": { "$ref": "#/definitions/factRef" }
+          "items": {
+            "$ref": "#/definitions/factRef"
+          }
         },
-        "notes": { "type": "string" }
+        "notes": {
+          "type": "string"
+        },
+        "hint_levels": {
+          "type": "object",
+          "properties": {
+            "low": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "medium": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "high": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "access_instructions": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "instructions"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "instructions": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
       },
       "anyOf": [
-        { "required": ["match"] },
-        { "required": ["cve"] }
+        {
+          "required": [
+            "match"
+          ]
+        },
+        {
+          "required": [
+            "cve"
+          ]
+        }
       ],
       "additionalProperties": true
     }

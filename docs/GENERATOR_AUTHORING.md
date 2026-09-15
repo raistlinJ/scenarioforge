@@ -396,7 +396,7 @@ Manifests declare structured hints via:
 
 - `hint_levels.low`, `hint_levels.medium`, and `hint_levels.high` (lists of strings shown as collapsible guide sections labeled `Hint Low`, `Hint Medium`, and `Hint High` — except for promoted first-step lines, which are labeled `Helpful Fact`; see below)
 
-Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should state the workflow outright — the step that solves the challenge.
+Use levels consistently and keep at least one non-empty entry in each level: low should be a light pointer such as an IP or node name, medium should reveal a port, service, filename, or artifact to inspect, and high should provide the answer directly, using `Answer: {{OUTPUT.Flag(flag_id)}}` for the generated flag.
 
 **Write hints for someone who only has the deployed scenario.** Participants run
 against the built environment; they cannot open your `manifest.yaml`, your
@@ -411,9 +411,9 @@ step instead:
 high:
   - "See README.md for the complete workflow."
 
-# Kept -- states what to actually do.
+# Kept -- provides the generated answer.
 high:
-  - "Mount the NFS export at /exports, then read flag.txt from the mount."
+  - "Answer: {{OUTPUT.Flag(flag_id)}}"
 ```
 
 Flow substitutions include:

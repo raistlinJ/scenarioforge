@@ -160,6 +160,17 @@ def test_vuln_catalog_items_data_returns_active_items(monkeypatch, tmp_path):
     assert payload['items'][0]['validated_incomplete'] is False
     assert payload['items'][0]['log_download_url'] == '/vuln_catalog_items/test/log?item_id=7'
     assert payload['items'][0]['readme_url'].endswith('/vuln_catalog_packs/readme/cat-1/vulhub/sample/README.md')
+    assert payload['items'][0]['hint_levels'] == {}
+    assert payload['items'][0]['access_instructions'] == {}
+
+    (item_dir / 'scenarioforge.vuln.yaml').write_text(
+        'schema_version: 1\nmatch: vulhub/sample\nhint_levels:\n  medium:\n    - "Scan port 8080 on {{NODE_IP}}"\n'
+        'access_instructions:\n  steps:\n    - title: Inspect\n      instructions: "curl http://{{NODE_IP}}:8080/"\n'
+    )
+    updated = client.get('/vuln_catalog_items_data').get_json()['items'][0]
+    assert updated['hint_levels']['medium'] == ['Scan port 8080 on {{NODE_IP}}']
+    assert updated['access_instructions']['steps'][0]['instructions'] == 'curl http://{{NODE_IP}}:8080/'
+
 
 
 def test_vuln_catalog_item_test_log_download_returns_copied_log(monkeypatch, tmp_path):
