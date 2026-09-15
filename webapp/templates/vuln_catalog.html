@@ -3061,12 +3061,14 @@
         fd.append('repo_label', folderLabel);
         try {
           if (importSubmitButton) { importSubmitButton.disabled = true; importSubmitButton.textContent = 'Packaging folder into ZIP…'; }
-          const archive = await window.catalogFolderZip(folderFiles);
+          const archive = await window.catalogFolderZip(folderFiles, ({ current, total, path }) => {
+            if (importSubmitButton) importSubmitButton.textContent = `Packaging ${current} / ${total}…`;
+            if (importMethodHelp) importMethodHelp.textContent = `Reading ${path}`;
+          });
           fd.append('zip_file', archive, `${folderLabel}.zip`);
           file = { name: `${folderLabel}.zip`, size: archive.size };
         } catch (error) {
-          folderInput.setCustomValidity(`Unable to package folder: ${error.message}. Compress it and use ZIP file instead.`);
-          folderInput.reportValidity();
+          if (importMethodHelp) importMethodHelp.textContent = `Unable to package folder: ${error.message}. Ensure the file is available locally and readable, then reselect the folder, or upload a ZIP.`;
           return;
         } finally {
           if (importSubmitButton) { importSubmitButton.disabled = false; importSubmitButton.textContent = 'Import'; }

@@ -9,7 +9,21 @@
     for (let k = 0; k < 8; k++) c = (c >>> 1) ^ ((c & 1) ? 0xedb88320 : 0);
     table[n] = c;
   }
-  root.catalogFolderZip = async function (files) {
+  async function readFile(file) {
+    try {
+      return await file.arrayBuffer();
+    } catch (firstError) {
+      // Retry through Safari's older file-reading API before giving up.
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || firstError);
+        reader.onabort = () => reject(new Error('File read aborted'));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+  }
+  root.catalogFolderZip = async function (files, onProgress = () => {}) {
     if (!files.length || files.length > 65535) throw new Error('Unsupported ZIP file count');
     const bodies = [], directory = [], names = new Set();
     let offset = 0, directorySize = 0;
@@ -21,7 +35,15 @@
       names.add(path);
       const name = new TextEncoder().encode(path);
       if (name.length > 65535 || offset + file.size + name.length + 30 >= 0xffffffff) throw new Error('Folder exceeds ZIP size limit');
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      const current = names.size;
+      onProgress({ current, total: files.length, path });
+      let bytes;
+      try {
+        bytes = new Uint8Array(await readFile(file));
+        if (bytes.length !== file.size) throw new Error('Incomplete file read');
+      } catch (error) {
+        throw new Error(`Cannot read file ${current} of ${files.length}: ${path} (${error.message || error})`);
+      }
       let crc = 0xffffffff;
       for (const byte of bytes) crc = (crc >>> 8) ^ table[(crc ^ byte) & 255];
       crc = (crc ^ 0xffffffff) >>> 0;
