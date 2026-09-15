@@ -42,6 +42,36 @@ and VMware Fusion provisioners, so they also install Node.js. For existing guest
 install it with `sudo apt update && sudo apt install -y nodejs`, then verify
 `node --version` before running guide export.
 
+## Choose the participant operating system
+
+Choose **Debian 12** (the default) for a minimal XFCE desktop, or **Kali Linux**
+for XFCE plus the standard Kali tools. This changes only the participant VM;
+CORE uses Debian and APP uses Ubuntu.
+
+In your `scenarioforge-lab.conf` config, set one of:
+
+```ini
+# Minimal desktop (default)
+participant_os=debian
+```
+
+```ini
+# Desktop with the standard Kali tools
+participant_os=kali
+```
+
+You can also pass `--participant-os debian` or `--participant-os kali` to the installer.
+Enabling `cyber_agent_flow=true` automatically selects Kali and allocates at least
+4096 MB RAM, even if `participant_os=debian`.
+
+Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+image and downloads and installs the desktop/tools during provisioning, so Kali
+usually takes longer. You do not need to build a template yourself.
+
+This choice applies to new labs; changing the config does not convert an existing
+participant VM. See the example config alongside this README for the other options.
+
+
 ## Network layout
 
 ```text

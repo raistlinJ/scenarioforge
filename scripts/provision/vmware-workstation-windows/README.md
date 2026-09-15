@@ -24,7 +24,7 @@ This PowerShell installer creates the same three graphical Linux guests as the
 | --- | --- | --- | --- |
 | CORE | Debian 12 + XFCE | CORE emulator and GUI, built from the ScenarioForge fork | 8 GB / 4 / 80 GB |
 | APP | Ubuntu 24.04 + XFCE | Native ScenarioForge, nginx, browser, and document tools | 4 GB / 2 / 40 GB |
-| Participant | Debian 12 + XFCE | Participant desktop on the isolated HITL network | 2 GB / 2 / 20 GB |
+| Participant | Debian 12 + XFCE (default), or Kali Linux + XFCE and standard tools | Participant desktop on the isolated HITL network | 2 GB / 2 / 20 GB (Kali: 40 GB disk; CyberAgentFlow: at least 4 GB RAM) |
 
 The complete installation runs on Windows. **No WSL, Ubuntu host installation,
 or Git Bash is required.** Windows Python creates the Cloud-Init seed ISOs and
@@ -36,6 +36,34 @@ PowerShell and `vmrun.exe` control the VMs and desktop shortcuts.
 The shared APP guest bootstrap installs Node.js and verifies `node --version`
 for CLI HTML and Markdown guide export. For existing APP guests, run
 `sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
+
+## Choose the participant operating system
+
+Choose **Debian 12** (the default) for a minimal XFCE desktop, or **Kali Linux**
+for XFCE plus the standard Kali tools. This changes only the participant VM;
+CORE uses Debian and APP uses Ubuntu.
+
+In your `scenarioforge-lab.json` config, set one of:
+
+```json
+"participant_os": "debian"
+```
+
+```json
+"participant_os": "kali"
+```
+
+You can also pass `-ParticipantOS debian` or `-ParticipantOS kali` to the installer.
+Enabling `"cyber_agent_flow": true` automatically selects Kali and allocates at
+least 4096 MB RAM, even if `participant_os` is set to `debian`.
+
+Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+image and downloads and installs the desktop/tools during provisioning, so Kali
+usually takes longer. You do not need to build a template yourself.
+
+This choice applies to new labs; changing the config does not convert an existing
+participant VM. See the example config alongside this README for the other options.
+
 
 ## 1. Prepare the host
 

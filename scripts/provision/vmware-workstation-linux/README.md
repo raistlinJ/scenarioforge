@@ -19,7 +19,7 @@ x86_64 Linux workstation:
 |---|---|---|
 | CORE | Debian 12, XFCE, CORE GUI, CORE 9.2.1 built from `raistlinJ/core` with `coreemu-minimal --from-source`, Docker | `ens18` management, `ens19` isolated HITL with no IP, `ens20` NAT uplink |
 | APP | Ubuntu 24.04, XFCE, Epiphany, Terminator, PDF/DOT/JSON viewers, native ScenarioForge systemd service, nginx/TLS | `ens18` NAT uplink, `ens19` management |
-| PARTICIPANT | Debian 12, minimal XFCE | `ens18` isolated HITL; temporary NAT `ens19` is removed after XFCE installs |
+| PARTICIPANT | Debian 12 with minimal XFCE (default), or Kali Linux with XFCE and standard tools | `ens18` isolated HITL; temporary NAT `ens19` is removed after XFCE installs |
 
 The APP VM receives a private `.scenarioforge.env` configured with the CORE
 VM's management address, SSH credentials, gRPC port `50051`, and CORE's HITL
@@ -38,6 +38,36 @@ and a **JSON Viewer** backed by Mousepad; `jq` is available in the terminal.
 The shared APP guest bootstrap installs Node.js and verifies `node --version`
 for CLI HTML and Markdown guide export. For existing APP guests, run
 `sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
+
+## Choose the participant operating system
+
+Choose **Debian 12** (the default) for a minimal XFCE desktop, or **Kali Linux**
+for XFCE plus the standard Kali tools. This changes only the participant VM;
+CORE uses Debian and APP uses Ubuntu.
+
+In your `scenarioforge-lab.conf` config, set one of:
+
+```ini
+# Minimal desktop (default)
+participant_os=debian
+```
+
+```ini
+# Desktop with the standard Kali tools
+participant_os=kali
+```
+
+You can also pass `--participant-os debian` or `--participant-os kali` to the installer.
+Enabling `cyber_agent_flow=true` automatically selects Kali and allocates at least
+4096 MB RAM, even if `participant_os=debian`.
+
+Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+image and downloads and installs the desktop/tools during provisioning, so Kali
+usually takes longer. You do not need to build a template yourself.
+
+This choice applies to new labs; changing the config does not convert an existing
+participant VM. See the example config alongside this README for the other options.
+
 
 ## Requirements
 
