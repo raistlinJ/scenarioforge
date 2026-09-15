@@ -334,3 +334,29 @@ def test_export_then_import_preserves_everything(tmp_path, monkeypatch, curated_
     assert item["note"] == "hand-checked"
     assert item["note_color"] == "green"
     assert item["category"] == "web/proxy"
+
+
+@pytest.mark.parametrize('prefix', ['', 'vulnhub/', 'download/vulnhub/'])
+def test_import_metadata_under_folder_wrapper(tmp_path, monkeypatch, prefix):
+    archive_path = tmp_path / 'wrapped.zip'
+    relative = 'content/example/docker-compose.yml'
+    with zipfile.ZipFile(archive_path, 'w') as archive:
+        archive.writestr(prefix + relative, 'services: {}\n')
+        archive.writestr(prefix + '.scenarioforge/catalog_notes.json', json.dumps({
+            'notes': [{'compose_rel': relative, 'note': 'Public validation note', 'note_color': 'green'}]}))
+        archive.writestr(prefix + '.scenarioforge/catalog_layout.json', json.dumps({
+            'items': [{'compose_rel': relative, 'category': 'Web'}]}))
+        archive.writestr(prefix + '.scenarioforge/catalog_items.json', json.dumps({
+            'defaults': {'persistent': True},
+            'items': [{'compose_rel': relative, 'architectures': ['amd64'], 'validated_ok': True}]}))
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(tmp_path / 'outputs'))
+    monkeypatch.setenv('CORETG_CATALOG_ARCH_SCAN', '0')
+    entry = backend._install_vuln_catalog_zip_file_single(
+        zip_file_path=str(archive_path), label='wrapped', origin='test')
+    item = entry['compose_items'][0]
+    assert item['note'] == 'Public validation note'
+    assert item['note_color'] == 'green'
+    assert item['architectures'] == ['amd64']
+    assert item['validated_ok'] is True
+    assert item['persistent'] is True
+    assert item['category'] == 'Web'
