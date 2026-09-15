@@ -75,11 +75,13 @@ def test_linux_manual_mode_and_failed_inventory_do_not_allocate(tmp_path):
 source {shlex.quote(str(LINUX))}
 VMWARE_NETWORKING_FILE={shlex.quote(str(config))}
 vmware-networks() {{ :; }}
-vmrun() {{ return 1; }}
+vmrun() {{ printf 'Error: unsupported network command' >&2; return 1; }}
 prepare_host_network_plan
 """], capture_output=True, text=True)
     assert result.returncode != 0
     assert "cannot inspect" in result.stderr
+    assert "unsupported network command" in result.stderr
+    assert "no unused Workstation vmnet" not in result.stderr
     assert config.read_text() == "VERSION=1,0\n"
 
 

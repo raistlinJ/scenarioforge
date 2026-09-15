@@ -108,7 +108,18 @@ prepare_host_network_plan() {
         1|ask) ;;
         *) die "SF_VMWARE_MANAGE_HITL_NETWORK must be 0, 1, or unset" ;;
     esac
-    local values
+    local values inventory inventory_status=0
+    # Check in the parent shell before entering command substitution below.
+    # Otherwise die() inside the selector is misreported as pool exhaustion.
+    inventory="$(vmrun -T "$VMRUN_TYPE" listHostNetworks 2>&1)" || inventory_status=$?
+    [[ "$inventory_status" -eq 0 ]] \
+        || die "cannot inspect VMware host networks: vmrun -T $VMRUN_TYPE listHostNetworks exited $inventory_status. VMware output: ${inventory:-<no output>}. Verify Workstation networking and command support before retrying."
+    [[ "$inventory" == *"Total host networks:"* ]] \
+        || die "cannot inspect VMware host networks: unexpected listHostNetworks output: ${inventory:-<empty>}"
+    inventory_status=0
+    inventory="$(vmrun -T "$VMRUN_TYPE" list 2>&1)" || inventory_status=$?
+    [[ "$inventory_status" -eq 0 && "$inventory" == "Total running VMs:"* ]] \
+        || die "cannot inspect running VMware VMs (exit $inventory_status): ${inventory:-<empty>}"
     WORKSTATION_ORIGINAL_HITL_VMNET="$HITL_VMNET"
     WORKSTATION_PLANNED_HITL_VMNET="$(workstation_choose_unused_vmnet "$HITL_VMNET")" \
         || die "no unused Workstation vmnet number is available for the isolated HITL network"
