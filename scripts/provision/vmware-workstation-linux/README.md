@@ -131,11 +131,28 @@ Approving allows the installer to:
    already enrolled or its enrollment is pending. Enrolling the certificate
    allows the kernel to trust modules signed with this key.
 
-For a new enrollment, choose the temporary password when `mokutil` asks.
-The installer stops before provisioning lab networks or VMs. It does not reboot
-the machine. Reboot when ready and use the machine's console to choose
-**Enroll MOK → Continue → Yes**, enter that password, and reboot again. Then
-rerun the same installer command as your normal desktop user.
+### Finish MOK enrollment when prompted
+
+MOK means **Machine Owner Key**. When VMware needs this key enrolled, the
+installer explains the following steps before asking for the password and again
+after confirming that enrollment is pending:
+
+1. At the `mokutil` prompts, choose a temporary enrollment password and type it
+   again to confirm. This is separate from your sudo/login password. Remember it
+   for the next boot. If enrollment was already pending, use the password from
+   that earlier request.
+2. Save your work and reboot the Linux host with `sudo reboot`.
+3. At the machine's console, press a key if prompted to open MOK management,
+   then choose **Enroll MOK → Continue → Yes**.
+4. Enter your temporary enrollment password and select **Reboot**.
+5. Log back into Linux as your normal desktop user, return to the installer
+   directory, and rerun your original installer command with the same config
+   and options. No cleanup is needed.
+
+The MOK screen appears before Linux starts; use a physical or remote machine
+console, since SSH cannot display it. The installer stops before provisioning
+lab networks or VMs while enrollment is pending and does not reboot the host
+automatically. See [Ubuntu's MOK enrollment guidance](https://wiki.ubuntu.com/UEFI/SecureBoot/DKMS).
 
 After enrollment, the installer can load the signed modules and continue.
 Kernel or VMware updates can replace the modules; signing can be approved again

@@ -13,9 +13,18 @@ workstation_approve_module_signing() {
 }
 
 workstation_enrollment_instructions() {
-    log "Reboot when ready. At the machine's console select Enroll MOK → Continue → Yes."
-    log "Enter the temporary password you supplied to mokutil, then reboot again."
-    log "Rerun the same installer command as your desktop user after enrollment."
+    log "VMware Secure Boot setup: enroll the Machine Owner Key (MOK) to continue."
+    log "The certificate request is pending; finish these steps at the machine's console:"
+    log "1. Keep the temporary enrollment password you entered in mokutil handy."
+    log "   If the request was already pending, use the password from that earlier request."
+    log "2. Save your work, then reboot the Linux host: sudo reboot"
+    log "3. During startup, press a key if prompted to open MOK management."
+    log "   Select Enroll MOK → Continue → Yes."
+    log "4. Enter that temporary enrollment password, then select Reboot."
+    log "5. Log back into Linux as your normal desktop user, return to the installer"
+    log "   directory, and rerun the same installer command with the same config/options."
+    log "The installer will check the modules again and continue setup. No cleanup is needed."
+    log "MOK management appears before Linux starts; an SSH terminal cannot display it."
 }
 
 workstation_secure_boot_enabled() {
@@ -140,7 +149,11 @@ workstation_sign_modules_as_root() {
     # Avoid asking for another password when this exact certificate is pending.
     pending="$(LC_ALL=C mokutil --list-new)" || return 1
     if ! grep -Fiq -- "$fingerprint" <<<"$pending"; then
-        echo "Choose a temporary password for approval at the MOK Manager console."
+        echo "VMware needs a Machine Owner Key (MOK) enrolled before its signed modules can load."
+        echo "At the next prompts, create a temporary enrollment password and enter it again to confirm."
+        echo "This is a new password you choose for MOK enrollment, separate from your sudo/login password."
+        echo "Remember it: after reboot, select Enroll MOK → Continue → Yes and enter the same password."
+        echo "Then reboot back into Linux and rerun the same installer command."
         mokutil --import "$key_dir/MOK.der" || return 1
         pending="$(LC_ALL=C mokutil --list-new)" || return 1
         grep -Fiq -- "$fingerprint" <<<"$pending" \
