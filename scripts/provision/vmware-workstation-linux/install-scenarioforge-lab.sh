@@ -782,6 +782,8 @@ pciBridge7.functions = "8"
 displayName = "$name"
 guestOS = "$guest_os"
 firmware = "efi"
+floppy0.present = "FALSE"
+floppy0.startConnected = "FALSE"
 memsize = "$memory"
 numvcpus = "$cores"
 cpuid.coresPerSocket = "$cores"
@@ -800,6 +802,16 @@ tools.syncTime = "TRUE"
 scenarioforge.install.owner = "$INSTALLER_OWNER"
 scenarioforge.install.role = "$name"
 EOF
+    # Debian cloud initramfs expects ttyS0 during first-boot disk expansion.
+    # Without a serial device it can exit PID 1 and panic before Cloud-Init.
+    if [[ "$VMRUN_TYPE" == ws ]]; then
+        cat >> "$vmx" <<'SERIAL'
+serial0.present = "TRUE"
+serial0.fileType = "file"
+serial0.fileName = "serial-console.log"
+serial0.yieldOnMsrRead = "TRUE"
+SERIAL
+    fi
     if [[ -n "$VMWARE_SOUND_DEVICE" ]]; then
         {
             printf 'sound.virtualDev = "%s"\n' "$VMWARE_SOUND_DEVICE"
@@ -871,14 +883,17 @@ create_vms() {
 start_vm() {
     local vmx="$1" mode=gui
     [[ "$HEADLESS" -eq 0 ]] || mode=nogui
-    vmrun -T "$VMRUN_TYPE" start "$vmx" "$mode"
+    vmrun -T "$VMRUN_TYPE" start "$vmx" "$mode" \
+        || die "could not start $vmx; inspect $(dirname "$vmx")/vmware.log and serial-console.log for the boot failure"
 }
 vm_running() { vmrun -T "$VMRUN_TYPE" list 2>/dev/null | tail -n +2 | grep -Fxq -- "$1"; }
 
 guest_tools_running() {
     local state
     state="$(vmrun -T "$VMRUN_TYPE" checkToolsState "$1" 2>/dev/null || true)"
-    [[ "$state" == running ]]
+    # Workstation can report installed while authenticated guest operations work.
+    # Each caller still verifies its operation with a bounded timeout.
+    [[ "$state" == running || "$state" == installed ]]
 }
 
 guest_file_exists() {

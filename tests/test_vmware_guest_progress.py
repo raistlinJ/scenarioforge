@@ -31,3 +31,19 @@ guest_percent vm user password marker
 '''], capture_output=True, text=True)
     assert result.returncode == 0
     assert result.stdout.strip() == 'unavailable'
+
+
+@pytest.mark.parametrize('state', ['installed', 'running'])
+@pytest.mark.parametrize('operation_status', [0, 1])
+def test_guest_marker_checks_use_actual_operation_result(state, operation_status):
+    result = subprocess.run(['bash', '-c', f'''
+source {shlex.quote(str(INSTALLER))}
+vmrun() {{
+    if [[ "$*" == *checkToolsState* ]]; then echo {state}; return 0; fi
+    return {operation_status}
+}}
+timeout() {{ shift; "$@"; }}
+if guest_file_exists vm.vmx user password marker; then echo ready; else echo waiting; fi
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ('ready' if operation_status == 0 else 'waiting')

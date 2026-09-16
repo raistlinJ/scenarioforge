@@ -104,6 +104,8 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
         vmx = lab / f'scenarioforge-{role}/scenarioforge-{role}.vmx'
         text = vmx.read_text()
         assert str(tmp_path) not in text
+        assert 'floppy0.present = "FALSE"' in text
+        assert 'floppy0.startConnected = "FALSE"' in text
         assert 'serial0.present = "TRUE"' in text
         assert 'serial0.fileType = "file"' in text
         assert 'serial0.fileName = "serial-console.log"' in text

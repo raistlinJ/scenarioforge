@@ -237,6 +237,11 @@ append_nic {shlex.quote(str(vmx))} 1 nat '' 00:50:56:04:05:06
     for expected in (
         'virtualHW.version = "20"',
         'firmware = "efi"',
+        'floppy0.present = "FALSE"',
+        'floppy0.startConnected = "FALSE"',
+        'serial0.present = "TRUE"',
+        'serial0.fileType = "file"',
+        'serial0.fileName = "serial-console.log"',
         'guestOS = "debian12-64"',
         'scenarioforge.install.owner = "scenarioforge-vmware-linux-v1"',
         'ethernet0.connectionType = "custom"',
@@ -341,7 +346,7 @@ def test_guest_operations_wait_for_vmware_tools_before_opening_vix_pipe(
     probe = f"""
 source {shlex.quote(str(INSTALLER))}
 vmrun() {{
-    if [[ "$*" == *checkToolsState* ]]; then printf 'installed\\n'; return 0; fi
+    if [[ "$*" == *checkToolsState* ]]; then printf 'unknown\\n'; return 0; fi
     touch {shlex.quote(str(unexpected))}
     return 99
 }}

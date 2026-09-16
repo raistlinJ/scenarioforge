@@ -291,6 +291,7 @@ def write_vmx(path, role, config, macs, networks, userdata, metadata, network):
         values.update({f'pciBridge{bridge}.present': 'TRUE', f'pciBridge{bridge}.virtualDev': 'pcieRootPort',
                        f'pciBridge{bridge}.functions': 8})
     values.update({'displayName': name, 'guestOS': 'ubuntu-64' if role == 'app' else 'debian12-64',
+                   'floppy0.present': 'FALSE', 'floppy0.startConnected': 'FALSE',
                    'firmware': 'efi', 'memsize': config[role + '_memory_mb'], 'numvcpus': config[role + '_cores'],
                    'cpuid.coresPerSocket': config[role + '_cores'],
                    'sata0.present': 'TRUE', 'sata0:1.present': 'TRUE', 'sata0:1.deviceType': 'cdrom-image',

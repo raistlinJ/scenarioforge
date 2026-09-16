@@ -522,3 +522,19 @@ take precedence. API keys are not embedded in the page.
 This option applies to new labs; cleanup removes the extra NIC with its VM and
 preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existing
 lab. When disabled, the original two-interface participant layout is unchanged.
+
+## Diagnosing an early CORE boot failure
+
+Generated Linux Workstation VMs include a serial port whose output is saved to
+`serial-console.log` beside the VMX file. Debian cloud images can panic during
+first-boot disk expansion without this serial device; VMware then reports
+“The CPU has been disabled by the guest operating system.” A CPU-disabled
+message can have other causes, so inspect the guest console and `vmware.log`.
+
+For a VM created by an older installer, power it off and add a serial port with
+output to a file in VMware's settings, then start it again. Recreating the lab
+is unnecessary. Preserve the logs before running cleanup.
+
+Guest progress checks accept VMware Tools states `installed` and `running` and
+verify the actual guest operation with a timeout. Some headless Workstation
+sessions report `installed` while guest file transfers already work.
