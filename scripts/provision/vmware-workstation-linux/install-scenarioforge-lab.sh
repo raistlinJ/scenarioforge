@@ -809,6 +809,8 @@ EOF
 serial0.present = "TRUE"
 serial0.fileType = "file"
 serial0.fileName = "serial-console.log"
+serial0.startConnected = "TRUE"
+answer.msg.serial.file.open = "Append"
 serial0.yieldOnMsrRead = "TRUE"
 SERIAL
     fi
