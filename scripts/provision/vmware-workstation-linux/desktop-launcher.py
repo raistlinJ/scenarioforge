@@ -24,6 +24,23 @@ def command(args, timeout=30):
         raise LaunchError(f"Could not run {args[0]}: {exc}") from exc
 
 
+def open_browser(args):
+    """A browser may keep its opener and inherited output handles alive."""
+    with tempfile.TemporaryFile(mode="w+b") as output:
+        try:
+            process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+            try:
+                status = process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                # Dispatch succeeded; the desktop application owns its lifetime.
+                return subprocess.CompletedProcess(args, 0, "", "")
+        except OSError as exc:
+            raise LaunchError(f"Could not run {args[0]}: {exc}") from exc
+        output.seek(0)
+        return subprocess.CompletedProcess(args, status, "", output.read().decode(errors="replace"))
+
+
 def dialog(message, platform, question=False):
     """Only an explicit affirmative response permits starting VMs."""
     print(message, flush=True)
@@ -175,7 +192,7 @@ def launch(options):
             return 0
         if options.mode == "browser":
             url = app_url(options)
-            result = command(["open" if options.platform == "fusion" else "xdg-open", url])
+            result = open_browser(["open" if options.platform == "fusion" else "xdg-open", url])
         elif options.platform == "fusion":
             result = command(["open", "-a", options.fusion_app, options.participant])
         else:

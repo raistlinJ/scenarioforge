@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -11,6 +12,27 @@ SOURCE = Path(__file__).resolve().parents[1] / "scripts/provision/vmware-worksta
 spec = importlib.util.spec_from_file_location("vmware_desktop_launcher", SOURCE)
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
+
+
+def test_browser_remaining_open_is_not_a_launch_failure(monkeypatch):
+    process = Mock()
+    process.wait.side_effect = subprocess.TimeoutExpired("xdg-open", 3)
+    monkeypatch.setattr(launcher.subprocess, "Popen", Mock(return_value=process))
+    assert launcher.open_browser(["xdg-open", "https://example.test/"]).returncode == 0
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+
+
+def test_browser_dispatch_failure_preserves_diagnostic():
+    result = launcher.open_browser([sys.executable, "-c",
+                                   "import sys; sys.stderr.write('No browser available'); sys.exit(3)"])
+    assert result.returncode == 3
+    assert result.stderr == "No browser available"
+
+
+def test_browser_missing_executable_is_reported():
+    with pytest.raises(launcher.LaunchError, match="Could not run"):
+        launcher.open_browser(["/nonexistent/scenarioforge-browser"])
 
 
 @pytest.fixture(params=["ws", "fusion"])
@@ -53,6 +75,7 @@ def fake_runtime(monkeypatch, options, running=(), consent=True, fail=None):
         return Mock(poll=Mock(return_value=result.returncode))
 
     monkeypatch.setattr(launcher, "command", command)
+    monkeypatch.setattr(launcher, "open_browser", command)
     monkeypatch.setattr(launcher, "dialog", dialog)
     monkeypatch.setattr(launcher.subprocess, "Popen", popen)
     return state, calls, prompts
