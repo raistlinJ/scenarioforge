@@ -565,3 +565,44 @@ is unnecessary. Preserve the logs before running cleanup.
 Guest progress checks accept VMware Tools states `installed` and `running` and
 verify the actual guest operation with a timeout. Some headless Workstation
 sessions report `installed` while guest file transfers already work.
+
+
+## Reinstall selected VMs using cached images
+
+Use `--reinstall core`, `--reinstall app`, `--reinstall participant`, or `--reinstall all` to rebuild selected guests with the current provisioning scripts:
+
+```bash
+./install-scenarioforge-lab.sh --reinstall participant --dry-run
+./install-scenarioforge-lab.sh --reinstall participant
+```
+
+**This erases the selected VMs' disks and guest data.** It retains saved login
+credentials and lab network settings. Other VMs and host networks are not
+recreated. The command asks you to type `REINSTALL`; `--yes` accepts that
+replacement without prompting. Stop any active exercises first.
+
+Base images are already cached, and cleanup preserves that cache. Reinstall
+verifies the required images **before replacing any VM**. If an image is missing,
+it shows the download source and asks `Download and verify this image before
+reinstalling? [y/N]`. Answer `y` to download it; declining or having no input
+stops with the existing VMs intact. `--yes` does not bypass this separate download
+prompt. Dry runs report missing images without prompting or downloading.
+
+Downloads record a checksum receipt, allowing reinstalls to reuse that verified
+release even when an upstream `latest` URL changes. Older caches without a
+receipt are checked against the upstream checksum list. Existing images that
+fail verification still stop the reinstall; they are not automatically replaced.
+A failed download or checksum check also stops before any VM is replaced.
+
+Guest packages, Git repositories, and optional catalogs still require Internet
+access. Software is fetched from the saved branches/refs (`main` by default for
+CyberAgentFlow). Participant rebuilds automatically restore temporary NAT for
+setup and remove it after readiness succeeds. Reinstall waits for the selected
+guests even when the original installation used the no-wait option. On failure,
+check the guest console and bootstrap log; a participant that fails setup keeps
+its temporary NAT adapter for diagnosis.
+
+Use the same state directory as the original installation. For older Unix labs
+whose state predates saved image-cache/source settings, also pass the original
+configuration file or environment overrides so the installer finds the same
+cache and source refs. Reinstall does not convert the saved participant OS.

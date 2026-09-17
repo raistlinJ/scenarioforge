@@ -164,6 +164,7 @@ Important options:
   --watch                     keep printing status until provisioning completes
   --interval SECONDS          status interval (default: 10, minimum: 2)
   --yes                       do not ask for confirmation
+  --reinstall ROLE           Recreate core, app, participant, or all; prompt for missing images
   --dry-run                   validate and show the plan without changing files or VMs
   --cleanup                   alias for the cleanup command
   --force                     remove a running lab and its tracked vmnet even if changed

@@ -239,12 +239,14 @@ function Remove-ParticipantUplink {
 function Complete-LabSetup {
     param($State, $Credentials, [string]$StateFile)
     if (-not $State.ImagesPrepared) { throw 'Image preparation did not complete. Use cleanup before reinstalling the partial lab.' }
-    foreach ($role in @('core', 'app', 'participant')) {
+    $roles = @(if ($State.ContainsKey('ReinstallRoles')) { $State.ReinstallRoles } else { 'core'; 'app'; 'participant' })
+    if (-not $roles.Count -or @($roles | Where-Object { $_ -notin @('core', 'app', 'participant') }).Count) { throw 'Invalid saved reinstall scope.' }
+    foreach ($role in $roles) {
         if (-not (Test-Path -LiteralPath $State.VMs[$role].Path) -or -not (Test-OwnedVM $State $role)) { throw "$role VM is missing or belongs to a different installation. Use cleanup before reinstalling." }
         Start-LabVM $State $role
     }
     $deadline = [DateTime]::UtcNow.AddMinutes($State.Config.wait_minutes)
-    if ($State.OptionalPending) {
+    if ($State.OptionalPending -and 'app' -in $roles) {
         $archive = Join-Path $State.LabDir 'scenarioforge-optional-content.tar.gz'
         do {
             $result = Invoke-GuestCommand $State $Credentials app @('copyFileFromHostToGuest', $archive, '/tmp/scenarioforge-optional-content.tar.gz.part') -AllowFailure
@@ -258,16 +260,21 @@ function Complete-LabSetup {
         Save-LabState $State $StateFile
     }
     do {
-        $ready = @{}
-        foreach ($role in @('participant', 'core', 'app')) {
+        $ready = @{core = $true; app = $true; participant = $true}
+        foreach ($role in $roles) {
             $phase = Get-GuestProgress $State $Credentials $role
             if ($phase -like 'failed*') { throw "$role bootstrap failed: $phase. Check the guest console before retrying resume." }
             $ready[$role] = $phase -eq 'ready'
             Write-Host "$role : $phase"
         }
-        if ($ready.participant -and $State.UplinkAttached) { Remove-ParticipantUplink $State $StateFile }
-        if ($ready.participant -and ($State.Config.no_wait -or ($ready.core -and $ready.app))) {
+        if ('participant' -in $roles -and $ready.participant -and $State.UplinkAttached) { Remove-ParticipantUplink $State $StateFile }
+        if ($ready.participant -and (($State.Config.no_wait -and -not $State.ContainsKey('ReinstallRoles')) -or ($ready.core -and $ready.app))) {
             $State.Complete = $ready.core -and $ready.app
+            if ($State.ContainsKey('ReinstallRoles')) {
+                $State.Complete = $roles.Count -eq 3 -or $State.ReinstallWasComplete
+                $State.Remove('ReinstallRoles')
+                $State.Remove('ReinstallWasComplete')
+            }
             Save-LabState $State $StateFile
             return
         }

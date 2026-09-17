@@ -27,7 +27,8 @@ param(
     [switch]$Watch,
     [switch]$DryRun,
     [switch]$Yes,
-    [switch]$Force
+    [switch]$Force,
+    [ValidateSet('core', 'app', 'participant', 'all')][string]$Reinstall
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -463,12 +464,90 @@ function Assert-NewLabDestination {
     }
 }
 
+function Invoke-ReinstallBuild {
+    param($Config, [string]$RequestFile, [switch]$CheckCache, [switch]$PromptMissing)
+    try {
+        $Config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $RequestFile -Encoding utf8NoBOM
+        $arguments = @((Join-Path $PSScriptRoot 'prepare-images.py'), $RequestFile)
+        if ($CheckCache) { $arguments += '--check-cache' }
+        if ($PromptMissing) { $arguments += '--prompt-missing-images' }
+        & $Config.python_exe @arguments
+        if ($LASTEXITCODE -ne 0) { throw 'Reinstall image preparation failed; existing VMs have not been replaced.' }
+    } finally {
+        if (Test-Path -LiteralPath $RequestFile) { Remove-Item -LiteralPath $RequestFile -Force }
+    }
+}
+
+function Reinstall-LabVMs {
+    param($State, $Credentials, [string]$StateFile, [string]$Target, [switch]$Preview, [switch]$Confirmed)
+    if ($Target -notin @('core', 'app', 'participant', 'all')) { throw 'Invalid reinstall target.' }
+    $roles = if ($Target -eq 'all') { @('core', 'app', 'participant') } else { @($Target) }
+    foreach ($role in $roles) {
+        if (-not (Test-OwnedVM $State $role) -or -not (Test-Path -LiteralPath $State.VMs[$role].Path -PathType Leaf)) { throw "Refusing reinstall of unowned or missing VM: $role" }
+        foreach ($entry in Get-ChildItem -LiteralPath (Split-Path $State.VMs[$role].Path -Parent) -Recurse -Force) {
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing reinstall through link: $($entry.FullName)" }
+        }
+        Write-Host "Reinstall scope: $role; its guest disk and data will be replaced."
+    }
+    $config = $State.Config.Clone()
+    $config.reinstall_roles = @($roles)
+    $config.install_id = $State.InstallId
+    foreach ($role in @('core', 'app', 'participant', 'web_admin')) {
+        if (-not $Credentials[$role]) { throw "Missing saved $role credentials." }
+        $config["${role}_password"] = $Credentials[$role]
+    }
+    # Staging is protected like the existing state because Cloud-Init embeds credentials.
+    $stage = Join-Path (Split-Path $StateFile -Parent) ('reinstall-' + [Guid]::NewGuid().ToString())
+    Protect-LabDirectory $stage
+    try {
+        $requestFile = Join-Path $stage 'request.json'
+        Invoke-ReinstallBuild $config $requestFile -CheckCache -PromptMissing:(-not $Preview)
+        if ($Preview) { Write-Host 'Reinstall preview complete: cached images verified; no VMs or networks changed.'; return }
+        if (-not $Confirmed -and (Read-Host 'Type REINSTALL to erase and recreate the selected VMs') -cne 'REINSTALL') { throw 'Reinstall canceled.' }
+        Ensure-WorkstationStarted $State
+        $config.lab_dir = $stage
+        Invoke-ReinstallBuild $config $requestFile
+        # Build every replacement before stopping or deleting any existing VM.
+        foreach ($role in $roles) {
+            if (-not (Test-OwnedVM $State $role)) { throw "VM ownership changed: $role" }
+            if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) {
+                Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'stop', $State.VMs[$role].Path, 'soft') -TimeoutSeconds 120 | Out-Null
+                if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) { throw "$role is still running; shut it down and retry." }
+            }
+        }
+        $State.ReinstallRoles = @($roles)
+        $State.ReinstallWasComplete = $State.Complete
+        $State.Complete = $false
+        if ('participant' -in $roles) { $State.UplinkAttached = $true }
+        Save-LabState $State $StateFile
+        foreach ($role in $roles) {
+            $directory = Split-Path $State.VMs[$role].Path -Parent
+            Remove-Item -LiteralPath $directory -Recurse -Force
+            Move-Item -LiteralPath (Join-Path $stage "scenarioforge-$role") -Destination $directory
+        }
+        if ('app' -in $roles) {
+            $State.OptionalPending = $State.Config.flag_generators -or $State.Config.vulnhub
+            if ($State.OptionalPending) {
+                $archive = Join-Path $State.LabDir 'scenarioforge-optional-content.tar.gz'
+                Move-Item -LiteralPath (Join-Path $stage 'scenarioforge-optional-content.tar.gz') -Destination $archive -Force
+                $State.ArchiveHash = (Get-FileHash -LiteralPath $archive).Hash
+            }
+        }
+        Save-LabState $State $StateFile
+        Complete-LabSetup $State $Credentials $StateFile
+        Write-Host "Reinstall complete: $Target. Saved credentials and host networks retained."
+    } finally {
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    }
+}
+
 function Invoke-Installer {
     if ($KeepHitlNetwork -and $Command -ne 'cleanup') { throw '-KeepHitlNetwork is only valid with cleanup.' }
     if ($Command -eq 'help') {
         Write-Host @'
 ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
   ./install-scenarioforge-lab.ps1 install [-ConfigFile lab.json] [-DryRun] [-Yes]
+  ./install-scenarioforge-lab.ps1 install -Reinstall core|app|participant|all [-DryRun] [-Yes]
   ./install-scenarioforge-lab.ps1 status [-Watch]
   ./install-scenarioforge-lab.ps1 resume [-NoWait]
   ./install-scenarioforge-lab.ps1 credentials
@@ -487,6 +566,12 @@ See the adjacent README for prerequisites and isolated network configuration.
     if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Run this installer in PowerShell 7.4+ on x64 Windows.' }
     $stateFile = Join-Path $StateDir 'state.json'
     Assert-NoReparsePoint $StateDir
+    if ($Reinstall) {
+        if ($Command -ne 'install') { throw '-Reinstall is only valid with install.' }
+        $state = Read-LabState $stateFile
+        Reinstall-LabVMs $state (Read-LabCredentials $StateDir) $stateFile $Reinstall -Preview:$DryRun -Confirmed:$Yes
+        return
+    }
     if ($Command -ne 'install') {
         $state = Read-LabState $stateFile
         if ($Command -eq 'cleanup') { Remove-Lab $state $stateFile -Preview:$DryRun -Confirmed:$Yes -AllowRunning:$Force; return }

@@ -71,6 +71,9 @@ jobs:
       - name: Test Windows VMware installer without VMware or SSH
         shell: pwsh
         run: ./tests/test_vmware_windows.ps1
+      - name: Test per-VM reinstalls without VMware
+        shell: pwsh
+        run: ./tests/test_vmware_reinstall.ps1
       - name: Test managed Workstation network planning and cleanup
         shell: pwsh
         run: ./tests/test_workstation_managed_networks.ps1

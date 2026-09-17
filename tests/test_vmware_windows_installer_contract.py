@@ -161,6 +161,64 @@ def test_network_layout_matches_guest_interfaces(config):
     assert net['ethernets']['bootstrap-uplink']['dhcp4'] is True
 
 
+@pytest.mark.parametrize('role', ['core', 'app', 'participant'])
+def test_reinstall_builder_only_builds_selected_vm_from_cache(config, tmp_path, monkeypatch, role):
+    config['reinstall_roles'] = [role]
+    calls = []
+    def cached(*args, **kwargs):
+        assert kwargs == {'cached_only': True}
+        calls.append(args[0])
+        return tmp_path / 'base.img'
+    monkeypatch.setattr(builder, 'download_verified', cached)
+    monkeypatch.setattr(builder, 'prepare_disk', lambda qemu, image, disk, *a, **kw: disk.write_bytes(b'disk'))
+    monkeypatch.setattr(builder, 'prepare_catalogs', lambda *a: ('', ''))
+    lab = Path(config['lab_dir'])
+    for other in ('core', 'app', 'participant'):
+        if other != role:
+            (lab / f'scenarioforge-{other}').mkdir()
+            (lab / f'scenarioforge-{other}/keep').write_text('original')
+    builder.prepare_images(config, tmp_path)
+    assert len(calls) == 1
+    for other in ('core', 'app', 'participant'):
+        directory = lab / f'scenarioforge-{other}'
+        assert (directory / 'keep').exists() == (other != role)
+        assert (directory / f'scenarioforge-{other}.vmx').exists() == (other == role)
+
+
+@pytest.mark.parametrize('mode', ['yes', 'no', 'empty', 'eof', 'preview', 'valid', 'invalid', 'download_failure'])
+def test_reinstall_cache_download_requires_consent(config, monkeypatch, mode):
+    config['reinstall_roles'] = ['participant']
+    config['participant_os'] = 'debian'
+    downloads = []
+    prompts = []
+    def download(*args, **kwargs):
+        if kwargs.get('cached_only'):
+            if mode == 'valid':
+                return Path('cached')
+            if mode == 'invalid':
+                raise ValueError('Cached image verification failed')
+            raise builder.image_cache.MissingCachedImage('missing')
+        downloads.append(args[0])
+        if mode == 'download_failure':
+            raise builder.BuildError('Checksum verification failed')
+        return Path('downloaded')
+    def answer(prompt):
+        prompts.append(prompt)
+        assert mode not in ('preview', 'valid', 'invalid')
+        if mode == 'eof':
+            raise EOFError
+        return {'yes': 'yes', 'no': 'n', 'empty': '', 'download_failure': 'y'}[mode]
+    monkeypatch.setattr(builder, 'download_verified', download)
+    monkeypatch.setattr('builtins.input', answer)
+    if mode in ('yes', 'valid'):
+        builder.check_reinstall_cache(config, prompt_missing=True)
+    else:
+        with pytest.raises((ValueError, builder.BuildError)):
+            builder.check_reinstall_cache(config, prompt_missing=mode != 'preview')
+    assert bool(downloads) == (mode in ('yes', 'download_failure'))
+    assert bool(prompts) == (mode not in ('preview', 'valid', 'invalid'))
+
+
 @pytest.mark.parametrize('source_format', ['qcow2', 'raw', 'vmdk'])
 def test_native_qemu_converts_and_grows_without_modifying_base(tmp_path, source_format):
     qemu = shutil.which('qemu-img')

@@ -191,6 +191,7 @@ Important options:
   --watch                     keep printing status until provisioning completes
   --interval SECONDS          status interval (default: 10, minimum: 2)
   --yes                       skip lab confirmation (Secure Boot still asks)
+  --reinstall ROLE           Recreate core, app, participant, or all; prompt for missing images
   --dry-run                   validate and show the plan without changing files or VMs
   --cleanup                   alias for the cleanup command
   --force                     allow cleanup of a complete, running lab
@@ -279,6 +280,7 @@ parse_args() {
             --config) [[ $# -ge 2 ]] || die "--config requires a file"; shift 2 ;;
             --config=*) shift ;;
             --cleanup) COMMAND=cleanup; shift ;;
+            --reinstall) COMMAND=reinstall; REINSTALL_TARGET="${2:?missing reinstall target}"; shift 2 ;;
             --lab-dir) LAB_DIR="${2:?missing value for --lab-dir}"; shift 2 ;;
             --management-vmnet) MANAGEMENT_VMNET="${2:?missing value for --management-vmnet}"; shift 2 ;;
             --hitl-vmnet) HITL_VMNET="${2:?missing value for --hitl-vmnet}"; shift 2 ;;
@@ -324,7 +326,8 @@ parse_args() {
         kali) PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-40}" ;;
         *) die "--participant-os must be debian or kali" ;;
     esac
-    case "$COMMAND" in install|status|cleanup) ;; *) die "unknown command: $COMMAND" ;; esac
+    case "$COMMAND" in install|status|cleanup|reinstall) ;; *) die "unknown command: $COMMAND" ;; esac
+    validate_reinstall_target
     [[ "${KEEP_HITL_NETWORK:-0}" -eq 0 || "$COMMAND" == cleanup ]] \
         || die "--keep-hitl-network is only valid with cleanup"
 
@@ -595,6 +598,7 @@ write_state() {
     install -d -m 0700 "$STATE_DIR"
     local temp="$STATE_FILE.new" credentials_temp="$CREDENTIALS_FILE.new"
     {
+        save_reinstall_settings
         shell_assignment INSTALLER_VERSION "$SCRIPT_VERSION"
         shell_assignment INSTALLER_OWNER "$INSTALLER_OWNER"
         shell_assignment INSTALLER_UID "$UID"
@@ -694,13 +698,24 @@ random_vmware_mac() {
 download_verified_image() {
     local url="$1" sums_url="$2" algorithm="$3" destination="$4"
     local filename sums expected actual temporary
+    if [[ -n "$REINSTALL_TARGET" ]]; then
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            python3 "$REINSTALL_COMMON_DIR/image_cache.py" require "$destination" "$url" "$algorithm" "$sums_url" \
+                || die "Cached image verification failed; no VMs were replaced"
+            return
+        fi
+        confirm_reinstall_image_download "$destination" "$url"
+    fi
     filename="${url##*/}"
     sums="$(curl -fsSL --retry 3 "$sums_url")" || die "could not download checksum list: $sums_url"
     expected="$(awk -v name="$filename" '$2 == name || $2 == "*" name {print $1; exit}' <<<"$sums")"
     [[ -n "$expected" ]] || die "checksum list does not contain $filename"
     if [[ -f "$destination" ]]; then
         actual="$("${algorithm}sum" "$destination" | awk '{print $1}')"
-        if [[ "$actual" == "$expected" ]]; then log "Using verified cached image $destination"; return; fi
+        if [[ "$actual" == "$expected" ]]; then
+            remember_verified_image "$destination" "$url" "$algorithm" "$expected"
+            log "Using verified cached image $destination"; return
+        fi
         warn "Cached image checksum changed; replacing it"
     fi
     install -d -m 0755 "$(dirname "$destination")"
@@ -711,6 +726,7 @@ download_verified_image() {
     actual="$("${algorithm}sum" "$temporary" | awk '{print $1}')"
     [[ "$actual" == "$expected" ]] || { rm -f -- "$temporary"; die "checksum verification failed for $filename"; }
     mv -f -- "$temporary" "$destination"
+    remember_verified_image "$destination" "$url" "$algorithm" "$expected"
 }
 
 write_vmware_cloud_init_files() {
@@ -873,42 +889,48 @@ SERIAL
 create_vms() {
     local debian="$IMAGE_CACHE/$DEBIAN_IMAGE_CACHE_NAME"
     local ubuntu="$IMAGE_CACHE/$UBUNTU_IMAGE_CACHE_NAME"
-    install -d -m 0755 "$CORE_DIR" "$APP_DIR" "$PARTICIPANT_DIR"
 
-    prepare_disk "$debian" "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DISK_GB"
-    create_seed_iso core "$CORE_NAME" "$CORE_DIR/$CORE_NAME-cidata.iso"
-    create_vmx "$CORE_VMX" "$CORE_NAME" "$DEBIAN_GUEST_OS" "$CORE_MEMORY_MB" "$CORE_CORES" \
-        "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DIR/$CORE_NAME-cidata.iso"
-    append_guestinfo_cloud_init "$CORE_VMX" core
-    append_nic "$CORE_VMX" 0 custom "$MANAGEMENT_VMNET" "$CORE_NET0_MAC"
-    append_nic "$CORE_VMX" 1 custom "$HITL_VMNET" "$CORE_NET1_MAC"
-    append_nic "$CORE_VMX" 2 nat "" "$CORE_NET2_MAC"
-
-    prepare_disk "$ubuntu" "$APP_DIR/$APP_NAME.vmdk" "$APP_DISK_GB"
-    create_seed_iso app "$APP_NAME" "$APP_DIR/$APP_NAME-cidata.iso"
-    create_vmx "$APP_VMX" "$APP_NAME" "$UBUNTU_GUEST_OS" "$APP_MEMORY_MB" "$APP_CORES" \
-        "$APP_DIR/$APP_NAME.vmdk" "$APP_DIR/$APP_NAME-cidata.iso"
-    append_guestinfo_cloud_init "$APP_VMX" app
-    append_nic "$APP_VMX" 0 nat "" "$APP_NET0_MAC"
-    append_nic "$APP_VMX" 1 custom "$MANAGEMENT_VMNET" "$APP_NET1_MAC"
-
-    local participant_image="$debian" participant_format=qcow2
-    if [[ "$PARTICIPANT_OS" == kali ]]; then
-        participant_image="$PARTICIPANT_IMAGE"
-        participant_format=raw
+    if reinstall_selects core; then
+        install -d -m 0755 "$CORE_DIR"
+        prepare_disk "$debian" "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DISK_GB"
+        create_seed_iso core "$CORE_NAME" "$CORE_DIR/$CORE_NAME-cidata.iso"
+        create_vmx "$CORE_VMX" "$CORE_NAME" "$DEBIAN_GUEST_OS" "$CORE_MEMORY_MB" "$CORE_CORES" \
+            "$CORE_DIR/$CORE_NAME.vmdk" "$CORE_DIR/$CORE_NAME-cidata.iso"
+        append_guestinfo_cloud_init "$CORE_VMX" core
+        append_nic "$CORE_VMX" 0 custom "$MANAGEMENT_VMNET" "$CORE_NET0_MAC"
+        append_nic "$CORE_VMX" 1 custom "$HITL_VMNET" "$CORE_NET1_MAC"
+        append_nic "$CORE_VMX" 2 nat "" "$CORE_NET2_MAC"
     fi
-    prepare_disk "$participant_image" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" "$PARTICIPANT_DISK_GB" "$participant_format"
-    create_seed_iso participant "$PARTICIPANT_NAME" "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
-    local VMWARE_DISK_BUS="$VMWARE_DISK_BUS"
-    [[ "$PARTICIPANT_OS" != kali ]] || VMWARE_DISK_BUS=nvme
-    create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" "$DEBIAN_GUEST_OS" \
-        "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" \
-        "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
-    append_guestinfo_cloud_init "$PARTICIPANT_VMX" participant
-    append_nic "$PARTICIPANT_VMX" 0 custom "$HITL_VMNET" "$PARTICIPANT_NET0_MAC"
-    append_nic "$PARTICIPANT_VMX" 1 nat "" "$PARTICIPANT_NET1_MAC"
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
-        append_nic "$PARTICIPANT_VMX" 2 custom "$LLM_VMNET" "$PARTICIPANT_NET2_MAC"
+    if reinstall_selects app; then
+        install -d -m 0755 "$APP_DIR"
+        prepare_disk "$ubuntu" "$APP_DIR/$APP_NAME.vmdk" "$APP_DISK_GB"
+        create_seed_iso app "$APP_NAME" "$APP_DIR/$APP_NAME-cidata.iso"
+        create_vmx "$APP_VMX" "$APP_NAME" "$UBUNTU_GUEST_OS" "$APP_MEMORY_MB" "$APP_CORES" \
+            "$APP_DIR/$APP_NAME.vmdk" "$APP_DIR/$APP_NAME-cidata.iso"
+        append_guestinfo_cloud_init "$APP_VMX" app
+        append_nic "$APP_VMX" 0 nat "" "$APP_NET0_MAC"
+        append_nic "$APP_VMX" 1 custom "$MANAGEMENT_VMNET" "$APP_NET1_MAC"
+    fi
+    if reinstall_selects participant; then
+        install -d -m 0755 "$PARTICIPANT_DIR"
+        local participant_image="$debian" participant_format=qcow2
+        if [[ "$PARTICIPANT_OS" == kali ]]; then
+            participant_image="$PARTICIPANT_IMAGE"
+            participant_format=raw
+        fi
+        prepare_disk "$participant_image" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" "$PARTICIPANT_DISK_GB" "$participant_format"
+        create_seed_iso participant "$PARTICIPANT_NAME" "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
+        local VMWARE_DISK_BUS="$VMWARE_DISK_BUS"
+        [[ "$PARTICIPANT_OS" != kali ]] || VMWARE_DISK_BUS=nvme
+        create_vmx "$PARTICIPANT_VMX" "$PARTICIPANT_NAME" "$DEBIAN_GUEST_OS" \
+            "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DIR/$PARTICIPANT_NAME.vmdk" \
+            "$PARTICIPANT_DIR/$PARTICIPANT_NAME-cidata.iso"
+        append_guestinfo_cloud_init "$PARTICIPANT_VMX" participant
+        append_nic "$PARTICIPANT_VMX" 0 custom "$HITL_VMNET" "$PARTICIPANT_NET0_MAC"
+        append_nic "$PARTICIPANT_VMX" 1 nat "" "$PARTICIPANT_NET1_MAC"
+        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+            append_nic "$PARTICIPANT_VMX" 2 custom "$LLM_VMNET" "$PARTICIPANT_NET2_MAC"
+        fi
     fi
 }
 
@@ -931,14 +953,14 @@ guest_tools_running() {
 guest_file_exists() {
     local vmx="$1" username="$2" password="$3" path="$4"
     guest_tools_running "$vmx" || return 1
-    timeout 5 vmrun -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
+    timeout 5 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
         fileExistsInGuest "$vmx" "$path" >/dev/null 2>&1
 }
 guest_file_text() {
     local vmx="$1" username="$2" password="$3" path="$4" temp
     guest_tools_running "$vmx" || return 0
     temp="$(mktemp "${TMPDIR:-/tmp}/scenarioforge-vmware-read.XXXXXX")"
-    if timeout 5 vmrun -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
+    if timeout 5 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" -gu "$username" -gp "$password" \
         CopyFileFromGuestToHost "$vmx" "$path" "$temp" >/dev/null 2>&1; then
         tr -d '\r' < "$temp"
     fi
@@ -1048,7 +1070,7 @@ wait_for_all_guests() {
 
 vm_power_text() { vm_running "$1" && printf running || printf stopped; }
 app_ip() {
-    timeout 15 vmrun -T "$VMRUN_TYPE" getGuestIPAddress "$APP_VMX" -wait 2>/dev/null | tail -n 1 || true
+    timeout 15 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" getGuestIPAddress "$APP_VMX" -wait 2>/dev/null | tail -n 1 || true
 }
 
 host_desktop_shortcut_owned() {
@@ -1514,6 +1536,7 @@ main() {
         install) perform_install ;;
         status) require_workstation_runtime; show_status ;;
         cleanup) require_workstation_runtime; perform_cleanup ;;
+        reinstall) require_workstation_runtime; perform_reinstall ;;
     esac
 }
 

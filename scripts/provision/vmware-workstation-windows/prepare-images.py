@@ -27,6 +27,7 @@ import uuid
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'common'))
 import cyber_agent_flow as caf
+import image_cache
 SHARED = HERE.parent / 'proxmox' / 'install-scenarioforge-lab.sh'
 TESTED_CATALOG_COMMIT = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
 CORE_HITL_CIDR = '10.254.200.3/24'
@@ -88,8 +89,10 @@ def file_hash(path, algorithm='sha256'):
         return hashlib.file_digest(stream, algorithm).hexdigest()
 
 
-def download_verified(url, sums_url, algorithm, cache):
+def download_verified(url, sums_url, algorithm, cache, *, cached_only=False):
     filename = url.rsplit('/', 1)[-1]
+    if cached_only:
+        return image_cache.require_cached(Path(cache) / filename, url, algorithm, sums_url)
     with urllib.request.urlopen(sums_url, timeout=60) as response:
         checksums = response.read().decode('utf-8')
     expected = None
@@ -103,6 +106,7 @@ def download_verified(url, sums_url, algorithm, cache):
     cache = Path(cache)
     destination = cache / filename
     if destination.is_file() and file_hash(destination, algorithm) == expected:
+        image_cache.remember(destination, url, algorithm, expected)
         print(f'Using verified cached image {filename}', flush=True)
         return destination
     cache.mkdir(parents=True, exist_ok=True)
@@ -117,6 +121,7 @@ def download_verified(url, sums_url, algorithm, cache):
             if file_hash(temporary, algorithm) != expected:
                 raise BuildError(f'Checksum verification failed for {filename}.')
             os.replace(temporary, destination)
+            image_cache.remember(destination, url, algorithm, expected)
             return destination
         except (OSError, BuildError):
             if attempt == 2:
@@ -340,29 +345,69 @@ def prepare_disk(qemu, source, destination, size_gb, work, source_format="qcow2"
         overlay.unlink(missing_ok=True)
 
 
+def image_selection(config, roles):
+    selected = set()
+    for role in roles:
+        selected.add('ubuntu' if role == 'app' else config.get('participant_os', 'debian') if role == 'participant' else 'debian')
+    for name in sorted(selected):
+        parameters = IMAGES[name]
+        if name == 'kali':
+            parameters = (config.get('kali_image_url') or parameters[0],
+                          config.get('kali_sums_url') or parameters[1], parameters[2])
+        yield name, parameters
+
+
+def selected_roles(config):
+    roles = config.get('reinstall_roles', ['core', 'app', 'participant'])
+    if not isinstance(roles, list) or not roles or len(set(roles)) != len(roles) or any(role not in ('core', 'app', 'participant') for role in roles):
+        raise BuildError('Invalid reinstall_roles')
+    return roles
+
+
+def check_reinstall_cache(config, *, prompt_missing=False):
+    for _, parameters in image_selection(config, selected_roles(config)):
+        try:
+            download_verified(*parameters, Path(config['image_cache']), cached_only=True)
+        except image_cache.MissingCachedImage:
+            if not prompt_missing:
+                raise
+            url = parameters[0]
+            destination = Path(config['image_cache']) / url.rsplit('/', 1)[-1]
+            print(f'Required cached image is missing: {destination}', flush=True)
+            print(f'Download source: {url} (the base image may be several GB)', flush=True)
+            try:
+                answer = input('Download and verify this image before reinstalling? [y/N] ')
+            except EOFError:
+                answer = ''
+            if answer.strip().lower() not in ('y', 'yes'):
+                raise BuildError('Image download declined; no VMs were replaced.')
+            download_verified(*parameters, Path(config['image_cache']))
+
+
 def prepare_images(config, work):
     caf.validate(config)
     participant_os = config.get('participant_os', 'debian')
     if participant_os not in ('debian', 'kali'):
         raise BuildError('participant_os must be debian or kali.')
     scripts = guest_scripts()
+    roles = selected_roles(config)
     lab = Path(config['lab_dir'])
-    for role in scripts:
+    for role in roles:
         if (lab / ('scenarioforge-' + role)).exists():
             raise BuildError(f'VM destination already exists: scenarioforge-{role}')
-    checksum, commit = prepare_catalogs(config, work, lab)
-    selected = ['debian', 'ubuntu'] + (['kali'] if participant_os == 'kali' else [])
+    checksum, commit = prepare_catalogs(config, work, lab) if 'app' in roles else ('', '')
     images = {}
-    for name in selected:
-        parameters = IMAGES[name]
-        if name == 'kali':
-            parameters = (config.get('kali_image_url') or parameters[0],
-                          config.get('kali_sums_url') or parameters[1], parameters[2])
-        images[name] = download_verified(*parameters, Path(config['image_cache']))
-    if participant_os == 'kali':
+    for name, parameters in image_selection(config, roles):
+        if config.get('reinstall_roles'):
+            images[name] = download_verified(*parameters, Path(config['image_cache']), cached_only=True)
+        else:
+            images[name] = download_verified(*parameters, Path(config['image_cache']))
+    if 'kali' in images:
         images['kali'] = extract_kali_disk(images['kali'], work)
     used_macs = set()
     for role, script in scripts.items():
+        if role not in roles:
+            continue
         name = 'scenarioforge-' + role
         directory = lab / name
         directory.mkdir()
@@ -398,6 +443,8 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--qemu-img')
     parser.add_argument('--git')
+    parser.add_argument('--check-cache', action='store_true')
+    parser.add_argument('--prompt-missing-images', action='store_true')
     args = parser.parse_args()
     if args.check:
         if not args.qemu_img:
@@ -408,6 +455,10 @@ def main():
     if not args.request:
         parser.error('provide the build request JSON file')
     config = json.loads(args.request.read_text(encoding='utf-8-sig'))
+    if args.check_cache:
+        check_reinstall_cache(config, prompt_missing=args.prompt_missing_images)
+        print('Required cached images verified; no VM changes.')
+        return
     check_dependencies(config['qemu_img'], config.get('git_exe') if config['flag_generators'] or config['vulnhub'] else None)
     # The parent PowerShell installer protects this directory with Windows ACLs.
     with tempfile.TemporaryDirectory(prefix='image-build-', dir=args.request.parent) as temporary:

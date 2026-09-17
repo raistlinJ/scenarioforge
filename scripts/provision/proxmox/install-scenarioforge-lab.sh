@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/cyber-agent-flow.sh"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/reinstall.sh"
 
 SCRIPT_VERSION="0.10.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
@@ -362,6 +363,7 @@ Important options:
   --watch                      Keep printing status until all three guests are ready
   --interval SECONDS           Status watch interval (default: 10, minimum: 2)
   --yes                        Do not ask for confirmation
+  --reinstall ROLE           Recreate core, app, participant, or all; prompt for missing images
   --dry-run                    Validate and print mutations without applying them
   --cleanup                    Alias for the cleanup command
   --force                      Allow cleanup of a healthy, running completed lab
@@ -429,12 +431,14 @@ parse_args() {
             --yes) ASSUME_YES=1; shift ;;
             --dry-run) DRY_RUN=1; shift ;;
             --cleanup) COMMAND="cleanup"; shift ;;
+            --reinstall) COMMAND=reinstall; REINSTALL_TARGET="${2:?missing reinstall target}"; shift 2 ;;
             --force) FORCE_CLEANUP=1; shift ;;
             *) die "unknown argument: $1" ;;
         esac
     done
 
-    [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" ]] || die "unknown command: $COMMAND"
+    [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" || "$COMMAND" == reinstall ]] || die "unknown command: $COMMAND"
+    validate_reinstall_target
     [[ "$VERBOSE" == "0" || "$VERBOSE" == "1" ]] || die "SF_VERBOSE must be 0 or 1"
     [[ "$INSTALL_FLAG_GENERATORS" == "0" || "$INSTALL_FLAG_GENERATORS" == "1" ]] \
         || die "SF_INSTALL_FLAG_GENERATORS must be 0 or 1"
@@ -788,6 +792,14 @@ ensure_snippet_storage() {
 download_verified_image() {
     local url="$1" sums_url="$2" algorithm="$3" destination="$4"
     local filename sums expected actual temporary checksum_command
+    if [[ -n "$REINSTALL_TARGET" ]]; then
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            python3 "$REINSTALL_COMMON_DIR/image_cache.py" require "$destination" "$url" "$algorithm" "$sums_url" \
+                || die "Cached image verification failed; no VMs were replaced"
+            return
+        fi
+        confirm_reinstall_image_download "$destination" "$url"
+    fi
     filename="${url##*/}"
     checksum_command="${algorithm}sum"
     sums="$(curl -fsSL --retry 3 "$sums_url")" || die "could not download checksum list: $sums_url"
@@ -798,6 +810,7 @@ download_verified_image() {
     if [[ -f "$destination" ]]; then
         actual="$("$checksum_command" "$destination" | awk '{print $1}')"
         if [[ "$actual" == "$expected" ]]; then
+            remember_verified_image "$destination" "$url" "$algorithm" "$expected"
             log "Using verified cached image $destination"
             return
         fi
@@ -816,6 +829,7 @@ download_verified_image() {
     actual="$("$checksum_command" "$temporary" | awk '{print $1}')"
     [[ "$actual" == "$expected" ]] || { rm -f "$temporary"; die "checksum verification failed for $filename"; }
     mv "$temporary" "$destination"
+    remember_verified_image "$destination" "$url" "$algorithm" "$expected"
 }
 
 prepare_participant_image() {
@@ -1936,6 +1950,7 @@ EOF
 install_snippets() {
     local file destination
     for file in core-user.yaml core-network.yaml app-user.yaml app-network.yaml participant-user.yaml participant-network.yaml; do
+        reinstall_selects "${file%%-*}" || continue
         destination="$SNIPPET_DIR/scenarioforge-$file"
         run install -m 0600 "$WORK_DIR/$file" "$destination"
     done
@@ -1954,30 +1969,34 @@ create_vm() {
 }
 
 create_vms() {
-    create_vm "$CORE_VMID" "$CORE_NAME" "$CORE_MEMORY_MB" "$CORE_CORES" "$CORE_DISK_GB" "$DEBIAN_IMAGE" \
-        --startup order=10,up=30 \
-        --net0 "virtio=$CORE_NET0_MAC,bridge=$MANAGEMENT_BRIDGE" \
-        --net1 "virtio=$CORE_NET1_MAC,bridge=$HITL_BRIDGE" \
-        --net2 "virtio=$CORE_NET2_MAC,bridge=$UPLINK_BRIDGE"
-    run qm set "$CORE_VMID" --cicustom \
-        "user=$SNIPPET_STORAGE:snippets/scenarioforge-core-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-core-network.yaml"
-
-    create_vm "$APP_VMID" "$APP_NAME" "$APP_MEMORY_MB" "$APP_CORES" "$APP_DISK_GB" "$UBUNTU_IMAGE" \
-        --startup order=20,up=30 \
-        --net0 "virtio=$APP_NET0_MAC,bridge=$UPLINK_BRIDGE" \
-        --net1 "virtio=$APP_NET1_MAC,bridge=$MANAGEMENT_BRIDGE"
-    run qm set "$APP_VMID" --cicustom \
-        "user=$SNIPPET_STORAGE:snippets/scenarioforge-app-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-app-network.yaml"
-
-    create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$PARTICIPANT_IMAGE" \
-        --startup order=30,up=15 \
-        --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
-        --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
-        run qm set "$PARTICIPANT_VMID" --net2 "virtio=$PARTICIPANT_NET2_MAC,bridge=$LLM_BRIDGE"
+    if reinstall_selects core; then
+        create_vm "$CORE_VMID" "$CORE_NAME" "$CORE_MEMORY_MB" "$CORE_CORES" "$CORE_DISK_GB" "$DEBIAN_IMAGE" \
+            --startup order=10,up=30 \
+            --net0 "virtio=$CORE_NET0_MAC,bridge=$MANAGEMENT_BRIDGE" \
+            --net1 "virtio=$CORE_NET1_MAC,bridge=$HITL_BRIDGE" \
+            --net2 "virtio=$CORE_NET2_MAC,bridge=$UPLINK_BRIDGE"
+        run qm set "$CORE_VMID" --cicustom \
+            "user=$SNIPPET_STORAGE:snippets/scenarioforge-core-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-core-network.yaml"
     fi
-    run qm set "$PARTICIPANT_VMID" --cicustom \
-        "user=$SNIPPET_STORAGE:snippets/scenarioforge-participant-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-participant-network.yaml"
+    if reinstall_selects app; then
+        create_vm "$APP_VMID" "$APP_NAME" "$APP_MEMORY_MB" "$APP_CORES" "$APP_DISK_GB" "$UBUNTU_IMAGE" \
+            --startup order=20,up=30 \
+            --net0 "virtio=$APP_NET0_MAC,bridge=$UPLINK_BRIDGE" \
+            --net1 "virtio=$APP_NET1_MAC,bridge=$MANAGEMENT_BRIDGE"
+        run qm set "$APP_VMID" --cicustom \
+            "user=$SNIPPET_STORAGE:snippets/scenarioforge-app-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-app-network.yaml"
+    fi
+    if reinstall_selects participant; then
+        create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$PARTICIPANT_IMAGE" \
+            --startup order=30,up=15 \
+            --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
+            --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
+        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+            run qm set "$PARTICIPANT_VMID" --net2 "virtio=$PARTICIPANT_NET2_MAC,bridge=$LLM_BRIDGE"
+        fi
+        run qm set "$PARTICIPANT_VMID" --cicustom \
+            "user=$SNIPPET_STORAGE:snippets/scenarioforge-participant-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-participant-network.yaml"
+    fi
 }
 
 write_state() {
@@ -1985,6 +2004,7 @@ write_state() {
     install -d -m 0700 "$STATE_DIR"
     chmod 0700 "$STATE_DIR"
     {
+        save_reinstall_settings
         shell_assignment INSTALLER_VERSION "$SCRIPT_VERSION"
         shell_assignment INSTALLER_PID "$$"
         shell_assignment PVE_NODE "$PVE_NODE"
@@ -2944,6 +2964,7 @@ main() {
             fi
             ;;
         cleanup) perform_cleanup ;;
+        reinstall) perform_reinstall ;;
         install) perform_install ;;
     esac
 }
