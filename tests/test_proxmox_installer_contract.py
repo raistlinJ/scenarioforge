@@ -696,8 +696,9 @@ confirm_cleanup
     assert "rerun cleanup with --force" in result.stderr
 
 
+@pytest.mark.parametrize("core_hitl_cidr", ["10.254.200.3/24", "10.80.12.1/24"])
 @pytest.mark.parametrize("participant_os", ["debian", "kali"])
-def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, participant_os: str) -> None:
+def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, participant_os: str, core_hitl_cidr: str) -> None:
     user_key = tmp_path / "user.pub"
     transfer_key = tmp_path / "transfer.pub"
     user_key.write_text("ssh-ed25519 AAAAuser operator\n", encoding="utf-8")
@@ -709,6 +710,7 @@ def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, partic
 source {INSTALLER!s}
 WORK_DIR={tmp_path!s}
 parse_args install --participant-os {participant_os}
+CORE_HITL_CIDR={core_hitl_cidr}
 SSH_PUBLIC_KEY_FILE={shlex.quote(str(user_key))}
 CATALOG_TRANSFER_PUBLIC_KEY_FILE={shlex.quote(str(transfer_key))}
 CORE_PASSWORD=core-password-for-test
@@ -732,6 +734,12 @@ write_cloud_init_files
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+    network = yaml.safe_load((tmp_path / "participant-network.yaml").read_text())["ethernets"]
+    assert network["participant"]["routes"] == [
+        {"to": "0.0.0.0/0", "via": core_hitl_cidr.split("/")[0], "metric": 2000}
+    ]
+    assert network["bootstrap-uplink"]["dhcp4"] is True
 
     core_user = yaml.safe_load((tmp_path / "core-user.yaml").read_text(encoding="utf-8"))
     app_user = yaml.safe_load((tmp_path / "app-user.yaml").read_text(encoding="utf-8"))

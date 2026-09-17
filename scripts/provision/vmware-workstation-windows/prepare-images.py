@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE.parent / 'common'))
 import cyber_agent_flow as caf
 SHARED = HERE.parent / 'proxmox' / 'install-scenarioforge-lab.sh'
 TESTED_CATALOG_COMMIT = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
+CORE_HITL_CIDR = '10.254.200.3/24'
 CATALOG_URL = 'https://github.com/raistlinJ/flag-generators.git'
 IMAGES = {
     'debian': ('https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2',
@@ -214,7 +215,7 @@ def cloud_config(role, config, script, checksum='', commit=''):
                           CORE_MINIMAL_REF=config['core_minimal_ref'], CORE_REPO_URL='https://github.com/raistlinJ/core.git',
                           CORE_REPO_REF=config['core_ref'], CORE_USE_SYSTEMD_RESOLVED_STUB=1)
         else:
-            values.update(CORE_HITL_CIDR='10.254.200.3/24', CORE_PASSWORD=config['core_password'],
+            values.update(CORE_HITL_CIDR=CORE_HITL_CIDR, CORE_PASSWORD=config['core_password'],
                           SCENARIOFORGE_ADMIN_PASSWORD=config['web_admin_password'],
                           INSTALL_FLAG_GENERATORS=int(config['flag_generators']), INSTALL_VULNHUB=int(config['vulnhub']),
                           OPTIONAL_CONTENT_SHA256=checksum, FLAG_GENERATORS_RESOLVED_COMMIT=commit,
@@ -251,6 +252,8 @@ def network_layout(role, config, macs):
     else:
         networks = [('custom', config['hitl_vmnet']), ('nat', '')]
         interfaces = {'participant': nic(0, 'ens18', addresses=['10.254.200.10/24'], dhcp4=False, dhcp6=False,
+                                          # Temporary NAT wins during bootstrap until its adapter is detached.
+                                          routes=[{'to': '0.0.0.0/0', 'via': CORE_HITL_CIDR.split('/')[0], 'metric': 2000}],
                                           **{'accept-ra': False}),
                       'bootstrap-uplink': nic(1, 'ens19', dhcp4=True, dhcp6=False)}
     if role == 'participant' and config.get('cyber_agent_flow', False):

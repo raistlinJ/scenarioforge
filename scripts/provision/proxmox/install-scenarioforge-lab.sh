@@ -1917,6 +1917,11 @@ ethernets:
     match: {macaddress: '$PARTICIPANT_NET0_MAC'}
     set-name: ens18
     addresses: [$PARTICIPANT_CIDR]
+    # Prefer temporary NAT during bootstrap; use the CORE HITL router after detach.
+    routes:
+      - to: 0.0.0.0/0
+        via: ${CORE_HITL_CIDR%/*}
+        metric: 2000
     dhcp4: false
     dhcp6: false
     accept-ra: false

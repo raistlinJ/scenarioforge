@@ -155,7 +155,10 @@ def test_network_layout_matches_guest_interfaces(config):
         assert [nic['set-name'] for nic in interfaces] == ['ens' + str(18 + i) for i in range(count)]
     _, net = builder.network_layout('participant', config, ['mac0', 'mac1'])
     assert not net['ethernets']['participant']['dhcp4']
-    assert 'gateway4' not in net['ethernets']['participant']
+    assert net['ethernets']['participant']['routes'] == [
+        {'to': '0.0.0.0/0', 'via': builder.CORE_HITL_CIDR.split('/')[0], 'metric': 2000}
+    ]
+    assert net['ethernets']['bootstrap-uplink']['dhcp4'] is True
 
 
 @pytest.mark.parametrize('source_format', ['qcow2', 'raw', 'vmdk'])
