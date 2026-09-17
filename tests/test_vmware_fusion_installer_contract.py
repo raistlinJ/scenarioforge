@@ -83,9 +83,10 @@ fusion_bridge_status_is_healthy {shlex.quote(status)}
     ('501 /Applications/VMware Fusion.app/Contents/Library/vmnet-bridge', False),
     ('0 /Library/PrivilegedHelperTools/com.docker.vmnetd', False),
 ])
-def test_service_preflight_is_read_only(process, ready):
+def test_service_preflight_dry_run_is_read_only(process, ready):
     result = run_bash(f'''
 source {shlex.quote(str(INSTALLER))}
+DRY_RUN=1
 ps() {{ printf '%s\\n' {shlex.quote(process)}; }}
 sudo() {{ echo UNEXPECTED_MUTATION; exit 91; }}
 open() {{ echo UNEXPECTED_MUTATION; exit 92; }}
@@ -96,6 +97,57 @@ require_fusion_services_initialized
     if not ready:
         assert 'Open VMware Fusion' in result.stderr
         assert 'No network changes were made' in result.stderr
+
+
+@pytest.mark.parametrize('outcome', ['already_ready', 'starts', 'timeout', 'launch_failure', 'inspection_failure'])
+def test_service_preflight_launches_fusion_and_waits(tmp_path, outcome):
+    events = tmp_path / 'events'
+    app = '/Applications/Custom VMware Fusion.app'
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+DRY_RUN=0
+FUSION_APP={shlex.quote(app)}
+outcome={shlex.quote(outcome)}
+waits=0
+ps() {{
+    [[ "$outcome" != inspection_failure ]] || return 1
+    if [[ "$outcome" == already_ready || ( "$outcome" == starts && "$waits" -ge 2 ) ]]; then
+        printf '0 %s/Contents/Library/vmnet-bridge\\n' "$FUSION_APP"
+    else
+        printf '501 %s/Contents/Library/vmnet-bridge\\n' "$FUSION_APP"
+    fi
+}}
+open() {{
+    [[ "$#" == 2 && "$1" == -a && "$2" == "$FUSION_APP" ]] || exit 90
+    echo open >> {shlex.quote(str(events))}
+    [[ "$outcome" != launch_failure ]]
+}}
+sleep() {{
+    [[ "$1" == 2 ]] || exit 91
+    waits=$((waits + 1))
+    echo wait >> {shlex.quote(str(events))}
+}}
+sudo() {{ echo UNEXPECTED_MUTATION; exit 92; }}
+require_fusion_services_initialized
+echo CONTINUED
+''')
+    ready = outcome in ('already_ready', 'starts')
+    assert (result.returncode == 0) == ready, result.stderr
+    assert ('CONTINUED' in result.stdout) == ready
+    assert 'UNEXPECTED_MUTATION' not in result.stdout
+    calls = events.read_text().splitlines() if events.exists() else []
+    if outcome in ('already_ready', 'inspection_failure'):
+        assert calls == []
+    else:
+        assert calls.count('open') == 1
+        assert calls.count('wait') == {'starts': 2, 'timeout': 60, 'launch_failure': 0}[outcome]
+    if outcome == 'timeout':
+        assert 'did not initialize within 120 seconds' in result.stderr
+        assert 'administrator/setup prompts' in result.stderr
+    elif outcome == 'launch_failure':
+        assert 'Could not open VMware Fusion' in result.stderr
+    elif outcome == 'inspection_failure':
+        assert 'could not inspect Fusion services' in result.stderr
 
 
 def test_management_helper_resolves_after_sourcing_shared_installer(tmp_path):

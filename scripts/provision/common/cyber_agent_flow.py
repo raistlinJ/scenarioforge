@@ -125,7 +125,13 @@ done
     addition = f'''
 set_bootstrap_status 90 'installing CyberAgentFlow'
 [[ "$ID" == kali ]] || fail_bootstrap 'CyberAgentFlow requires Kali'
-apt-get install -y git ca-certificates python3-venv python3-dev python3-yaml build-essential xdotool x11-utils python3-psutil npm curl xdg-utils
+apt-get install -y git ca-certificates python3-venv python3-dev python3-yaml build-essential xdotool x11-utils python3-psutil curl xdg-utils
+cat > /usr/local/sbin/scenarioforge-caf-runtime <<'CAF_RUNTIME'
+{Path(__file__).with_name('cyber-agent-flow-runtime.sh').read_text()}
+CAF_RUNTIME
+chmod 0755 /usr/local/sbin/scenarioforge-caf-runtime
+bash /usr/local/sbin/scenarioforge-caf-runtime \\
+    || fail_bootstrap 'CyberAgentFlow requires working Docker, Compose, and Claude CLI for participant; inspect the error above'
 if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed ]]; then
     if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-source-ready ]]; then
         [[ ! -e /opt/cyber-agent-flow ]] || fail_bootstrap '/opt/cyber-agent-flow already exists; inspect the incomplete installation'
@@ -137,7 +143,7 @@ if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed ]]; then
     # CyberAgentFlow uses the MCP v1 decorator API; v2 is incompatible.
     printf 'mcp>=1.28,<2\n' > /opt/cyber-agent-flow/scenarioforge-constraints.txt
     export PIP_CONSTRAINT=/opt/cyber-agent-flow/scenarioforge-constraints.txt
-    bash /opt/cyber-agent-flow/install_prerequisites.sh
+    SUDO_USER=participant bash /opt/cyber-agent-flow/install_prerequisites.sh
     # Do not trust prerequisite scripts that can warn and skip pip setup.
     /opt/cyber-agent-flow/venv/bin/python -m pip install -r /opt/cyber-agent-flow/requirements.txt
     /opt/cyber-agent-flow/venv/bin/python -m pip check
@@ -151,6 +157,10 @@ CAF_CONFIG
     touch /var/lib/scenarioforge/cyber-agent-flow-installed
 fi
 # Verify existing installations too, before declaring the participant ready.
+if [[ -f /opt/cyber-agent-flow/install_claude.sh ]]; then
+    sudo -H -u participant bash /opt/cyber-agent-flow/install_claude.sh --check \\
+        || fail_bootstrap 'Claude CLI does not meet CyberAgentFlow requirements; run install_claude.sh as participant'
+fi
 /opt/cyber-agent-flow/venv/bin/python -c "from mcp.server import Server; assert callable(Server('provision-check').list_tools)" \\
     || fail_bootstrap 'CyberAgentFlow requires MCP v1; install mcp>=1.28,<2 in its virtual environment'
 /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
@@ -169,7 +179,7 @@ cd /opt/cyber-agent-flow
 # MCP children invoke Python through PATH, so export the environment to them.
 unset PYTHONHOME
 export VIRTUAL_ENV=/opt/cyber-agent-flow/venv
-export PATH="$VIRTUAL_ENV/bin:$PATH"
+export PATH="$VIRTUAL_ENV/bin:$HOME/.local/bin:$PATH"
 exec bash ./start_ws.sh "$@"
 CAF_LAUNCH
 chmod 0755 /usr/local/bin/cyber-agent-flow

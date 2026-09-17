@@ -1,7 +1,8 @@
 # ScenarioForge three-VM installer for VMware Workstation on Linux
 
-CyberAgentFlow provisioning installs and verifies the guest Python environment before
-marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
+CyberAgentFlow provisioning installs and verifies the guest Python environment,
+Docker, Docker Compose (`docker compose` and `docker-compose`), and the native
+Claude Code CLI before marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
 participant desktop and in its applications menu. These changes apply when the
 guest is provisioned; existing VMs are not automatically updated.
 
@@ -74,13 +75,18 @@ participant VM. See the example config alongside this README for the other optio
 - An x86_64 Linux host with VMware Workstation installed and runnable by your
   desktop user. The installer uses `vmrun` and `vmware-vdiskmanager`; it must not
   be run as root.
+- During installation, the script opens Workstation if it is not already running
+  for your desktop user, then waits up to two minutes for VMware to respond.
+  Complete any administrator or first-run prompts while it waits. Run from a
+  desktop terminal, or open Workstation in that session first. Dry runs do not
+  launch Workstation.
 - Approximately 140 GB of free disk space for the default expanded VM disks,
   plus enough RAM to run the selected guests. The defaults allocate 8 GB to
   CORE, 4 GB to APP, and 2 GB to PARTICIPANT.
 - The installer installs missing host tools using `sudo apt-get`, `sudo dnf`,
   or `sudo yum`: `qemu-img`, `xorriso` (or an existing `genisoimage`), `curl`,
   `openssl`, Python 3, GNU `timeout`/checksums, `tar`, `xz`, `gzip`, `awk`, `sed`,
-  `grep`, and `kmod` (`modinfo`/`modprobe`). EFI hosts also need `mokutil`.
+  `grep`, `nohup`, `pgrep`, and `kmod` (`modinfo`/`modprobe`). EFI hosts also need `mokutil`.
   Optional catalog imports also require Git and OpenSSH clients,
   which are installed when needed. VMware remains a manual prerequisite.
 - Internet access from VMware's NAT network while the guests provision.
@@ -527,8 +533,12 @@ authentication. The dedicated NIC is not a firewall: other addresses on its loca
 subnet remain reachable, and guests with sudo can change routing.
 
 CyberAgentFlow is installed in `/opt/cyber-agent-flow` using its prerequisites
-script while the temporary Internet connection is available. It is not started
-automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
+script while the temporary Internet connection is available. Docker is enabled
+at boot, and `participant` is added to the `docker` group. The native Claude CLI
+is installed under `/home/participant/.local/bin` and is available to the web
+launcher. Provisioning verifies Docker daemon access, both Compose commands,
+and Claude CLI as `participant`, including when retrying setup. CyberAgentFlow
+itself is not started automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are

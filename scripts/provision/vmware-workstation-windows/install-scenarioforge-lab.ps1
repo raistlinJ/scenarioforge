@@ -132,6 +132,39 @@ function Find-Workstation {
     throw 'VMware Workstation was not found. Install Workstation Pro or set vmware_dir.'
 }
 
+function Test-WorkstationGuiRunning {
+    param($State)
+    $session = (Get-Process -Id $PID).SessionId
+    return @(Get-Process -Name vmware -ErrorAction SilentlyContinue | Where-Object {
+        $_.SessionId -eq $session -and $_.Path -eq $State.Vmware
+    }).Count -gt 0
+}
+
+function Ensure-WorkstationStarted {
+    param($State, [switch]$Preview)
+    if ($Preview) { Write-Host 'Dry run: VMware Workstation startup is skipped.'; return }
+    if (-not (Test-WorkstationGuiRunning $State)) {
+        Write-Host 'Opening VMware Workstation; complete any administrator/setup prompts.'
+        try { Start-Process -FilePath $State.Vmware -ErrorAction Stop | Out-Null }
+        catch { throw "Could not open VMware Workstation at $($State.Vmware): $_" }
+    }
+    Write-Host 'Waiting up to 120 seconds for VMware Workstation to initialize.'
+    $deadline = (Get-Date).AddSeconds(120)
+    do {
+        if (Test-WorkstationGuiRunning $State) {
+            try {
+                $result = Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'listHostNetworks') -TimeoutSeconds 5 -AllowFailure
+                if ($result.Code -eq 0 -and $result.Out -match '(?m)^Total host networks:\s*\d+') {
+                    Write-Host 'VMware Workstation is ready.'
+                    return
+                }
+            } catch { Write-Verbose "Workstation is still initializing: $_" }
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw 'VMware Workstation did not initialize within 120 seconds. Complete its setup prompts, check VMware services, then rerun this command.'
+}
+
 function Assert-HostNetworks {
     param($State)
     $result = Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'listHostNetworks')
@@ -462,6 +495,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         if ($Command -eq 'credentials') { $credentials.GetEnumerator() | Sort-Object Key | Format-Table Name, Value; return }
         if ($Command -eq 'resume') {
             if ($NoWait) { $state.Config.no_wait = $true }
+            Ensure-WorkstationStarted $state
             Create-OwnedHitlNetwork $state $stateFile
             Create-OwnedManagementNetwork $state $stateFile
             Assert-HostNetworks $state
@@ -515,6 +549,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         $state.VMs[$role] = @{ Path = Join-Path $config.lab_dir "$name/$name.vmx"; User = $(switch ($role) { core { 'corevm' } app { 'scenarioforge' } participant { 'participant' } }) }
     }
     foreach ($key in @('core_password', 'app_password', 'participant_password', 'web_admin_password')) { $state.Config.Remove($key) }
+    Ensure-WorkstationStarted $state -Preview:$DryRun
     Plan-HitlNetwork $state
     Plan-ManagementNetwork $state -Preview:$DryRun
     $config.hitl_vmnet = $state.Config.hitl_vmnet

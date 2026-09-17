@@ -15,6 +15,64 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ('scenarioforge-windows-test-' + [G
 if ($IsMacOS) { $temp = Join-Path '/private/tmp' (Split-Path $temp -Leaf) }
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
+    & {
+        $startupState = @{ Vmware = 'C:\Custom VMware\vmware.exe' }
+        function Get-Process {
+            param($Id, $Name, $ErrorAction)
+            if ($Id) { return [pscustomobject]@{ SessionId = 1 } }
+            return $candidateProcesses
+        }
+        $candidateProcesses = @()
+        Assert (-not (Test-WorkstationGuiRunning $startupState)) 'No GUI is not running'
+        $candidateProcesses = @([pscustomobject]@{ SessionId = 2; Path = $startupState.Vmware })
+        Assert (-not (Test-WorkstationGuiRunning $startupState)) 'Another desktop session is not reused'
+        $candidateProcesses = @([pscustomobject]@{ SessionId = 1; Path = 'C:\Other VMware\vmware.exe' })
+        Assert (-not (Test-WorkstationGuiRunning $startupState)) 'Another Workstation installation is not reused'
+        $candidateProcesses = @([pscustomobject]@{ SessionId = 1; Path = $startupState.Vmware })
+        Assert (Test-WorkstationGuiRunning $startupState) 'Matching Workstation session is reused'
+    }
+    foreach ($outcome in @('ready', 'starts', 'timeout', 'launch_failure', 'runtime_failure', 'dry_run')) {
+        & {
+            $script:startupCalls = 0
+            $script:startupWaits = 0
+            $script:startupClock = 0
+            $startupState = @{ Vmware = 'C:\Custom VMware\vmware.exe'; Vmrun = 'C:\Custom VMware\vmrun.exe' }
+            function Test-WorkstationGuiRunning {
+                param($State)
+                return $outcome -eq 'ready' -or ($outcome -ne 'timeout' -and $script:startupWaits -ge 2)
+            }
+            function Start-Process {
+                param($FilePath, $ErrorAction)
+                Assert ($FilePath -eq $startupState.Vmware) 'Uses selected Workstation executable'
+                $script:startupCalls++
+                if ($outcome -eq 'launch_failure') { throw 'Launch failed' }
+            }
+            function Start-Sleep { param($Seconds) $script:startupWaits++ }
+            function Get-Date {
+                $script:startupClock += 30
+                return ([datetime]'2026-01-01').AddSeconds($script:startupClock)
+            }
+            function Invoke-HostCommand {
+                param($File, $Arguments, $TimeoutSeconds, [switch]$AllowFailure)
+                Assert ($File -eq $startupState.Vmrun -and $TimeoutSeconds -eq 5) 'Uses bounded VMware readiness probe'
+                Assert (($Arguments -join ' ') -eq '-T ws listHostNetworks') 'Checks network inventory readiness'
+                if ($outcome -eq 'runtime_failure') { throw 'VMware services unavailable' }
+                return @{ Code = 0; Out = 'Total host networks: 3' }
+            }
+            if ($outcome -eq 'launch_failure') {
+                Assert-Throws { Ensure-WorkstationStarted $startupState } 'Could not open VMware Workstation'
+            } elseif ($outcome -in @('timeout', 'runtime_failure')) {
+                Assert-Throws { Ensure-WorkstationStarted $startupState } 'did not initialize within 120 seconds'
+            } else {
+                Ensure-WorkstationStarted $startupState -Preview:($outcome -eq 'dry_run')
+            }
+            $expectedCalls = if ($outcome -in @('ready', 'dry_run')) { 0 } else { 1 }
+            Assert ($script:startupCalls -eq $expectedCalls) "Launch count for $outcome"
+            if ($outcome -in @('ready', 'dry_run', 'launch_failure')) {
+                Assert ($script:startupWaits -eq 0) "No startup waits for $outcome"
+            }
+        }
+    }
     if ($IsWindows) {
         $protectedDirectory = Join-Path $temp 'protected-state'
         Protect-LabDirectory $protectedDirectory

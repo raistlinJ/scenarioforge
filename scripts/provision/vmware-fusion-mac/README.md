@@ -1,7 +1,8 @@
 # ScenarioForge three-VM installer for VMware Fusion on macOS
 
-CyberAgentFlow provisioning installs and verifies the guest Python environment before
-marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
+CyberAgentFlow provisioning installs and verifies the guest Python environment,
+Docker, Docker Compose (`docker compose` and `docker-compose`), and the native
+Claude Code CLI before marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
 participant desktop and in its applications menu. These changes apply when the
 guest is provisioned; existing VMs are not automatically updated.
 
@@ -67,6 +68,11 @@ participant VM. See the example config alongside this README for the other optio
 
 - VMware Fusion 13 or newer, installed in `/Applications/VMware Fusion.app`.
   Set `SF_FUSION_APP` when using a differently named application bundle.
+  If Fusion's bridge service is not running, the installer opens this app and
+  waits up to two minutes for initialization. Complete any administrator or
+  first-run setup prompts in Fusion while it waits. If setup takes longer,
+  finish the prompts and rerun the installer. Dry runs check the service but
+  do not open Fusion.
 - Apple silicon uses Debian's hardware-compatible generic ARM64 image and the
   Ubuntu ARM64 cloud image, the Fusion ARM guest types, UEFI, NVMe disks, and
   `vmxnet3` adapters. The ARM64 CORE guest installs static QEMU user emulation
@@ -425,8 +431,12 @@ authentication. The dedicated NIC is not a firewall: other addresses on its loca
 subnet remain reachable, and guests with sudo can change routing.
 
 CyberAgentFlow is installed in `/opt/cyber-agent-flow` using its prerequisites
-script while the temporary Internet connection is available. It is not started
-automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
+script while the temporary Internet connection is available. Docker is enabled
+at boot, and `participant` is added to the `docker` group. The native Claude CLI
+is installed under `/home/participant/.local/bin` and is available to the web
+launcher. Provisioning verifies Docker daemon access, both Compose commands,
+and Claude CLI as `participant`, including when retrying setup. CyberAgentFlow
+itself is not started automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are

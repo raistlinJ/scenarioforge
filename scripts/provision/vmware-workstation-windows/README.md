@@ -8,8 +8,9 @@ Both static fields remain advanced overrides: **do not change them unless you
 understand the network's addressing and routing**. Windows JSON does not support
 comments; these fields are therefore omitted from its example.
 
-CyberAgentFlow provisioning installs and verifies the guest Python environment before
-marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
+CyberAgentFlow provisioning installs and verifies the guest Python environment,
+Docker, Docker Compose (`docker compose` and `docker-compose`), and the native
+Claude Code CLI before marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the
 participant desktop and in its applications menu. These changes apply when the
 guest is provisioned; existing VMs are not automatically updated.
 
@@ -71,6 +72,12 @@ Use an x64 Windows host supported by your Workstation release, with VMware
 Workstation Pro, PowerShell **7.4 or newer** (`pwsh`), and enough resources for
 14 GB of guest RAM plus Windows. Allow room for up to 140 GB of growing
 VM disks, plus cached cloud images. Windows ARM is not supported by this script.
+
+During installation and resume, the script opens the selected Workstation
+application if it is not already running in your session, then waits up to two
+minutes for VMware's network inventory to respond. Complete any administrator
+or first-run prompts while it waits. Dry runs, status, and cleanup do not launch
+Workstation.
 
 You can start setup from the built-in Windows PowerShell 5.1. The installer
 finds PowerShell 7.4+ on PATH or in its standard installation locations and
@@ -399,8 +406,12 @@ authentication. The dedicated NIC is not a firewall: other addresses on its loca
 subnet remain reachable, and guests with sudo can change routing.
 
 CyberAgentFlow is installed in `/opt/cyber-agent-flow` using its prerequisites
-script while the temporary Internet connection is available. It is not started
-automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
+script while the temporary Internet connection is available. Docker is enabled
+at boot, and `participant` is added to the `docker` group. The native Claude CLI
+is installed under `/home/participant/.local/bin` and is available to the web
+launcher. Provisioning verifies Docker daemon access, both Compose commands,
+and Claude CLI as `participant`, including when retrying setup. CyberAgentFlow
+itself is not started automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are

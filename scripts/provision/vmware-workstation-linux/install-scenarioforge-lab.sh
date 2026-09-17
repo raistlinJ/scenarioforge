@@ -383,13 +383,42 @@ require_linux_workstation() {
     command -v vmware-vdiskmanager >/dev/null 2>&1 || die "required VMware command not found: vmware-vdiskmanager"
     ensure_linux_host_dependencies
     ensure_vmware_kernel_modules
+    ensure_workstation_started
+}
+
+workstation_gui_is_running() { pgrep -u "$UID" -x vmware >/dev/null 2>&1; }
+
+ensure_workstation_started() {
+    local deadline launch_log
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "Dry run: VMware Workstation startup is skipped"
+        return
+    fi
+    if ! workstation_gui_is_running; then
+        command -v vmware >/dev/null 2>&1 || die "required VMware command not found: vmware"
+        [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] \
+            || die "Open VMware Workstation in your desktop session before rerunning the installer, or run the installer from a desktop terminal"
+        launch_log="$(mktemp "${TMPDIR:-/tmp}/scenarioforge-workstation-start.XXXXXX")"
+        log "Opening VMware Workstation; complete any administrator/setup prompts. Startup log: $launch_log"
+        nohup vmware >"$launch_log" 2>&1 </dev/null &
+    fi
+    log "Waiting up to 120 seconds for VMware Workstation to initialize"
+    deadline=$((SECONDS + 120))
+    while (( SECONDS < deadline )); do
+        if workstation_gui_is_running && timeout 5 vmrun -T "$VMRUN_TYPE" list >/dev/null 2>&1; then
+            log "VMware Workstation is ready"
+            return
+        fi
+        sleep 2
+    done
+    die "VMware Workstation did not initialize within 120 seconds. Complete its setup prompts, check VMware services and kernel modules, then rerun this command${launch_log:+. Startup log: $launch_log}"
 }
 
 host_command_available() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_linux_host_dependencies() {
     local tool_name manager="" package_name existing_package duplicate
-    local -a required_tools=(qemu-img curl openssl python3 timeout sha256sum sha512sum tar xz gzip awk sed grep modinfo modprobe)
+    local -a required_tools=(qemu-img curl openssl python3 timeout nohup pgrep sha256sum sha512sum tar xz gzip awk sed grep modinfo modprobe)
     local -a missing_tools=() packages=(ca-certificates)
     [[ ! -d /sys/firmware/efi ]] || required_tools+=(mokutil)
     if [[ "$INSTALL_FLAG_GENERATORS" == 1 || "$INSTALL_VULNHUB" == 1 ]]; then
@@ -414,7 +443,8 @@ ensure_linux_host_dependencies() {
             qemu-img) if [[ "$manager" == apt-get ]]; then package_name=qemu-utils; else package_name=qemu-img; fi ;;
             xz) if [[ "$manager" == apt-get ]]; then package_name=xz-utils; else package_name=xz; fi ;;
             ssh|ssh-keygen|scp) if [[ "$manager" == apt-get ]]; then package_name=openssh-client; else package_name=openssh-clients; fi ;;
-            timeout|sha256sum|sha512sum) package_name=coreutils ;;
+            timeout|nohup|sha256sum|sha512sum) package_name=coreutils ;;
+            pgrep) if [[ "$manager" == apt-get ]]; then package_name=procps; else package_name=procps-ng; fi ;;
             awk) package_name=gawk ;;
             modinfo|modprobe) package_name=kmod ;;
             *) package_name="$tool_name" ;;

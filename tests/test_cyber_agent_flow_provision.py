@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -85,6 +86,9 @@ def test_injected_install_precedes_readiness(config, tmp_path):
     assert generated.index('install_prerequisites.sh') < generated.index('ip -4 route get') < generated.index('touch /var/lib/scenarioforge/participant-ready')
     assert 'cyber-agent-flow.git' in generated
     assert 'MCP_API_KEY' in generated
+    assert generated.index('bash /usr/local/sbin/scenarioforge-caf-runtime') < generated.index('if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-installed')
+    assert 'SUDO_USER=participant bash /opt/cyber-agent-flow/install_prerequisites.sh' in generated
+    assert 'sudo -H -u participant bash /opt/cyber-agent-flow/install_claude.sh --check' in generated
     path = tmp_path / 'bootstrap.sh'
     path.write_text(generated)
     subprocess.run(['bash', '-n', str(path)], check=True)
@@ -204,3 +208,71 @@ def test_launcher_child_resolves_python_from_virtual_environment(config, tmp_pat
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == 'venv-child'
+
+
+def test_launcher_resolves_participant_claude(config, tmp_path):
+    generated = caf.inject('touch /var/lib/scenarioforge/participant-ready\n', config)
+    launcher = generated.split("<<'CAF_LAUNCH'\n", 1)[1].split('\nCAF_LAUNCH', 1)[0]
+    bindir = tmp_path / '.local/bin'
+    bindir.mkdir(parents=True)
+    cli = bindir / 'claude'
+    cli.write_text('#!/bin/bash\necho participant-claude\n')
+    cli.chmod(0o755)
+    (tmp_path / 'start_ws.sh').write_text('#!/bin/bash\nclaude --version\n')
+    path = tmp_path / 'launcher'
+    path.write_text(launcher.replace('/opt/cyber-agent-flow', str(tmp_path)))
+    result = subprocess.run(['bash', str(path)], env={**os.environ, 'HOME': str(tmp_path)},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'participant-claude'
+
+
+@pytest.mark.parametrize('failure', ['', 'apt-get', 'systemctl', 'docker info', 'docker compose version', 'docker-compose version', 'curl', 'claude'])
+def test_runtime_setup_checks_tools_as_participant_and_fails_closed(tmp_path, failure):
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    home = tmp_path / 'participant'
+    home.mkdir()
+    log = tmp_path / 'commands.jsonl'
+    stub = bindir / 'stub'
+    stub.write_text(f'#!{sys.executable}\n' + '''import json, os, pathlib, sys
+name = pathlib.Path(sys.argv[0]).name
+args = sys.argv[1:]
+with open(os.environ['COMMAND_LOG'], 'a') as stream:
+    stream.write(json.dumps([name, args, os.environ.get('TEST_USER', 'root')]) + '\\n')
+failure = os.environ['TEST_FAILURE']
+if failure and (name == failure or ' '.join([name, *args]) == failure):
+    sys.exit(42)
+if name == 'sudo':
+    assert args[:3] == ['-H', '-u', 'participant']
+    os.execvpe(args[3], args[3:], dict(os.environ, HOME=os.environ['PARTICIPANT_HOME'], TEST_USER='participant'))
+elif name == 'curl':
+    assert os.environ['TEST_USER'] == 'participant'
+    output = pathlib.Path(args[args.index('--output') + 1])
+    output.write_text('mkdir -p "$HOME/.local/bin"\\ncp "$TEST_CLAUDE" "$HOME/.local/bin/claude"\\n')
+''')
+    stub.chmod(0o755)
+    for command in ('apt-get', 'systemctl', 'usermod', 'sudo', 'docker', 'docker-compose', 'curl', 'claude'):
+        (bindir / command).symlink_to(stub)
+    env = {**os.environ, 'PATH': str(bindir) + ':' + os.environ['PATH'],
+           'COMMAND_LOG': str(log), 'PARTICIPANT_HOME': str(home),
+           'TEST_CLAUDE': str(bindir / 'claude'), 'TEST_FAILURE': failure}
+    script = COMMON.with_name('cyber-agent-flow-runtime.sh')
+    result = subprocess.run(['bash', str(script)], env=env, capture_output=True, text=True)
+    assert (result.returncode != 0) == bool(failure), result.stderr
+    if failure:
+        return
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert ['apt-get', ['install', '-y', 'docker.io', 'docker-compose', 'curl', 'ca-certificates'], 'root'] in commands
+    assert ['systemctl', ['enable', '--now', 'docker.service'], 'root'] in commands
+    assert ['usermod', ['-aG', 'docker', 'participant'], 'root'] in commands
+    for command, args in [('docker', ['info']), ('docker', ['compose', 'version']),
+                          ('docker-compose', ['version']), ('claude', ['--version'])]:
+        assert [command, args, 'participant'] in commands
+    # Re-running verifies the installed CLI without downloading it again.
+    log.write_text('')
+    result = subprocess.run(['bash', str(script)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any(command[0] == 'curl' for command in commands)
+    assert ['claude', ['--version'], 'participant'] in commands

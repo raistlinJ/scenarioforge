@@ -5,6 +5,7 @@ import re
 import shlex
 import subprocess
 
+import pytest
 import yaml
 
 
@@ -25,6 +26,46 @@ def run_bash(script: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+@pytest.mark.parametrize('outcome', ['ready', 'starts', 'timeout', 'runtime_failure', 'headless', 'dry_run'])
+def test_workstation_startup(tmp_path, outcome):
+    launched = tmp_path / 'launched'
+    result = run_bash(f'''
+source {shlex.quote(str(INSTALLER))}
+outcome={shlex.quote(outcome)}
+TMPDIR={shlex.quote(str(tmp_path))}
+DISPLAY=:0
+WAYLAND_DISPLAY=
+DRY_RUN=0
+[[ "$outcome" != dry_run ]] || DRY_RUN=1
+[[ "$outcome" != headless ]] || DISPLAY=
+waits=0
+workstation_gui_is_running() {{
+    [[ "$outcome" == ready || ( "$outcome" != timeout && -f {shlex.quote(str(launched))} && "$waits" -ge 2 ) ]]
+}}
+vmware() {{ :; }}
+nohup() {{
+    [[ "$1" == vmware ]] || exit 91
+    touch {shlex.quote(str(launched))}
+}}
+timeout() {{ [[ "$1" == 5 ]] || exit 92; shift; "$@"; }}
+vmrun() {{
+    [[ "$*" == '-T ws list' ]] || exit 93
+    [[ "$outcome" != runtime_failure ]]
+}}
+sleep() {{ wait; waits=$((waits + 1)); SECONDS=$((SECONDS + 30)); }}
+ensure_workstation_started
+echo CONTINUED
+''')
+    ready = outcome in ('ready', 'starts', 'dry_run')
+    assert (result.returncode == 0) == ready, result.stderr
+    assert ('CONTINUED' in result.stdout) == ready
+    assert launched.exists() == (outcome in ('starts', 'timeout', 'runtime_failure'))
+    if outcome in ('timeout', 'runtime_failure'):
+        assert 'did not initialize within 120 seconds' in result.stderr
+    if outcome == 'headless':
+        assert 'desktop session' in result.stderr
 
 
 def test_installer_has_valid_bash_syntax() -> None:

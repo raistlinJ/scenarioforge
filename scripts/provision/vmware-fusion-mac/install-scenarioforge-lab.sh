@@ -259,24 +259,41 @@ require_linux_workstation() {
         || die "VMware Fusion is installed but vmrun could not inspect its networks; open Fusion once and complete first-run setup"
 }
 
-require_fusion_services_initialized() {
-    # Fusion's full service startup launches vmnet-bridge before vmnet-cli.
-    # Calling the latter alone can leave DHCP/NAT unable to initialize. This
-    # preflight is read-only, including during dry runs: let Fusion perform its
-    # own privileged setup instead of partially reproducing services.sh.
+fusion_bridge_service_is_initialized() {
     local processes
     processes="$(ps -axo uid=,comm=)" \
         || die "could not inspect Fusion services; no network changes were made"
-    if ! awk -v app="$FUSION_APP/Contents/Library/vmnet-bridge" '
+    awk -v app="$FUSION_APP/Contents/Library/vmnet-bridge" '
         $1 == 0 {
             sub(/^[[:space:]]*0[[:space:]]+/, "")
             if ($0 == app || $0 == "/Library/Application Support/VMware/VMware Fusion/Services/Contents/Library/vmnet-bridge") found=1
         }
         END {exit !found}
-    ' <<<"$processes"; then
-        die "Fusion bridge service is not initialized. Open VMware Fusion, complete any administrator/setup prompts, then rerun this command. No network changes were made; vmnet-cli --start alone does not perform Fusion's full service initialization."
+    ' <<<"$processes"
+}
+
+require_fusion_services_initialized() {
+    # Let Fusion perform its full privileged startup, including vmnet-bridge.
+    # vmnet-cli --start alone does not initialize all of these services.
+    local attempt
+    if fusion_bridge_service_is_initialized; then
+        log "Fusion bridge service is initialized"
+        return
     fi
-    log "Fusion bridge service is initialized"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        die "Fusion bridge service is not initialized. Open VMware Fusion and complete any administrator/setup prompts before retrying the dry run. No network changes were made; dry runs do not launch Fusion."
+    fi
+    log "Opening VMware Fusion to initialize its services. Complete any administrator/setup prompts in Fusion; waiting up to 120 seconds."
+    open -a "$FUSION_APP" \
+        || die "Could not open VMware Fusion at $FUSION_APP. Open it manually, complete setup, then rerun this command."
+    for ((attempt = 1; attempt <= 60; attempt++)); do
+        sleep 2
+        if fusion_bridge_service_is_initialized; then
+            log "Fusion bridge service is initialized"
+            return
+        fi
+    done
+    die "Fusion bridge service did not initialize within 120 seconds after opening VMware Fusion. Complete any administrator/setup prompts in Fusion, then rerun this command. The installer has not changed network configuration."
 }
 
 create_seed_iso() {

@@ -25,7 +25,7 @@ INSTALL_FLAG_GENERATORS=1
 installed=0
 host_command_available() {{
     case "$1" in
-        qemu-img|xz|git|ssh|ssh-keygen|scp|modinfo|modprobe|timeout|sha256sum|sha512sum|gzip|xorriso|genisoimage) [[ "$installed" == 1 ]] ;;
+        qemu-img|xz|git|ssh|ssh-keygen|scp|modinfo|modprobe|timeout|nohup|pgrep|sha256sum|sha512sum|gzip|xorriso|genisoimage) [[ "$installed" == 1 ]] ;;
         apt-get|dnf|yum) [[ "$1" == {shlex.quote(manager)} ]] ;;
         *) return 0 ;;
     esac
@@ -41,7 +41,8 @@ printf 'DONE\\n'
     calls = [line for line in result.stdout.splitlines() if line.startswith('CALL')]
     assert len(calls) == (2 if manager == 'apt-get' else 1)
     install = calls[-1]
-    for package in [qemu, xz, ssh, 'coreutils', 'gzip', 'xorriso', 'git', 'ca-certificates', 'kmod']:
+    procps = 'procps' if manager == 'apt-get' else 'procps-ng'
+    for package in [qemu, xz, ssh, 'coreutils', procps, 'gzip', 'xorriso', 'git', 'ca-certificates', 'kmod']:
         assert install.count(f'<{package}>') == 1
     assert 'DONE' in result.stdout
 
