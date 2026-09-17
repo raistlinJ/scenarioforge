@@ -428,18 +428,27 @@ lab. When disabled, the original two-interface participant layout is unchanged.
 
 Use `-Reinstall core`, `-Reinstall app`, `-Reinstall participant`, or `-Reinstall all` to rebuild selected guests with the current provisioning scripts:
 
+Run on the Windows host from the repository root, using the same account as
+for the original installation. These commands work in PowerShell or Command
+Prompt; the `.cmd` launcher handles the PowerShell version check:
+
 ```powershell
-.\install-scenarioforge-lab.ps1 install -Reinstall participant -DryRun
-.\install-scenarioforge-lab.ps1 install -Reinstall participant
+.\scripts\provision\vmware-workstation-windows\install-scenarioforge-lab.cmd install -Reinstall participant -DryRun
+.\scripts\provision\vmware-workstation-windows\install-scenarioforge-lab.cmd install -Reinstall participant
 ```
+
+Replace `participant` with `core` or `app` to rebuild either VM alone, or `all`
+to rebuild all three. In PowerShell 7.4+, you can also invoke the `.ps1` file
+with the same arguments. Do not run `cleanup` first: reinstall uses the existing
+VMs, saved state, and credentials to identify and recreate the selected guests.
 
 **This erases the selected VMs' disks and guest data.** It retains saved login
 credentials and lab network settings. Other VMs and host networks are not
 recreated. The command asks you to type `REINSTALL`; `-Yes` accepts that
 replacement without prompting. Stop any active exercises first.
 
-Base images are already cached, and cleanup preserves that cache. Reinstall
-verifies the required images **before replacing any VM**. If an image is missing,
+Normal installation caches base images, and cleanup preserves that cache.
+Reinstall verifies the required images **before replacing any VM**. If an image is missing,
 it shows the download source and asks `Download and verify this image before
 reinstalling? [y/N]`. Answer `y` to download it; declining or having no input
 stops with the existing VMs intact. `-Yes` does not bypass this separate download
@@ -459,7 +468,12 @@ guests even when the original installation used the no-wait option. On failure,
 check the guest console and bootstrap log; a participant that fails setup keeps
 its temporary NAT adapter for diagnosis.
 
-Use the same state directory as the original installation. For older Unix labs
-whose state predates saved image-cache/source settings, also pass the original
-configuration file or environment overrides so the installer finds the same
-cache and source refs. Reinstall does not convert the saved participant OS.
+Use the same state directory as the original installation. The default is
+`%LOCALAPPDATA%\ScenarioForge\workstation-lab`. If you originally used a custom
+location, append `-StateDir "C:\path\to\lab-state"` to the reinstall command.
+Reinstall reads the saved configuration; `-ConfigFile` and `-ParticipantOS` do
+not override it. It does not convert Debian to Kali or change pinned source refs
+to the latest branch.
+
+See the [cross-platform command reference](../../../README.md#reinstall-one-vm-or-the-whole-lab)
+for equivalent commands on other hosts.

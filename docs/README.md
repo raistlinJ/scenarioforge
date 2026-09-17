@@ -3,7 +3,10 @@
 Use this page to navigate the main project documentation.
 
 ## Getting started
+
 - [Quick Start](QUICK_START.md)
+- [Automated VM installers](../README.md#vm-mode-setup-recommended) – provision a lab on Proxmox, VMware Workstation (Linux/Windows), or VMware Fusion (macOS).
+- [Reinstall one VM or the whole lab](../README.md#reinstall-one-vm-or-the-whole-lab) – rebuild selected guests with cached images; missing images require download consent.
 - [CORE Install](CORE_INSTALL.md) – install our CORE fork (<https://github.com/raistlinJ/core>), most easily via the [coreemu-minimal](https://github.com/raistlinJ/coreemu-minimal) installer, or the updates to apply to a vanilla CORE install.
 - [Operating Modes](OPERATING_MODES.md)
 - [VM Mode Setup](VM_MODE_SETUP.md) – building the CORE VM, its interface layout, wiring host + CORE VM + Kali on any hypervisor, and the VM-mode `.scenarioforge.env` reference.

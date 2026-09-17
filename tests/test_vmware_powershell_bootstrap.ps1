@@ -25,9 +25,11 @@ try {
     # false switches, relative config paths, and the child's exit status survive.
     $probe = Join-Path $temp "argument ' probe.ps1"
     @'
-param([string]$ConfigFile, [string]$StateDir, [switch]$Yes, [switch]$Watch)
+param([string]$ConfigFile, [string]$StateDir, [switch]$Yes, [switch]$Watch,
+    [string]$Command, [ValidateSet('core', 'app', 'participant', 'all')][string]$Reinstall, [switch]$DryRun)
 if ($Yes -or -not $Watch) { exit 21 }
 if (-not (Test-Path -LiteralPath $ConfigFile)) { exit 22 }
+if ($Command -ne 'install' -or $Reinstall -ne 'participant' -or -not $DryRun) { exit 24 }
 [IO.File]::WriteAllText($StateDir, (Get-Content -LiteralPath $ConfigFile -Raw))
 exit 23
 '@ | Set-Content -LiteralPath $probe
@@ -39,6 +41,8 @@ exit 23
     try {
         $encoded = New-InstallerEncodedCommand $probe @{
             ConfigFile = '.\lab.json'; StateDir = $output
+            Command = 'install'; Reinstall = 'participant'
+            DryRun = [Management.Automation.SwitchParameter]::new($true)
             Yes = [Management.Automation.SwitchParameter]::new($false)
             Watch = [Management.Automation.SwitchParameter]::new($true)
         }

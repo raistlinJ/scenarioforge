@@ -669,18 +669,29 @@ lab. When disabled, the original two-interface participant layout is unchanged.
 
 Use `--reinstall core`, `--reinstall app`, `--reinstall participant`, or `--reinstall all` to rebuild selected guests with the current provisioning scripts:
 
+Run on the provision host from the repository root, using the same account as
+for the original installation (root/sudo on Proxmox):
+
 ```bash
-sudo ./install-scenarioforge-lab.sh --reinstall participant --dry-run
-sudo ./install-scenarioforge-lab.sh --reinstall participant
+# Preview, then rebuild only the participant VM.
+sudo bash scripts/provision/proxmox/install-scenarioforge-lab.sh --reinstall participant --dry-run
+sudo bash scripts/provision/proxmox/install-scenarioforge-lab.sh --reinstall participant
+
+# Rebuild all three VMs.
+sudo bash scripts/provision/proxmox/install-scenarioforge-lab.sh --reinstall all
 ```
+
+Replace `participant` with `core` or `app` to rebuild either of those VMs alone.
+Do not run `cleanup` first: reinstall uses the existing VMs, saved state, and
+credentials to identify and recreate the selected guests.
 
 **This erases the selected VMs' disks and guest data.** It retains saved login
 credentials and lab network settings. Other VMs and host networks are not
 recreated. The command asks you to type `REINSTALL`; `--yes` accepts that
 replacement without prompting. Stop any active exercises first.
 
-Base images are already cached, and cleanup preserves that cache. Reinstall
-verifies the required images **before replacing any VM**. If an image is missing,
+Normal installation caches base images, and cleanup preserves that cache.
+Reinstall verifies the required images **before replacing any VM**. If an image is missing,
 it shows the download source and asks `Download and verify this image before
 reinstalling? [y/N]`. Answer `y` to download it; declining or having no input
 stops with the existing VMs intact. `--yes` does not bypass this separate download
@@ -700,7 +711,16 @@ guests even when the original installation used the no-wait option. On failure,
 check the guest console and bootstrap log; a participant that fails setup keeps
 its temporary NAT adapter for diagnosis.
 
-Use the same state directory as the original installation. For older Unix labs
-whose state predates saved image-cache/source settings, also pass the original
-configuration file or environment overrides so the installer finds the same
-cache and source refs. Reinstall does not convert the saved participant OS.
+Use the same state directory as the original installation. Its default is
+`/etc/scenarioforge-lab`; if you originally set `SCENARIOFORGE_LAB_STATE_DIR`, set it to
+the same directory for reinstall. On Proxmox, ensure the variable is passed to
+the root process when using sudo.
+
+For older labs whose state predates saved image-cache/source settings, also
+pass `--config /path/to/original.conf` or the original environment overrides so
+the installer finds the same cache and source refs. Reinstall uses the saved
+participant OS; it does not convert Debian to Kali or change pinned source refs
+to the latest branch.
+
+See the [cross-platform command reference](../../../README.md#reinstall-one-vm-or-the-whole-lab)
+for equivalent commands on other hosts.

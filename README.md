@@ -146,6 +146,35 @@ For resource overrides, image settings, download timeouts, and network setup,
 see the platform guides above. In an older Windows config, remove an explicit
 `"participant_disk_gb": 20` setting or change it to 40 when selecting Kali.
 
+### Reinstall One VM or the Whole Lab
+
+All four installers can rebuild selected VMs using cached base images and the
+current provisioning scripts. From the repository root, preview a participant
+rebuild with the command for your host:
+
+| Platform | Preview participant reinstall |
+| --- | --- |
+| Proxmox (root shell on the node) | `bash scripts/provision/proxmox/install-scenarioforge-lab.sh --reinstall participant --dry-run` |
+| Linux / VMware Workstation | `bash scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh --reinstall participant --dry-run` |
+| macOS / VMware Fusion | `bash scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh --reinstall participant --dry-run` |
+| Windows / PowerShell or Command Prompt | `.\scripts\provision\vmware-workstation-windows\install-scenarioforge-lab.cmd install -Reinstall participant -DryRun` |
+
+Remove `--dry-run` (Windows: `-DryRun`) to perform the rebuild. Replace
+`participant` with `core`, `app`, or `all` to choose other guests. Use the same
+state directory as the original installation; see your platform guide for
+configuration and state-directory options.
+
+**Reinstall erases the selected VMs' disks and guest data.** Saved credentials
+and lab network settings are retained. The installer asks for confirmation
+before replacing VMs. It verifies cached images first; if an image is missing,
+it asks before downloading it. Declining leaves existing VMs intact. `--yes`
+(Windows: `-Yes`) does not bypass the download prompt, and dry runs never
+download missing images.
+
+Software and packages still download during provisioning using the saved
+source branches/refs. Participant rebuilds restore temporary NAT for setup and
+remove it once the guest is ready.
+
 ### Cleanup and Host Networks
 
 Use the platform installer's `cleanup --force` command
