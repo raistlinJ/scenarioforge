@@ -30,3 +30,4 @@ if __name__ == '__main__':
     lease = dict(line.split('=', 1) for line in Path(f'/run/systemd/netif/leases/{index}').read_text().splitlines()
                  if '=' in line and not line.startswith('#'))
     subprocess.run(route_arguments(config, lease), check=True)
+    subprocess.run(['/usr/local/sbin/update-llm-destination', '--sync-policy', config['provider']], check=True)

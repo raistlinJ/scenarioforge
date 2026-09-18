@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Interactive participant utility: update the endpoint and persistent host route."""
 import ipaddress
+import argparse
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,36 @@ def write_atomic(path, content):
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def sync_gateway_policy(cli_path, destination):
+    """Keep the actual LLM next-hop excluded without replacing user policy."""
+    destination = str(ipaddress.IPv4Address(destination))
+    routes = json.loads(subprocess.check_output(
+        ['ip', '-j', '-4', 'route', 'get', destination], text=True))
+    if len(routes) != 1 or routes[0].get('dev') != 'ens20':
+        raise ValueError('Destination is not routed through ens20')
+    gateway = routes[0].get('gateway', '')
+    if gateway:
+        gateway = str(ipaddress.IPv4Address(gateway))
+    cli = json.loads(cli_path.read_text())
+    before = json.dumps(cli, sort_keys=True)
+    policy = cli.setdefault('network_policy', {'allow': ['*'], 'disallow': []})
+    denied = policy.setdefault('disallow', [])
+    previous = cli.get('llm_route_gateway', '')
+    # Only remove an old entry if this utility originally added it.
+    managed = bool(cli.get('llm_route_gateway_managed'))
+    if previous != gateway:
+        if managed and previous in denied:
+            denied.remove(previous)
+        managed = False
+    if gateway and gateway not in denied:
+        denied.append(gateway)
+        managed = True
+    cli['llm_route_gateway'] = gateway
+    cli['llm_route_gateway_managed'] = managed
+    if json.dumps(cli, sort_keys=True) != before:
+        write_atomic(cli_path, (json.dumps(cli, indent=2) + '\n').encode())
 
 
 def main():
@@ -104,6 +135,7 @@ def main():
         result = subprocess.check_output(['ip', '-4', 'route', 'get', address], text=True)
         if 'dev ens20' not in result:
             raise ValueError('Destination is not routed through ens20')
+        sync_gateway_policy(cli_path, address)
     except Exception:
         for path, content in backups.items():
             write_atomic(path, content)
@@ -113,11 +145,17 @@ def main():
         raise
     if old != address:
         subprocess.run(['ip', '-4', 'route', 'del', old + '/32', 'dev', 'ens20'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print('Updated configuration and persistent route. Restart CyberAgentFlow and update any browser-saved endpoint settings.')
+    print('Updated configuration, persistent route, and gateway deny entry. Reload CyberAgentFlow and update any browser-saved endpoint settings before starting a new session.')
 
 
 if __name__ == '__main__':
     try:
-        main()
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('--sync-policy', metavar='DESTINATION')
+        args = parser.parse_args()
+        if args.sync_policy:
+            sync_gateway_policy(Path('/opt/cyber-agent-flow/configs/cli.json'), args.sync_policy)
+        else:
+            main()
     except Exception as error:
         raise SystemExit(f'LLM update failed: {error}')

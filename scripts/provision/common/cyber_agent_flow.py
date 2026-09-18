@@ -165,6 +165,10 @@ fi
     || fail_bootstrap 'CyberAgentFlow requires MCP v1; install mcp>=1.28,<2 in its virtual environment'
 /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
     || fail_bootstrap 'CyberAgentFlow dependency verification failed; inspect the Python error above'
+cat > /usr/local/sbin/update-llm-destination <<'CAF_UPDATE_SCRIPT'
+{Path(__file__).with_name('update-llm-destination.py').read_text()}
+CAF_UPDATE_SCRIPT
+chmod 0755 /usr/local/sbin/update-llm-destination
 {automatic_setup}
 provider_host={q(urlsplit(c['llm_provider_url']).hostname or '')}
 if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then
@@ -172,6 +176,7 @@ if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then
         || fail_bootstrap 'LLM provider URL hostname does not resolve to llm_provider_address'
 fi
 ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev ens20( |$)' || fail_bootstrap 'LLM provider traffic is not routed through ens20'
+/usr/local/sbin/update-llm-destination --sync-policy {q(c['llm_provider_address'])} || fail_bootstrap 'Could not exclude the LLM route gateway from CyberAgentFlow targets'
 cat > /usr/local/bin/cyber-agent-flow <<'CAF_LAUNCH'
 #!/bin/bash
 set -e
@@ -203,15 +208,11 @@ CAF_DESKTOP
 chown participant:participant /home/participant/Desktop/cyber-agent-flow.desktop
 chmod 0755 /home/participant/Desktop/cyber-agent-flow.desktop
 install -m 0644 /home/participant/Desktop/cyber-agent-flow.desktop /usr/share/applications/cyber-agent-flow.desktop
-cat > /usr/local/sbin/update-llm-destination <<'CAF_UPDATE_SCRIPT'
-{Path(__file__).with_name('update-llm-destination.py').read_text()}
-CAF_UPDATE_SCRIPT
-chmod 0755 /usr/local/sbin/update-llm-destination
 cat > /home/participant/Desktop/update-llm-destination.desktop <<'CAF_UPDATE_DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=Update LLM Destination
-Comment=Update CyberAgentFlow endpoint and dedicated route
+Comment=Update CyberAgentFlow endpoint, dedicated route, and gateway exclusion
 Exec=sudo /usr/local/sbin/update-llm-destination
 Icon=network-wired
 Terminal=true
