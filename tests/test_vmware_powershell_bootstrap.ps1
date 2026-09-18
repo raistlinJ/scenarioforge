@@ -26,10 +26,12 @@ try {
     $probe = Join-Path $temp "argument ' probe.ps1"
     @'
 param([string]$ConfigFile, [string]$StateDir, [switch]$Yes, [switch]$Watch,
-    [string]$Command, [ValidateSet('core', 'app', 'participant', 'all')][string]$Reinstall, [switch]$DryRun)
+    [string]$Command, [ValidateSet('core', 'app', 'participant', 'all')][string]$Reinstall, [switch]$DryRun,
+    [int]$CoreDiskGB, [int]$AppDiskGB, [int]$ParticipantDiskGB)
 if ($Yes -or -not $Watch) { exit 21 }
 if (-not (Test-Path -LiteralPath $ConfigFile)) { exit 22 }
 if ($Command -ne 'install' -or $Reinstall -ne 'participant' -or -not $DryRun) { exit 24 }
+if ($CoreDiskGB -ne 90 -or $AppDiskGB -ne 100 -or $ParticipantDiskGB -ne 120) { exit 25 }
 [IO.File]::WriteAllText($StateDir, (Get-Content -LiteralPath $ConfigFile -Raw))
 exit 23
 '@ | Set-Content -LiteralPath $probe
@@ -42,6 +44,7 @@ exit 23
         $encoded = New-InstallerEncodedCommand $probe @{
             ConfigFile = '.\lab.json'; StateDir = $output
             Command = 'install'; Reinstall = 'participant'
+            CoreDiskGB = 90; AppDiskGB = 100; ParticipantDiskGB = 120
             DryRun = [Management.Automation.SwitchParameter]::new($true)
             Yes = [Management.Automation.SwitchParameter]::new($false)
             Watch = [Management.Automation.SwitchParameter]::new($true)

@@ -21,6 +21,11 @@ core_vmid=9401
 app_vmid=9402
 participant_vmid=9403
 
+# --- VM disk sizes in GB (new installations) ---
+core_disk_gb=80
+app_disk_gb=80
+participant_disk_gb=80
+
 # --- Participant operating system ---
 # debian (minimal XFCE) or kali (XFCE and standard Kali tools)
 participant_os=debian

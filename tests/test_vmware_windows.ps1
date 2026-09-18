@@ -134,6 +134,13 @@ try {
     @{ participant_os = 'kali'; participant_memory_mb = 3072; participant_disk_gb = 60 } | ConvertTo-Json | Set-Content $configFile
     $kali = Read-InstallerConfig $configFile
     Assert ($kali.participant_memory_mb -eq 3072 -and $kali.participant_disk_gb -eq 60) 'Explicit resource overrides preserved'
+    @{ participant_os = 'kali'; core_disk_gb = 90; app_disk_gb = 100; participant_disk_gb = 110 } | ConvertTo-Json | Set-Content $configFile
+    $disks = Read-InstallerConfig $configFile
+    Assert ($disks.core_disk_gb -eq 90 -and $disks.app_disk_gb -eq 100 -and $disks.participant_disk_gb -eq 110) 'JSON disk overrides preserved for Kali'
+    $disks = Read-InstallerConfig $configFile '' 120 130 140
+    Assert ($disks.core_disk_gb -eq 120 -and $disks.app_disk_gb -eq 130 -and $disks.participant_disk_gb -eq 140) 'CLI disk overrides take precedence over JSON'
+    $disks = Read-InstallerConfig ''
+    Assert ($disks.core_disk_gb -eq 80 -and $disks.app_disk_gb -eq 80 -and $disks.participant_disk_gb -eq 80) 'All disk defaults are 80 GB'
     @{ participant_os = 'invalid' } | ConvertTo-Json | Set-Content $configFile
     Assert-Throws { Read-InstallerConfig $configFile } 'participant_os must'
     $oldOS = $env:SF_PARTICIPANT_OS

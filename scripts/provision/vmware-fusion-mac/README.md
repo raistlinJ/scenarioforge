@@ -460,6 +460,24 @@ preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existi
 lab. When disabled, the original two-interface participant layout is unchanged.
 
 
+## Configure VM disk sizes
+
+CORE, APP, and participant disks each default to **80 GB**, for both Debian
+and Kali participants. To override them for a new installation, set these keys
+in your `--config` file:
+
+```ini
+core_disk_gb=80
+app_disk_gb=100
+participant_disk_gb=120
+```
+
+Or pass `--core-disk-gb 80 --app-disk-gb 100 --participant-disk-gb 120` to
+`install`. Precedence is **defaults < config < environment < CLI**; the matching
+environment variables are `SF_CORE_DISK_GB`, `SF_APP_DISK_GB`, and
+`SF_PARTICIPANT_DISK_GB`. Kali requires at least 25 GB. These options do not
+resize existing VMs; reinstall retains the saved/existing disk sizes.
+
 ## Reinstall selected VMs using cached images
 
 Use `--reinstall core`, `--reinstall app`, `--reinstall participant`, or `--reinstall all` to rebuild selected guests with the current provisioning scripts:

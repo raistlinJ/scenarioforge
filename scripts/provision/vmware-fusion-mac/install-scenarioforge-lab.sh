@@ -140,6 +140,9 @@ Provision three graphical VMs with VMware Fusion on Intel or Apple silicon:
   - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
+  --core-disk-gb GB          CORE disk size (default: 80 GB)
+  --app-disk-gb GB           APP disk size (default: 80 GB)
+  --participant-disk-gb GB   PARTICIPANT disk size (default: 80 GB)
   --config FILE               read lower-precedence key=value options from FILE
   --lab-dir PATH              VM directory (default: ~/Virtual Machines.localized/ScenarioForge-Lab)
   --management-vmnet NAME     APP/CORE management network (default: vmnet1)
@@ -191,6 +194,9 @@ EOF
 apply_vmware_config_value() {
     local key="$1" value="$2"
     case "$key" in
+        core_disk_gb) assign_config_setting CORE_DISK_GB SF_CORE_DISK_GB "$value" ;;
+        app_disk_gb) assign_config_setting APP_DISK_GB SF_APP_DISK_GB "$value" ;;
+        participant_disk_gb) assign_config_setting PARTICIPANT_DISK_GB SF_PARTICIPANT_DISK_GB "$value" ;;
         lab_dir) assign_config_setting LAB_DIR SF_FUSION_LAB_DIR "$value" ;;
         management_vmnet) assign_config_setting MANAGEMENT_VMNET SF_FUSION_MANAGEMENT_VMNET "$value" ;;
         hitl_vmnet) assign_config_setting HITL_VMNET SF_FUSION_HITL_VMNET "$value" ;;

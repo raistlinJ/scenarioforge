@@ -166,6 +166,9 @@ Provision three graphical VMs on x86_64 Linux with VMware Workstation:
   - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
+  --core-disk-gb GB          CORE disk size (default: 80 GB)
+  --app-disk-gb GB           APP disk size (default: 80 GB)
+  --participant-disk-gb GB   PARTICIPANT disk size (default: 80 GB)
   --config FILE               read lower-precedence key=value options from FILE
   --lab-dir PATH              VM directory (default: ~/vmware/ScenarioForge-Lab)
   --management-vmnet NAME     APP/CORE management network (default: vmnet1)
@@ -219,6 +222,9 @@ EOF
 apply_vmware_config_value() {
     local key="$1" value="$2"
     case "$key" in
+        core_disk_gb) assign_config_setting CORE_DISK_GB SF_CORE_DISK_GB "$value" ;;
+        app_disk_gb) assign_config_setting APP_DISK_GB SF_APP_DISK_GB "$value" ;;
+        participant_disk_gb) assign_config_setting PARTICIPANT_DISK_GB SF_PARTICIPANT_DISK_GB "$value" ;;
         lab_dir) assign_config_setting LAB_DIR SF_VMWARE_LAB_DIR "$value" ;;
         management_vmnet) assign_config_setting MANAGEMENT_VMNET SF_VMWARE_MANAGEMENT_VMNET "$value" ;;
         hitl_vmnet) assign_config_setting HITL_VMNET SF_VMWARE_HITL_VMNET "$value" ;;
@@ -287,6 +293,9 @@ parse_args() {
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
             --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
             --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
+            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; shift 2 ;;
+            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; shift 2 ;;
+            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; shift 2 ;;
             --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
@@ -323,9 +332,10 @@ parse_args() {
     done
     case "$PARTICIPANT_OS" in
         debian) ;;
-        kali) PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}" ;;
+        kali) ;;
         *) die "--participant-os must be debian or kali" ;;
     esac
+    validate_disk_sizes
     case "$COMMAND" in install|status|cleanup|reinstall) ;; *) die "unknown command: $COMMAND" ;; esac
     validate_reinstall_target
     [[ "${KEEP_HITL_NETWORK:-0}" -eq 0 || "$COMMAND" == cleanup ]] \

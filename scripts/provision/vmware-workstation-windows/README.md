@@ -434,6 +434,21 @@ preserves the pre-existing egress vmnet/bridge. Reinstall to add it to an existi
 lab. When disabled, the original two-interface participant layout is unchanged.
 
 
+## Configure VM disk sizes
+
+CORE, APP, and participant disks each default to **80 GB**, for both Debian
+and Kali participants. Override `core_disk_gb`, `app_disk_gb`, and
+`participant_disk_gb` in the JSON config, or use CLI flags:
+
+```powershell
+.\install-scenarioforge-lab.cmd install -ConfigFile .\lab.json -AppDiskGB 100 -ParticipantDiskGB 120
+```
+
+`-CoreDiskGB` is also available. CLI values override JSON values; omitting both
+uses the 80 GB defaults. Windows requires at least 20 GB per VM and 25 GB for a
+Kali participant. These options apply to new installations. Reinstall uses
+saved configuration and does not resize existing disks.
+
 ## Reinstall selected VMs using cached images
 
 Use `-Reinstall core`, `-Reinstall app`, `-Reinstall participant`, or `-Reinstall all` to rebuild selected guests with the current provisioning scripts:

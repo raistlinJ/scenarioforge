@@ -248,7 +248,7 @@ load_config_from_args() {
             --core-vmid|--app-vmid|--participant-vmid|--lab-dir|--management-vmnet|--hitl-vmnet|\
             --ssh-public-key|--core-password|--app-password|--participant-password|--web-admin-password|\
             --wait-minutes|--interval|--app-management-cidr|--core-management-cidr|--core-hitl-cidr|\
-            --participant-os|--participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
+            --core-disk-gb|--app-disk-gb|--participant-disk-gb|--participant-os|--participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
                 shift 2
                 ;;
             *) shift ;;
@@ -257,9 +257,21 @@ load_config_from_args() {
     [[ -z "$found" ]] || load_installer_config_file "$callback" "$found"
 }
 
+validate_disk_sizes() {
+    validate_integer 'CORE disk size' "$CORE_DISK_GB" 8
+    validate_integer 'APP disk size' "$APP_DISK_GB" 8
+    validate_integer 'participant disk size' "$PARTICIPANT_DISK_GB" 8
+    if [[ "$PARTICIPANT_OS" == kali ]]; then
+        validate_integer 'Kali participant disk size' "$PARTICIPANT_DISK_GB" 25
+    fi
+}
+
 apply_proxmox_config_value() {
     local key="$1" value="$2"
     case "$key" in
+        core_disk_gb) assign_config_setting CORE_DISK_GB SF_CORE_DISK_GB "$value" ;;
+        app_disk_gb) assign_config_setting APP_DISK_GB SF_APP_DISK_GB "$value" ;;
+        participant_disk_gb) assign_config_setting PARTICIPANT_DISK_GB SF_PARTICIPANT_DISK_GB "$value" ;;
         storage) assign_config_setting VM_STORAGE SF_VM_STORAGE "$value" ;;
         snippet_storage) assign_config_setting SNIPPET_STORAGE SF_SNIPPET_STORAGE "$value" ;;
         uplink_bridge) assign_config_setting UPLINK_BRIDGE SF_UPLINK_BRIDGE "$value" ;;
@@ -339,6 +351,9 @@ Provision three cloud-image VMs on the current Proxmox VE node:
   - Debian 12 + a minimal XFCE participant desktop, or Kali Linux + XFCE/tools
 
 Important options:
+  --core-disk-gb GB          CORE disk size (default: 80 GB)
+  --app-disk-gb GB           APP disk size (default: 80 GB)
+  --participant-disk-gb GB   PARTICIPANT disk size (default: 80 GB)
   --config FILE                Read lower-precedence key=value options from FILE
   --storage ID                 VM disk storage (default: local-lvm)
   --snippet-storage ID         Directory storage for Cloud-Init snippets (default: local)
@@ -405,6 +420,9 @@ parse_args() {
             --hitl-bridge) HITL_BRIDGE="${2:?missing value for --hitl-bridge}"; shift 2 ;;
             --core-vmid) CORE_VMID="${2:?missing value for --core-vmid}"; shift 2 ;;
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
+            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; shift 2 ;;
+            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; shift 2 ;;
+            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; shift 2 ;;
             --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
@@ -450,10 +468,10 @@ parse_args() {
         debian) ;;
         kali)
             PARTICIPANT_MEMORY_MB="${SF_PARTICIPANT_MEMORY_MB:-2048}"
-            PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}"
             ;;
         *) die "--participant-os must be debian or kali" ;;
     esac
+    validate_disk_sizes
     validate_integer "status interval" "$STATUS_INTERVAL" 2
 }
 

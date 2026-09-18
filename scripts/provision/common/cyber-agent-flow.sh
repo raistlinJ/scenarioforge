@@ -44,7 +44,7 @@ validate_caf() {
     if [[ "$PARTICIPANT_OS" != kali ]]; then
         log 'CyberAgentFlow enabled; selecting Kali for the participant VM.'
         PARTICIPANT_OS=kali
-        # Debian's default disk is smaller than Kali's minimum. Preserve an
+        # Older configs may request a disk below Kali's minimum. Preserve an
         # explicit Kali-sized choice, but make the automatic selection usable.
         if [[ "${PARTICIPANT_DISK_GB:-0}" =~ ^[0-9]+$ ]] && (( PARTICIPANT_DISK_GB < 25 )); then
             PARTICIPANT_DISK_GB=80

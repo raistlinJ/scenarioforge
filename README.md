@@ -152,6 +152,19 @@ For resource overrides, image settings, download timeouts, and network setup,
 see the platform guides above. In an older Windows config, remove an explicit
 `"participant_disk_gb": 20` setting or change it to 80 to use the new default.
 
+### VM Disk Sizes
+
+All three VMs default to **80 GB each**. For a new installation, override
+`core_disk_gb`, `app_disk_gb`, and `participant_disk_gb` in the platform config.
+CLI flags take precedence:
+
+- Proxmox, Linux, macOS: `--app-disk-gb 100 --participant-disk-gb 120`
+- Windows: `-AppDiskGB 100 -ParticipantDiskGB 120`
+
+The shell installers also accept `SF_CORE_DISK_GB`, `SF_APP_DISK_GB`, and
+`SF_PARTICIPANT_DISK_GB` between config and CLI in precedence. Existing VMs
+are not resized; reinstall retains their saved/existing disk sizes.
+
 ### Reinstall One VM or the Whole Lab
 
 All four installers can rebuild selected VMs using cached base images and the

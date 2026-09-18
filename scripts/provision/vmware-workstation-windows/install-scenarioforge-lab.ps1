@@ -19,6 +19,9 @@ param(
     [string]$PythonExe,
     [string]$QemuImg,
     [ValidateSet('debian', 'kali')][string]$ParticipantOS,
+    [ValidateRange(20, 2147483647)][int]$CoreDiskGB,
+    [ValidateRange(20, 2147483647)][int]$AppDiskGB,
+    [ValidateRange(20, 2147483647)][int]$ParticipantDiskGB,
     [switch]$NoDesktopShortcut,
     [switch]$NoManageHitlNetwork,
     [switch]$KeepHitlNetwork,
@@ -43,7 +46,8 @@ Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -Disa
 . (Join-Path $PSScriptRoot 'host-networks.ps1')
 
 function Read-InstallerConfig {
-    param([string]$Path, [string]$ParticipantOSOverride)
+    param([string]$Path, [string]$ParticipantOSOverride,
+        [int]$CoreDiskGBOverride, [int]$AppDiskGBOverride, [int]$ParticipantDiskGBOverride)
     $provided = @{}
     $config = @{
         lab_dir = $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Virtual Machines/ScenarioForge-Lab' } else { '' })
@@ -72,6 +76,10 @@ function Read-InstallerConfig {
     }
     if ($env:SF_PARTICIPANT_OS) { $config.participant_os = $env:SF_PARTICIPANT_OS }
     if ($ParticipantOSOverride) { $config.participant_os = $ParticipantOSOverride }
+    foreach ($role in @('core', 'app', 'participant')) {
+        $size = Get-Variable -Name "${role}DiskGBOverride" -ValueOnly
+        if ($size -ne 0) { $config["${role}_disk_gb"] = $size }
+    }
     if ($config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
     return $config
 }
@@ -551,6 +559,7 @@ ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
   ./install-scenarioforge-lab.ps1 cleanup [-DryRun] [-Force] [-Yes]
 Use -CyberAgentFlow with Kali and the grouped LLM settings in the example JSON.
 Overrides: -LabDir, -StateDir, -VmwareDir, -PythonExe, -QemuImg, -NoDesktopShortcut
+Disk sizes: -CoreDiskGB, -AppDiskGB, -ParticipantDiskGB (default: 80 each; new installs).
 Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confirmation.
 Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 80 GB disk).
 HITL networking is created automatically when needed; use -NoManageHitlNetwork to require an existing vmnet.
@@ -600,7 +609,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         } while ($true)
         return
     }
-    $config = Read-InstallerConfig $ConfigFile $ParticipantOS
+    $config = Read-InstallerConfig $ConfigFile $ParticipantOS $CoreDiskGB $AppDiskGB $ParticipantDiskGB
     foreach ($pair in @(@('LabDir', 'lab_dir'), @('VmwareDir', 'vmware_dir'), @('PythonExe', 'python_exe'), @('QemuImg', 'qemu_img'))) {
         $value = Get-Variable -Name $pair[0] -ValueOnly
         if ($value) { $config[$pair[1]] = $value }
