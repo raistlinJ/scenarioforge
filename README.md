@@ -190,6 +190,13 @@ it asks before downloading it. Declining leaves existing VMs intact. `--yes`
 (Windows: `-Yes`) does not bypass the download prompt, and dry runs never
 download missing images.
 
+Use `--reinstall app --force` (Windows: `install -Reinstall app -Force`) to
+explicitly authorize fresh downloads of the selected VM's base images, even
+when cached. Checksums remain mandatory. Download or verification failure
+leaves existing VMs intact and preserves the previous cache entry. Add the
+dry-run flag to preview a forced refresh without downloading.
+
+
 Software and packages still download during provisioning using the saved
 source branches/refs. Participant rebuilds restore temporary NAT for setup and
 remove it once the guest is ready.

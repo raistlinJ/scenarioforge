@@ -470,12 +470,14 @@ function Assert-NewLabDestination {
 }
 
 function Invoke-ReinstallBuild {
-    param($Config, [string]$RequestFile, [switch]$CheckCache, [switch]$PromptMissing)
+    param($Config, [string]$RequestFile, [switch]$CheckCache, [switch]$PromptMissing, [switch]$ForceDownload, [switch]$Preview)
     try {
         $Config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $RequestFile -Encoding utf8NoBOM
         $arguments = @((Join-Path $PSScriptRoot 'prepare-images.py'), $RequestFile)
         if ($CheckCache) { $arguments += '--check-cache' }
         if ($PromptMissing) { $arguments += '--prompt-missing-images' }
+        if ($ForceDownload) { $arguments += '--force-download-images' }
+        if ($Preview) { $arguments += '--dry-run' }
         & $Config.python_exe @arguments
         if ($LASTEXITCODE -ne 0) { throw 'Reinstall image preparation failed; existing VMs have not been replaced.' }
     } finally {
@@ -484,7 +486,7 @@ function Invoke-ReinstallBuild {
 }
 
 function Reinstall-LabVMs {
-    param($State, $Credentials, [string]$StateFile, [string]$Target, [switch]$Preview, [switch]$Confirmed)
+    param($State, $Credentials, [string]$StateFile, [string]$Target, [switch]$Preview, [switch]$Confirmed, [switch]$RefreshImages)
     if ($Target -notin @('core', 'app', 'participant', 'all')) { throw 'Invalid reinstall target.' }
     $roles = if ($Target -eq 'all') { @('core', 'app', 'participant') } else { @($Target) }
     foreach ($role in $roles) {
@@ -506,8 +508,8 @@ function Reinstall-LabVMs {
     Protect-LabDirectory $stage
     try {
         $requestFile = Join-Path $stage 'request.json'
-        Invoke-ReinstallBuild $config $requestFile -CheckCache -PromptMissing:(-not $Preview)
-        if ($Preview) { Write-Host 'Reinstall preview complete: cached images verified; no VMs or networks changed.'; return }
+        Invoke-ReinstallBuild $config $requestFile -CheckCache -PromptMissing:(-not $Preview) -ForceDownload:$RefreshImages -Preview:$Preview
+        if ($Preview) { Write-Host 'Reinstall preview complete; no VMs or networks changed.'; return }
         if (-not $Confirmed -and (Read-Host 'Type REINSTALL to erase and recreate the selected VMs') -cne 'REINSTALL') { throw 'Reinstall canceled.' }
         Ensure-WorkstationStarted $State
         $config.lab_dir = $stage
@@ -564,18 +566,20 @@ Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confir
 Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 80 GB disk).
 HITL networking is created automatically when needed; use -NoManageHitlNetwork to require an existing vmnet.
 Cleanup removes owned HITL networks; -Force allows changed settings, -KeepHitlNetwork preserves the network.
+With -Reinstall, -Force downloads fresh base images and verifies them before replacing any VM.
 Image preparation uses Windows Python and qemu-img.exe.
 See the adjacent README for prerequisites and isolated network configuration.
 '@
         return
     }
     if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'Run this installer in PowerShell 7.4+ on x64 Windows.' }
+    if ($Force -and -not $Reinstall -and $Command -ne 'cleanup') { throw '-Force is only valid with cleanup or -Reinstall.' }
     $stateFile = Join-Path $StateDir 'state.json'
     Assert-NoReparsePoint $StateDir
     if ($Reinstall) {
         if ($Command -ne 'install') { throw '-Reinstall is only valid with install.' }
         $state = Read-LabState $stateFile
-        Reinstall-LabVMs $state (Read-LabCredentials $StateDir) $stateFile $Reinstall -Preview:$DryRun -Confirmed:$Yes
+        Reinstall-LabVMs $state (Read-LabCredentials $StateDir) $stateFile $Reinstall -Preview:$DryRun -Confirmed:$Yes -RefreshImages:$Force
         return
     }
     if ($Command -ne 'install') {

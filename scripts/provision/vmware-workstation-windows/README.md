@@ -481,9 +481,24 @@ prompt. Dry runs report missing images without prompting or downloading.
 
 Downloads record a checksum receipt, allowing reinstalls to reuse that verified
 release even when an upstream `latest` URL changes. Older caches without a
-receipt are checked against the upstream checksum list. Existing images that
-fail verification still stop the reinstall; they are not automatically replaced.
+receipt are checked against the upstream checksum list. Without `-Force`, existing images that
+fail verification stop the reinstall; they are not automatically replaced.
 A failed download or checksum check also stops before any VM is replaced.
+
+To force fresh base-image downloads for the selected VMs, use `-Force`:
+
+```powershell
+.\install-scenarioforge-lab.cmd install -Reinstall app -Force
+```
+
+This authorizes the required downloads without the separate download prompt,
+even when an image is already cached. Fresh images must pass upstream checksum
+verification before replacing cache files or any VM. A failed download keeps
+the previous cached file and the existing VMs. `-Force` never bypasses image
+verification, VM ownership checks, or the `REINSTALL` confirmation; use `-Yes`
+for the latter. With `-DryRun`, it only reports the planned image refresh.
+The existing cleanup meaning of `-Force` is unchanged.
+
 
 Guest packages, Git repositories, and optional catalogs still require Internet
 access. Software is fetched from the saved branches/refs (`main` by default for

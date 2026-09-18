@@ -170,7 +170,7 @@ Important options:
   --reinstall ROLE           Recreate core, app, participant, or all; prompt for missing images
   --dry-run                   validate and show the plan without changing files or VMs
   --cleanup                   alias for the cleanup command
-  --force                     remove a running lab and its tracked vmnet even if changed
+  --force                      Refresh images for reinstall; allow forced cleanup
   --keep-hitl-network         cleanup the lab while preserving its host vmnet
 
 Network/address overrides:

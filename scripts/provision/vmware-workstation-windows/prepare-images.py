@@ -89,8 +89,14 @@ def file_hash(path, algorithm='sha256'):
         return hashlib.file_digest(stream, algorithm).hexdigest()
 
 
-def download_verified(url, sums_url, algorithm, cache, *, cached_only=False):
+def download_verified(url, sums_url, algorithm, cache, *, cached_only=False, force_download=False):
     filename = url.rsplit('/', 1)[-1]
+    destination = Path(cache) / filename
+    if force_download:
+        if cached_only:
+            raise BuildError('Cannot force a download in cached-only mode.')
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            raise BuildError(f'Refusing to replace a non-regular cache entry: {destination}')
     if cached_only:
         return image_cache.require_cached(Path(cache) / filename, url, algorithm, sums_url)
     with urllib.request.urlopen(sums_url, timeout=60) as response:
@@ -105,7 +111,7 @@ def download_verified(url, sums_url, algorithm, cache, *, cached_only=False):
         raise BuildError(f'No valid {algorithm} checksum found for {filename}.')
     cache = Path(cache)
     destination = cache / filename
-    if destination.is_file() and file_hash(destination, algorithm) == expected:
+    if not force_download and destination.is_file() and file_hash(destination, algorithm) == expected:
         image_cache.remember(destination, url, algorithm, expected)
         print(f'Using verified cached image {filename}', flush=True)
         return destination
@@ -364,12 +370,20 @@ def selected_roles(config):
     return roles
 
 
-def check_reinstall_cache(config, *, prompt_missing=False):
+def check_reinstall_cache(config, *, prompt_missing=False, force_download=False, preview=False):
     for _, parameters in image_selection(config, selected_roles(config)):
+        if force_download:
+            destination = Path(config['image_cache']) / parameters[0].rsplit('/', 1)[-1]
+            if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+                raise BuildError(f'Refusing to replace a non-regular cache entry: {destination}')
+            print(f'{"Dry run: would force" if preview else "Force refresh:"} download and verify {parameters[0]} -> {destination}', flush=True)
+            if not preview:
+                download_verified(*parameters, Path(config['image_cache']), force_download=True)
+            continue
         try:
             download_verified(*parameters, Path(config['image_cache']), cached_only=True)
         except image_cache.MissingCachedImage:
-            if not prompt_missing:
+            if not prompt_missing or preview:
                 raise
             url = parameters[0]
             destination = Path(config['image_cache']) / url.rsplit('/', 1)[-1]
@@ -445,7 +459,11 @@ def main():
     parser.add_argument('--git')
     parser.add_argument('--check-cache', action='store_true')
     parser.add_argument('--prompt-missing-images', action='store_true')
+    parser.add_argument('--force-download-images', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
+    if (args.force_download_images or args.dry_run) and not args.check_cache:
+        parser.error('--force-download-images and --dry-run require --check-cache')
     if args.check:
         if not args.qemu_img:
             parser.error('--check requires --qemu-img')
@@ -456,8 +474,9 @@ def main():
         parser.error('provide the build request JSON file')
     config = json.loads(args.request.read_text(encoding='utf-8-sig'))
     if args.check_cache:
-        check_reinstall_cache(config, prompt_missing=args.prompt_missing_images)
-        print('Required cached images verified; no VM changes.')
+        check_reinstall_cache(config, prompt_missing=args.prompt_missing_images,
+                              force_download=args.force_download_images, preview=args.dry_run)
+        print('Image preflight complete; no VM changes.')
         return
     check_dependencies(config['qemu_img'], config.get('git_exe') if config['flag_generators'] or config['vulnhub'] else None)
     # The parent PowerShell installer protects this directory with Windows ACLs.

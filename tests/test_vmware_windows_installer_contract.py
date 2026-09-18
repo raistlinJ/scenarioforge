@@ -288,6 +288,52 @@ def test_download_cache_checks_hash_and_never_keeps_partial_files(tmp_path, monk
     assert not list(tmp_path.glob('*.part'))
 
 
+@pytest.mark.parametrize('bad', [False, True])
+def test_force_download_keeps_old_image_and_receipt_on_failure(tmp_path, monkeypatch, bad):
+    payload = b'verified image'
+    url = 'https://images/image.qcow2'
+    destination = tmp_path / 'image.qcow2'
+    # Even an already-current image must be downloaded when force is explicit.
+    destination.write_bytes(payload)
+    expected = builder.hashlib.sha256(payload).hexdigest()
+    builder.image_cache.remember(destination, url, 'sha256', expected)
+    receipt = Path(str(destination) + '.verified.json')
+    original_receipt = receipt.read_bytes()
+    downloads = []
+    def response(source, **kwargs):
+        if source.endswith('SUMS'):
+            return io.BytesIO(f'{expected} *image.qcow2\n'.encode())
+        downloads.append(source)
+        return io.BytesIO(b'corrupt' if bad else payload)
+    monkeypatch.setattr(builder.urllib.request, 'urlopen', response)
+    monkeypatch.setattr(builder.time, 'sleep', lambda _: None)
+    if bad:
+        with pytest.raises(builder.BuildError, match='Checksum verification failed'):
+            builder.download_verified(url, 'https://images/SUMS', 'sha256', tmp_path, force_download=True)
+    else:
+        builder.download_verified(url, 'https://images/SUMS', 'sha256', tmp_path, force_download=True)
+    assert downloads
+    assert destination.read_bytes() == payload
+    assert receipt.read_bytes() == original_receipt
+    assert not list(tmp_path.glob('*.part'))
+
+
+@pytest.mark.parametrize('roles', [['app'], ['core'], ['participant'], ['core', 'app', 'participant']])
+@pytest.mark.parametrize('preview', [False, True])
+def test_forced_reinstall_refreshes_only_required_images(config, monkeypatch, roles, preview):
+    config['reinstall_roles'] = roles
+    config['participant_os'] = 'kali'
+    calls = []
+    def download(*args, **kwargs):
+        assert kwargs == {'force_download': True}
+        calls.append(args[0])
+    monkeypatch.setattr(builder, 'download_verified', download)
+    monkeypatch.setattr('builtins.input', lambda _: pytest.fail('Force already authorizes image downloads'))
+    builder.check_reinstall_cache(config, force_download=True, preview=preview)
+    expected = [parameters[0] for _, parameters in builder.image_selection(config, roles)]
+    assert calls == ([] if preview else expected)
+
+
 def test_optional_catalog_archive_preserves_unix_mode_without_checkout(config, tmp_path, monkeypatch):
     monkeypatch.setenv('GIT_CONFIG_COUNT', '1')
     monkeypatch.setenv('GIT_CONFIG_KEY_0', 'core.autocrlf')

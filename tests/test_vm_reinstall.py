@@ -57,6 +57,76 @@ def test_legacy_cache_only_fetches_checksum_list(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [image]
 
 
+@pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux', 'vmware-fusion-mac'])
+@pytest.mark.parametrize('mode', ['valid', 'corrupt', 'missing', 'checksum_failure', 'download_failure', 'preview', 'preview_missing', 'symlink'])
+def test_force_refresh_preserves_cache_until_verified(tmp_path, platform, mode):
+    image = tmp_path / 'noble-server-cloudimg-amd64.img'
+    events = tmp_path / 'downloads'
+    payload = b'fresh image'
+    expected = hashlib.sha256(payload).hexdigest()
+    url = 'https://example.test/noble-server-cloudimg-amd64.img'
+    if mode not in ('missing', 'preview_missing'):
+        image.write_bytes(payload if mode == 'valid' else b'old image')
+        cache.remember(image, url, 'sha256', hashlib.sha256(image.read_bytes()).hexdigest())
+    if mode == 'symlink':
+        image.rename(tmp_path / 'original')
+        image.symlink_to(tmp_path / 'original')
+    original_receipt = Path(str(image) + '.verified.json')
+    before_receipt = original_receipt.read_bytes() if original_receipt.exists() else None
+    installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'
+    script = f'''
+source {shlex.quote(str(installer))}
+parse_args --reinstall app --force {'--dry-run' if mode.startswith('preview') else ''}
+IMAGE_CACHE={shlex.quote(str(tmp_path))}
+UBUNTU_IMAGE_URL={url}
+UBUNTU_IMAGE_CACHE_NAME=noble-server-cloudimg-amd64.img
+UBUNTU_SUMS_URL=https://example.test/SHA256SUMS
+curl() {{
+    if [[ "$1" == -fsSL ]]; then printf '%s *noble-server-cloudimg-amd64.img\\n' {expected}; return; fi
+    echo download >> {shlex.quote(str(events))}
+    [[ {mode} != download_failure ]] || return 22
+    while [[ "$1" != -o ]]; do shift; done
+    printf '%s' {'corrupt' if mode == 'checksum_failure' else "'fresh image'"} > "$2"
+}}
+sha256sum() {{ python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; }}
+sha512sum() {{ echo WRONG_ALGORITHM; exit 99; }}
+reinstall_cached_images
+'''
+    result = subprocess.run(['bash', '-c', script], input='', capture_output=True, text=True)
+    success = mode in ('valid', 'corrupt', 'missing', 'preview', 'preview_missing')
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    assert events.exists() == (not mode.startswith('preview') and mode != 'symlink')
+    if mode in ('valid', 'corrupt', 'missing'):
+        assert image.read_bytes() == payload
+        assert cache.require_cached(image, url, 'sha256', 'unused') == image
+    else:
+        assert (original_receipt.read_bytes() if original_receipt.exists() else None) == before_receipt
+        if mode != 'preview_missing':
+            assert image.read_bytes() == b'old image'
+    if mode.startswith('preview'):
+        assert 'force download and verify' in result.stdout
+
+
+@pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux', 'vmware-fusion-mac'])
+def test_app_reinstall_accepts_sha256_receipt_from_regular_install(tmp_path, platform):
+    image = tmp_path / 'noble-server-cloudimg-amd64.img'
+    image.write_bytes(b'original verified ubuntu')
+    url = 'https://example.test/noble-server-cloudimg-amd64.img'
+    cache.remember(image, url, 'sha256', hashlib.sha256(image.read_bytes()).hexdigest())
+    installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'
+    result = subprocess.run(['bash', '-c', f'''
+source {shlex.quote(str(installer))}
+parse_args --reinstall app
+IMAGE_CACHE={shlex.quote(str(tmp_path))}
+UBUNTU_IMAGE_URL={url}
+UBUNTU_IMAGE_CACHE_NAME=noble-server-cloudimg-amd64.img
+curl() {{ echo UNEXPECTED_DOWNLOAD >&2; return 99; }}
+reinstall_cached_images
+'''], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'UNEXPECTED_DOWNLOAD' not in result.stderr
+
+
 @pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux'])
 def test_normal_download_dry_run_does_not_create_receipt(tmp_path, platform):
     image = tmp_path / 'base.img'

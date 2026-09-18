@@ -9,6 +9,21 @@ remember_verified_image() {
     python3 "$REINSTALL_COMMON_DIR/image_cache.py" remember "$@"
 }
 
+reinstall_force_download_requested() {
+    [[ -n "$REINSTALL_TARGET" && "$FORCE_CLEANUP" == 1 ]]
+}
+
+prepare_forced_reinstall_download() {
+    local destination="$1" url="$2"
+    [[ ! -L "$destination" && ( ! -e "$destination" || -f "$destination" ) ]] \
+        || die "Refusing to replace a non-regular cache entry: $destination"
+    if [[ "$DRY_RUN" == 1 ]]; then
+        emit DRY-RUN "force download and verify $url -> $destination; existing cache retained until verification succeeds"
+    else
+        log "Force refresh: downloading and verifying $url; existing cache retained until verification succeeds"
+    fi
+}
+
 confirm_reinstall_image_download() {
     local destination="$1" url="$2" response
     [[ "$DRY_RUN" != 1 ]] || die "Dry run: required cached image is missing: $destination. Run without --dry-run to choose whether to download it; no VMs were changed."
@@ -52,7 +67,7 @@ reinstall_cached_images() {
         download_verified_image "$DEBIAN_IMAGE_URL" "$DEBIAN_SUMS_URL" sha512 "$DEBIAN_IMAGE"
     fi
     if reinstall_selects app; then
-        download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha512 "$UBUNTU_IMAGE"
+        download_verified_image "$UBUNTU_IMAGE_URL" "$UBUNTU_SUMS_URL" sha256 "$UBUNTU_IMAGE"
     fi
     PARTICIPANT_IMAGE="$DEBIAN_IMAGE"
     if reinstall_selects participant && [[ "$PARTICIPANT_OS" == kali ]]; then
@@ -174,7 +189,7 @@ PY
     validate_integer 'wait minutes' "$WAIT_MINUTES" 1
     reinstall_cached_images
     if [[ "$DRY_RUN" == 1 ]]; then
-        log 'Reinstall preview complete: cached images verified; no VMs or networks changed'
+        log 'Reinstall preview complete; no VMs or networks changed'
         return
     fi
     if [[ "$ASSUME_YES" != 1 ]]; then

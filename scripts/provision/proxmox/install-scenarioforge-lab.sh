@@ -381,7 +381,7 @@ Important options:
   --reinstall ROLE           Recreate core, app, participant, or all; prompt for missing images
   --dry-run                    Validate and print mutations without applying them
   --cleanup                    Alias for the cleanup command
-  --force                      Allow cleanup of a healthy, running completed lab
+  --force                      Refresh images for reinstall; allow forced cleanup
 
 Network/address overrides:
   --app-management-cidr CIDR   Default: 172.31.250.2/24
@@ -463,7 +463,7 @@ parse_args() {
     [[ "$INSTALL_VULNHUB" == "0" || "$INSTALL_VULNHUB" == "1" ]] \
         || die "SF_INSTALL_VULNHUB must be 0 or 1"
     [[ "$STATUS_WATCH" -eq 0 || "$COMMAND" == "status" ]] || die "--watch is only valid with the status command"
-    [[ "$FORCE_CLEANUP" -eq 0 || "$COMMAND" == "cleanup" ]] || die "--force is only valid with the cleanup command"
+    [[ "$FORCE_CLEANUP" -eq 0 || "$COMMAND" == "cleanup" || "$COMMAND" == reinstall ]] || die "--force is only valid with cleanup or --reinstall"
     case "$PARTICIPANT_OS" in
         debian) ;;
         kali)
@@ -810,10 +810,13 @@ ensure_snippet_storage() {
 download_verified_image() {
     local url="$1" sums_url="$2" algorithm="$3" destination="$4"
     local filename sums expected actual temporary checksum_command
-    if [[ -n "$REINSTALL_TARGET" ]]; then
+    if reinstall_force_download_requested; then
+        prepare_forced_reinstall_download "$destination" "$url"
+        [[ "$DRY_RUN" != 1 ]] || return 0
+    elif [[ -n "$REINSTALL_TARGET" ]]; then
         if [[ -e "$destination" || -L "$destination" ]]; then
             python3 "$REINSTALL_COMMON_DIR/image_cache.py" require "$destination" "$url" "$algorithm" "$sums_url" \
-                || die "Cached image verification failed; no VMs were replaced"
+                || die "Cached image verification failed; no VMs were replaced. Use --reinstall TARGET --force to download a fresh verified image"
             return
         fi
         confirm_reinstall_image_download "$destination" "$url"
@@ -823,9 +826,13 @@ download_verified_image() {
     sums="$(curl -fsSL --retry 3 "$sums_url")" || die "could not download checksum list: $sums_url"
     expected="$(awk -v name="$filename" '$2 == name || $2 == "*" name {print $1; exit}' <<<"$sums")"
     [[ -n "$expected" ]] || die "checksum list does not contain $filename"
+    case "$algorithm" in
+        sha256) [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || die "invalid SHA-256 checksum for $filename in $sums_url" ;;
+        sha512) [[ "$expected" =~ ^[[:xdigit:]]{128}$ ]] || die "invalid SHA-512 checksum for $filename in $sums_url" ;;
+    esac
     verbose "Resolved $algorithm checksum for $filename: $expected"
 
-    if [[ -f "$destination" ]]; then
+    if ! reinstall_force_download_requested && [[ -f "$destination" ]]; then
         actual="$("$checksum_command" "$destination" | awk '{print $1}')"
         if [[ "$actual" == "$expected" ]]; then
             remember_verified_image "$destination" "$url" "$algorithm" "$expected"
@@ -845,7 +852,7 @@ download_verified_image() {
     log "Downloading $filename"
     curl -fL --retry 3 --progress-bar "$url" -o "$temporary"
     actual="$("$checksum_command" "$temporary" | awk '{print $1}')"
-    [[ "$actual" == "$expected" ]] || { rm -f "$temporary"; die "checksum verification failed for $filename"; }
+    [[ "$actual" == "$expected" ]] || { rm -f "$temporary"; die "checksum verification failed for $filename ($algorithm; expected $expected; got $actual; source $sums_url)"; }
     mv "$temporary" "$destination"
     remember_verified_image "$destination" "$url" "$algorithm" "$expected"
 }
