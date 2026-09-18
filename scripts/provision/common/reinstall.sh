@@ -61,9 +61,10 @@ reinstall_cached_images() {
 }
 
 reinstall_wait_for_guest() {
-    local role="$1" prefix target user password phase deadline
+    local role="$1" prefix target user password phase deadline started percent activity last_activity=''
+    started="$(date +%s)"
     prefix="$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')"
-    deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+    deadline=$(( started + WAIT_MINUTES * 60 ))
     if [[ "${VMRUN_TYPE:-}" ]]; then
         target="${prefix}_VMX"; target="${!target}"
         password="${prefix}_PASSWORD"; password="${!password}"
@@ -73,15 +74,39 @@ reinstall_wait_for_guest() {
     fi
     while :; do
         if [[ "${VMRUN_TYPE:-}" ]]; then
-            guest_file_exists "$target" "$user" "$password" "/var/lib/scenarioforge/$role-ready" && return
+            if guest_file_exists "$target" "$user" "$password" "/var/lib/scenarioforge/$role-ready"; then
+                log "$role reinstall: ready after $(format_elapsed "$started")"
+                return
+            fi
             phase="$(guest_phase "$target" "$user" "$password")"
+            percent="$(guest_file_text "$target" "$user" "$password" /var/lib/scenarioforge/bootstrap-percent || true)"
         else
-            guest_marker_exists "$target" "/var/lib/scenarioforge/$role-ready" && return
+            if guest_marker_exists "$target" "/var/lib/scenarioforge/$role-ready"; then
+                log "$role reinstall: ready after $(format_elapsed "$started")"
+                return
+            fi
             phase="$(guest_bootstrap_failure_text "$target")"
             [[ -z "$phase" ]] || die "$role reinstall failed: $phase; VM retained for diagnosis"
+            phase="$(guest_command_output "$target" cat /var/lib/scenarioforge/bootstrap-status)"
+            percent="$(guest_command_output "$target" cat /var/lib/scenarioforge/bootstrap-percent)"
         fi
         [[ "$phase" != failed* ]] || die "$role reinstall failed: $phase; VM retained for diagnosis"
-        log "$role reinstall: ${phase:-waiting for guest bootstrap}"
+        if [[ "$percent" =~ ^[0-9]{1,3}$ ]] && (( 10#$percent <= 100 )); then
+            percent="[$((10#$percent))%] "
+        else
+            percent=''
+        fi
+        log "$role reinstall: ${percent}${phase:-waiting for guest agent / Cloud-Init} (elapsed $(format_elapsed "$started"))"
+        if [[ "${VMRUN_TYPE:-}" ]]; then
+            report_vmware_guest_activity "$role" "$target" "$user" "$password"
+        else
+            activity="$(guest_last_log_line "$target" "/var/log/scenarioforge-$role-bootstrap.log")"
+            [[ -n "$activity" ]] || activity="$(guest_last_log_line "$target" /var/log/cloud-init-output.log)"
+            if [[ -n "$activity" && "$activity" != "$last_activity" ]]; then
+                log "$role guest: $activity"
+                last_activity="$activity"
+            fi
+        fi
         (( $(date +%s) < deadline )) || die "$role reinstall timed out; VM and any temporary participant NAT were retained for diagnosis"
         sleep 15
     done

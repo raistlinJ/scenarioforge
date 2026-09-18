@@ -134,7 +134,7 @@ printf '%s|%s|%s\\n' "$PARTICIPANT_OS" "$PARTICIPANT_DISK_GB" "$LLM_GATEWAY"
 '''
     result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.endswith('kali|40|192.168.80.2/24\n')
+    assert result.stdout.endswith('kali|80|192.168.80.2/24\n')
 
 
 def test_fusion_detach_keeps_dedicated_nic(tmp_path):

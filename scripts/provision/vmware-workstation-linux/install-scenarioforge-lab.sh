@@ -62,8 +62,8 @@ CORE_CORES="${SF_CORE_CORES:-4}"
 APP_CORES="${SF_APP_CORES:-2}"
 PARTICIPANT_CORES="${SF_PARTICIPANT_CORES:-2}"
 CORE_DISK_GB="${SF_CORE_DISK_GB:-80}"
-APP_DISK_GB="${SF_APP_DISK_GB:-40}"
-PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-20}"
+APP_DISK_GB="${SF_APP_DISK_GB:-80}"
+PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}"
 
 APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-}"
 CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-}"
@@ -323,7 +323,7 @@ parse_args() {
     done
     case "$PARTICIPANT_OS" in
         debian) ;;
-        kali) PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-40}" ;;
+        kali) PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}" ;;
         *) die "--participant-os must be debian or kali" ;;
     esac
     case "$COMMAND" in install|status|cleanup|reinstall) ;; *) die "unknown command: $COMMAND" ;; esac
@@ -995,6 +995,21 @@ guest_phase() {
     printf '%s\n' "${text:-waiting for VMware Tools / Cloud-Init}"
 }
 
+report_vmware_guest_activity() {
+    local role="$1" vmx="$2" username="$3" password="$4" current previous variable
+    # File reads already have a five-second timeout. Missing logs or Tools are
+    # expected during boot; leave readiness/failure decisions to the wait loop.
+    current="$(guest_file_text "$vmx" "$username" "$password" "/var/log/scenarioforge-$role-bootstrap.log" | tail -n 1)"
+    [[ -n "$current" ]] || current="$(guest_file_text "$vmx" "$username" "$password" /var/log/cloud-init-output.log | tail -n 1)"
+    [[ -n "$current" ]] || return 0
+    variable="LAST_$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')_ACTIVITY"
+    previous="${!variable:-}"
+    if [[ "$current" != "$previous" ]]; then
+        log "$role guest: $current"
+        printf -v "$variable" '%s' "$current"
+    fi
+}
+
 detach_participant_uplink() {
     [[ "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED" == 1 ]] || return
     log "Stopping the participant briefly to remove its temporary NAT uplink"
@@ -1038,6 +1053,7 @@ wait_for_participant() {
         [[ "$phase" != failed* ]] || die "participant provisioning failed: $phase"
         elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
         emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Participant ${percent}%${percent_availability} (elapsed $elapsed): $phase"
+        report_vmware_guest_activity participant "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD"
         (( $(date +%s) < deadline )) || die "participant provisioning timed out after $WAIT_MINUTES minutes; its temporary NAT adapter was left attached for diagnosis"
         sleep 20
     done
@@ -1059,7 +1075,10 @@ wait_for_all_guests() {
         INSTALL_PERCENT=$(( 60 + (cp + ap + pp) * 39 / 300 ))
         elapsed="$(format_elapsed "$INSTALL_STARTED_EPOCH")"
         emit PROGRESS "[$(printf '%3d' "$INSTALL_PERCENT")%] Guest bootstrap (elapsed $elapsed): CORE=${cp}%${cp_availability} APP=${ap}%${ap_availability} PARTICIPANT=${pp}%${pp_availability}"
-        verbose "CORE: $cphase | APP: $aphase | PARTICIPANT: $pphase"
+        log "CORE: $cphase | APP: $aphase | PARTICIPANT: $pphase"
+        report_vmware_guest_activity core "$CORE_VMX" corevm "$CORE_PASSWORD"
+        report_vmware_guest_activity app "$APP_VMX" scenarioforge "$APP_PASSWORD"
+        report_vmware_guest_activity participant "$PARTICIPANT_VMX" participant "$PARTICIPANT_PASSWORD"
         write_runtime_status running "$INSTALL_PHASE" "CORE=$cp APP=$ap PARTICIPANT=$pp"
         write_state
         if (( cp == 100 && ap == 100 && pp == 100 )) && [[ -z "$cp_availability$ap_availability$pp_availability" ]]; then return; fi

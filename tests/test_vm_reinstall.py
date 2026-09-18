@@ -135,6 +135,76 @@ reinstall_wait_for_guest participant
 
 
 @pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux', 'vmware-fusion-mac'])
+@pytest.mark.parametrize('mode', ['progress', 'unavailable', 'failed', 'timeout'])
+def test_reinstall_reports_guest_progress(platform, mode):
+    installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'
+    script = f'''
+source {shlex.quote(str(installer))}
+mode={mode}
+poll=0
+WAIT_MINUTES=1
+[[ "$mode" != timeout ]] || WAIT_MINUTES=0
+PARTICIPANT_VMX=participant.vmx
+PARTICIPANT_PASSWORD=test
+guest_marker_exists() {{ (( poll >= 3 )); }}
+guest_file_exists() {{ (( poll >= 3 )); }}
+guest_bootstrap_failure_text() {{ return 0; }}
+sample_phase() {{
+    if [[ "$mode" == failed ]]; then echo 'failed: package installation';
+    elif [[ "$mode" != unavailable ]]; then echo 'installing Kali XFCE and the default Kali tools'; fi
+}}
+sample_percent() {{
+    if [[ "$mode" == unavailable ]]; then echo invalid; else echo 025; fi
+}}
+guest_phase() {{ sample_phase; }}
+guest_file_text() {{
+    case "$4" in
+        */bootstrap-percent) sample_percent ;;
+        /var/log/*) guest_last_log_line "$1" "$4" ;;
+    esac
+}}
+guest_command_output() {{
+    case "$3" in
+        */bootstrap-status) sample_phase ;;
+        */bootstrap-percent) sample_percent ;;
+    esac
+}}
+guest_last_log_line() {{
+    [[ "$mode" != unavailable ]] || return 0
+    # Exercise the early Cloud-Init fallback before the role log exists.
+    if (( poll < 2 )); then
+        [[ "$2" != /var/log/cloud-init-output.log ]] || echo 'Unpacking x11-utils ...'
+    else
+        echo 'Setting up chromium ...'
+    fi
+}}
+sleep() {{ poll=$((poll + 1)); }}
+reinstall_wait_for_guest participant
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=10)
+    output = result.stdout + result.stderr
+    if mode == 'failed':
+        assert result.returncode != 0
+        assert 'failed: package installation' in output
+        assert 'ready after' not in output
+    elif mode == 'timeout':
+        assert result.returncode != 0
+        assert 'reinstall timed out' in output
+    else:
+        assert result.returncode == 0, output
+        assert 'elapsed ' in output
+        assert 'ready after' in output
+        if mode == 'progress':
+            assert '[25%] installing Kali XFCE and the default Kali tools' in output
+            assert output.count('Unpacking x11-utils ...') == 1
+            assert output.count('Setting up chromium ...') == 1
+        else:
+            assert 'waiting for guest agent / Cloud-Init' in output
+            assert '[0%]' not in output
+            assert 'invalid' not in output
+
+
+@pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux', 'vmware-fusion-mac'])
 @pytest.mark.parametrize('target,valid', [('core', True), ('app', True), ('participant', True), ('all', True), ('other', False)])
 def test_reinstall_flag_parsing(platform, target, valid):
     installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'

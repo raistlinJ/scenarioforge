@@ -36,8 +36,8 @@ CORE_CORES="${SF_CORE_CORES:-4}"
 APP_CORES="${SF_APP_CORES:-2}"
 PARTICIPANT_CORES="${SF_PARTICIPANT_CORES:-2}"
 CORE_DISK_GB="${SF_CORE_DISK_GB:-80}"
-APP_DISK_GB="${SF_APP_DISK_GB:-40}"
-PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-20}"
+APP_DISK_GB="${SF_APP_DISK_GB:-80}"
+PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}"
 
 APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-172.31.250.2/24}"
 CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-172.31.250.3/24}"
@@ -359,7 +359,7 @@ Important options:
   --vulnhub                    Install the repo's Vulhub vulnerability snapshot on APP
   --wait-minutes N             Bootstrap timeout (default: 90)
   --no-wait                    Return after the participant's temporary uplink is removed
-  --verbose                    Show detailed progress and guest bootstrap activity
+  --verbose                    Show additional host command and download diagnostics
   --watch                      Keep printing status until all three guests are ready
   --interval SECONDS           Status watch interval (default: 10, minimum: 2)
   --yes                        Do not ask for confirmation
@@ -450,7 +450,7 @@ parse_args() {
         debian) ;;
         kali)
             PARTICIPANT_MEMORY_MB="${SF_PARTICIPANT_MEMORY_MB:-2048}"
-            PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-40}"
+            PARTICIPANT_DISK_GB="${SF_PARTICIPANT_DISK_GB:-80}"
             ;;
         *) die "--participant-os must be debian or kali" ;;
     esac
@@ -2180,9 +2180,9 @@ guest_progress_text() {
 }
 
 report_guest_activity() {
-    [[ "$VERBOSE" -eq 1 ]] || return 0
     local label="$1" vmid="$2" path="$3" current previous
     current="$(guest_last_log_line "$vmid" "$path")"
+    [[ -n "$current" ]] || current="$(guest_last_log_line "$vmid" /var/log/cloud-init-output.log)"
     [[ -n "$current" ]] || return 0
     case "$label" in
         CORE)
@@ -2199,7 +2199,7 @@ report_guest_activity() {
             ;;
     esac
     if [[ "$current" != "$previous" ]]; then
-        emit DEBUG "$label guest: $current"
+        log "$label guest: $current"
     fi
 }
 

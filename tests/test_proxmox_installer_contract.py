@@ -60,6 +60,40 @@ def test_installer_help_does_not_require_proxmox() -> None:
     assert "--cleanup" in result.stdout
 
 
+@pytest.mark.parametrize('wait_function', ['wait_for_provisioning', 'wait_for_participant_bootstrap'])
+def test_regular_install_reports_package_activity_without_verbose(wait_function):
+    result = subprocess.run(['bash', '-c', f'''
+source {shlex.quote(str(INSTALLER))}
+VERBOSE=0
+WAIT_MINUTES=1
+INSTALL_STARTED_EPOCH=$(date +%s)
+poll=0
+guest_marker_exists() {{ (( poll >= 4 )); }}
+guest_bootstrap_failure_text() {{ return 0; }}
+guest_bootstrap_percent() {{ echo 25; }}
+guest_last_log_line() {{
+    # Guest agent initially unavailable, then Cloud-Init, then the role log.
+    (( poll > 0 )) || return 0
+    if (( poll < 3 )); then
+        [[ "$2" != /var/log/cloud-init-output.log ]] || echo 'Unpacking chromium-common ...'
+    else
+        echo 'Setting up chromium ...'
+    fi
+}}
+write_runtime_status() {{ :; }}
+sleep() {{ poll=$((poll + 1)); }}
+{wait_function}
+'''], capture_output=True, text=True, timeout=10)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    roles = ['CORE', 'APP', 'PARTICIPANT'] if wait_function == 'wait_for_provisioning' else ['PARTICIPANT']
+    for role in roles:
+        assert output.count(f'{role} guest: Unpacking chromium-common ...') == 1
+        assert output.count(f'{role} guest: Setting up chromium ...') == 1
+    assert 'heartbeat (elapsed ' in output
+    assert 'DEBUG' not in output
+
+
 def test_installer_preserves_required_network_separation_and_core_install_path() -> None:
     source = INSTALLER.read_text(encoding="utf-8")
     install_body = source.split("perform_install() {", maxsplit=1)[1]
@@ -895,10 +929,10 @@ prepare_optional_content
 @pytest.mark.parametrize(
     "configured,environment,cli,expected,memory,disk",
     [
-        ("debian", None, None, "debian", "2048", "20"),
-        ("kali", None, None, "kali", "2048", "40"),
-        ("kali", "debian", None, "debian", "2048", "20"),
-        ("debian", "debian", "kali", "kali", "2048", "40"),
+        ("debian", None, None, "debian", "2048", "80"),
+        ("kali", None, None, "kali", "2048", "80"),
+        ("kali", "debian", None, "debian", "2048", "80"),
+        ("debian", "debian", "kali", "kali", "2048", "80"),
     ],
 )
 def test_participant_os_precedence_and_defaults(

@@ -7,6 +7,50 @@ import pytest
 INSTALLER = Path(__file__).resolve().parents[1] / 'scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh'
 
 
+@pytest.mark.parametrize('platform', ['vmware-workstation-linux', 'vmware-fusion-mac'])
+@pytest.mark.parametrize('wait_function', ['wait_for_all_guests', 'wait_for_participant', 'reinstall_wait_for_guest participant'])
+def test_install_and_reinstall_show_sampled_package_activity(platform, wait_function):
+    installer = INSTALLER.parent.parent / platform / INSTALLER.name
+    result = subprocess.run(['bash', '-c', f'''
+source {shlex.quote(str(installer))}
+VERBOSE=0
+WAIT_MINUTES=1
+INSTALL_STARTED_EPOCH=$(date +%s)
+CORE_VMX=core.vmx; APP_VMX=app.vmx; PARTICIPANT_VMX=participant.vmx
+CORE_PASSWORD=test; APP_PASSWORD=test; PARTICIPANT_PASSWORD=test
+poll=0
+guest_file_exists() {{ (( poll >= 4 )); }}
+guest_percent() {{ if (( poll >= 4 )); then echo 100; else echo 25; fi; }}
+guest_file_text() {{
+    (( poll > 0 )) || return 0
+    case "$4" in
+        */bootstrap-status) echo 'installing packages' ;;
+        */bootstrap-percent) echo 25 ;;
+        /var/log/*)
+            if (( poll < 3 )); then
+                [[ "$4" != /var/log/cloud-init-output.log ]] || printf 'older output\\nUnpacking chromium-common ...\\n'
+            else
+                printf 'older output\\nSetting up chromium ...\\n'
+            fi ;;
+    esac
+}}
+write_runtime_status() {{ :; }}
+write_state() {{ :; }}
+sleep() {{ poll=$((poll + 1)); }}
+{wait_function}
+'''], capture_output=True, text=True, timeout=10)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    roles = ['core', 'app', 'participant'] if wait_function == 'wait_for_all_guests' else ['participant']
+    for role in roles:
+        assert output.count(f'{role} guest: Unpacking chromium-common ...') == 1
+        assert output.count(f'{role} guest: Setting up chromium ...') == 1
+    assert 'installing packages' in output
+    assert 'elapsed ' in output
+    assert 'older output' not in output
+    assert 'DEBUG' not in output
+
+
 @pytest.mark.parametrize('sample,expected,unavailable', [('unavailable', 100, True), ('25', 25, False), ('100', 100, False)])
 def test_guest_poll_preserves_only_unreadable_progress(sample, expected, unavailable):
     result = subprocess.run(['bash', '-c', f'''

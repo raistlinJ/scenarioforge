@@ -28,6 +28,15 @@ def test_windows_powershell_regressions():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_windows_guest_activity():
+    pwsh = os.environ.get('SF_TEST_PWSH') or shutil.which('pwsh')
+    if not pwsh:
+        pytest.skip('PowerShell regressions run in the dedicated Windows CI job')
+    result = subprocess.run([pwsh, '-NoProfile', '-File', str(ROOT / 'tests/test_vmware_guest_activity.ps1')],
+                            capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.fixture
 def config(tmp_path):
     pytest.importorskip('pycdlib', reason='Native builder requirements are installed in Windows CI')

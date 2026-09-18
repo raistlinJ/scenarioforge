@@ -62,7 +62,7 @@ You can also pass `--participant-os debian` or `--participant-os kali` to the in
 Enabling `cyber_agent_flow=true` automatically selects Kali and allocates at least
 4096 MB RAM, even if `participant_os=debian`.
 
-Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+The default participant disk is 80 GB for both Kali and Debian. The installer starts from a cloud
 image and downloads and installs the desktop/tools during provisioning, so Kali
 usually takes longer. You do not need to build a template yourself.
 
@@ -80,7 +80,7 @@ participant VM. See the example config alongside this README for the other optio
   Complete any administrator or first-run prompts while it waits. Run from a
   desktop terminal, or open Workstation in that session first. Dry runs do not
   launch Workstation.
-- Approximately 140 GB of free disk space for the default expanded VM disks,
+- Approximately 240 GB of free disk space for the default expanded VM disks,
   plus enough RAM to run the selected guests. The defaults allocate 8 GB to
   CORE, 4 GB to APP, and 2 GB to PARTICIPANT.
 - The installer installs missing host tools using `sudo apt-get`, `sudo dnf`,
@@ -348,6 +348,16 @@ network described above.
 
 ### Observe a running installation
 
+Regular installs and reinstalls show each guest's setup phase, elapsed time,
+and changing package-log samples by default; `--verbose` is not required.
+For example, `participant guest: Unpacking chromium-common ...` shows activity
+while the Kali package stage remains at the same percentage. Each poll prints
+only the latest log line if it changed, rather than every package message.
+Before the bootstrap log is readable, the installer tries
+`/var/log/cloud-init-output.log`. Missing logs or temporarily unavailable VMware
+Tools leave the usual waiting/progress message visible. This also applies while
+`--no-wait` waits for participant isolation.
+
 From another terminal:
 
 ```bash
@@ -429,8 +439,8 @@ The commonly useful settings are:
 | `SF_WAIT_MINUTES` | `90` |
 | `SF_VERBOSE` | `0` |
 | `SF_CORE_MEMORY_MB` / `SF_CORE_CORES` / `SF_CORE_DISK_GB` | `8192` / `4` / `80` |
-| `SF_APP_MEMORY_MB` / `SF_APP_CORES` / `SF_APP_DISK_GB` | `4096` / `2` / `40` |
-| `SF_PARTICIPANT_MEMORY_MB` / `SF_PARTICIPANT_CORES` / `SF_PARTICIPANT_DISK_GB` | `2048` / `2` / `20` |
+| `SF_APP_MEMORY_MB` / `SF_APP_CORES` / `SF_APP_DISK_GB` | `4096` / `2` / `80` |
+| `SF_PARTICIPANT_MEMORY_MB` / `SF_PARTICIPANT_CORES` / `SF_PARTICIPANT_DISK_GB` | `2048` / `2` / `80` |
 | `SF_APP_MANAGEMENT_CIDR` | `172.31.250.2/24` |
 | `SF_CORE_MANAGEMENT_CIDR` | `172.31.250.3/24` |
 | `SF_CORE_HITL_CIDR` | `10.254.200.3/24` |
@@ -465,7 +475,7 @@ For a new lab, add `--participant-os kali` to the installer command, or set
 Config values are overridden by environment values, then CLI flags.
 Debian remains the default; CORE continues to use Debian 12.
 
-Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and a 40 GB
+Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and an 80 GB
 disk. Resource overrides remain `SF_PARTICIPANT_MEMORY_MB`,
 `SF_PARTICIPANT_CORES`, and `SF_PARTICIPANT_DISK_GB` (Kali minimum: 25 GB).
 The username remains `participant`.
@@ -586,6 +596,12 @@ bash scripts/provision/vmware-workstation-linux/install-scenarioforge-lab.sh --r
 Replace `participant` with `core` or `app` to rebuild either of those VMs alone.
 Do not run `cleanup` first: reinstall uses the existing VMs, saved state, and
 credentials to identify and recreate the selected guests.
+
+While waiting, reinstall reports the guest's bootstrap phase, reported
+percentage, and elapsed time. The percentage tracks setup stages and may stay
+unchanged while packages install. Changing package-log samples are also shown
+by default. Before VMware Tools can report progress,
+the installer shows a waiting message without a percentage.
 
 **This erases the selected VMs' disks and guest data.** It retains saved login
 credentials and lab network settings. Other VMs and host networks are not

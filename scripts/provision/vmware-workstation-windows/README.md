@@ -24,8 +24,8 @@ This PowerShell installer creates the same three graphical Linux guests as the
 | VM | Guest | Purpose | Default RAM / CPUs / disk |
 | --- | --- | --- | --- |
 | CORE | Debian 12 + XFCE | CORE emulator and GUI, built from the ScenarioForge fork | 8 GB / 4 / 80 GB |
-| APP | Ubuntu 24.04 + XFCE | Native ScenarioForge, nginx, browser, and document tools | 4 GB / 2 / 40 GB |
-| Participant | Debian 12 + XFCE (default), or Kali Linux + XFCE and standard tools | Participant desktop on the isolated HITL network | 2 GB / 2 / 20 GB (Kali: 40 GB disk; CyberAgentFlow: at least 4 GB RAM) |
+| APP | Ubuntu 24.04 + XFCE | Native ScenarioForge, nginx, browser, and document tools | 4 GB / 2 / 80 GB |
+| Participant | Debian 12 + XFCE (default), or Kali Linux + XFCE and standard tools | Participant desktop on the isolated HITL network | 2 GB / 2 / 80 GB (CyberAgentFlow: at least 4 GB RAM) |
 
 The complete installation runs on Windows. **No WSL, Ubuntu host installation,
 or Git Bash is required.** Windows Python creates the Cloud-Init seed ISOs and
@@ -58,7 +58,7 @@ You can also pass `-ParticipantOS debian` or `-ParticipantOS kali` to the instal
 Enabling `"cyber_agent_flow": true` automatically selects Kali and allocates at
 least 4096 MB RAM, even if `participant_os` is set to `debian`.
 
-Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+The default participant disk is 80 GB for both Kali and Debian. The installer starts from a cloud
 image and downloads and installs the desktop/tools during provisioning, so Kali
 usually takes longer. You do not need to build a template yourself.
 
@@ -70,7 +70,7 @@ participant VM. See the example config alongside this README for the other optio
 
 Use an x64 Windows host supported by your Workstation release, with VMware
 Workstation Pro, PowerShell **7.4 or newer** (`pwsh`), and enough resources for
-14 GB of guest RAM plus Windows. Allow room for up to 140 GB of growing
+14 GB of guest RAM plus Windows. Allow room for up to 240 GB of growing
 VM disks, plus cached cloud images. Windows ARM is not supported by this script.
 
 During installation and resume, the script opens the selected Workstation
@@ -260,6 +260,16 @@ GitHub credentials are not copied into a guest.
 
 ## 4. Status, recovery, and passwords
 
+Regular installs, reinstalls, and `resume` show each guest's setup phase,
+elapsed time, and changing package-log samples automatically. For example,
+`participant guest: Unpacking chromium-common ...` shows activity during long
+Kali installs. Each poll prints only the latest log line if it changed, rather
+than every package message. Before the bootstrap log is readable, the installer
+tries `/var/log/cloud-init-output.log`. Missing logs or temporarily unavailable
+VMware Tools leave the usual waiting message visible; readiness and failure
+checks still determine completion. This also applies while `-NoWait` waits for
+participant isolation.
+
 ```powershell
 .\install-scenarioforge-lab.ps1 status
 .\install-scenarioforge-lab.ps1 status -Watch
@@ -332,11 +342,11 @@ For a new lab, add `-ParticipantOS kali`, set `"participant_os": "kali"`
 in your JSON config, or set `SF_PARTICIPANT_OS=kali`. Precedence is JSON,
 environment, then the CLI parameter. Debian remains the default.
 
-Kali uses **2048 MB RAM**, 2 CPUs, and a 40 GB disk by default. The optional
+Kali uses **2048 MB RAM**, 2 CPUs, and an 80 GB disk by default. The optional
 `participant_memory_mb`, `participant_cores`, and `participant_disk_gb`
 JSON settings override these values. When changing an older config that
 explicitly sets `participant_disk_gb` to 20, remove that override or increase
-it to 40 (minimum 25). CORE continues to use Debian 12.
+it to 80 (Kali minimum: 25). CORE continues to use Debian 12.
 
 The native Python builder verifies and extracts the official Kali 2026.2 amd64
 cloud image and converts its raw disk to VMDK without Bash or WSL. Kali uses

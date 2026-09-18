@@ -117,7 +117,7 @@ Full step-by-step setup guides:
 
 All four automated installers offer a **Kali Linux participant VM** with XFCE
 and the standard Kali tools. Its defaults are **2 GB RAM (2048 MB), 2 CPUs,
-and a 40 GB disk**. Debian 12 remains the default participant OS, and the CORE
+and an 80 GB disk**. Debian 12 remains the default participant OS, and the CORE
 VM uses Debian 12 with either choice.
 
 After completing the prerequisites in the platform guide above, run the
@@ -141,10 +141,16 @@ password. On VMware, Kali provisioning includes a kernel installation and
 automatic reboot before the desktop readiness check. The installer removes
 the participant's temporary internet adapter after provisioning completes.
 
+All four installers display sampled package activity by default during regular
+installs and reinstalls, alongside setup progress and elapsed time. Each poll
+shows the latest guest log line when it changes. Kali's package stage can take
+a long time without changing the reported stage percentage; these log samples
+help show that work is continuing. No verbose flag is required.
+
 These options create a new lab; they do not convert existing Debian VMs.
 For resource overrides, image settings, download timeouts, and network setup,
 see the platform guides above. In an older Windows config, remove an explicit
-`"participant_disk_gb": 20` setting or change it to 40 when selecting Kali.
+`"participant_disk_gb": 20` setting or change it to 80 to use the new default.
 
 ### Reinstall One VM or the Whole Lab
 

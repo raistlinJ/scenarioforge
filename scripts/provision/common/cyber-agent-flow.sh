@@ -47,7 +47,7 @@ validate_caf() {
         # Debian's default disk is smaller than Kali's minimum. Preserve an
         # explicit Kali-sized choice, but make the automatic selection usable.
         if [[ "${PARTICIPANT_DISK_GB:-0}" =~ ^[0-9]+$ ]] && (( PARTICIPANT_DISK_GB < 25 )); then
-            PARTICIPANT_DISK_GB=40
+            PARTICIPANT_DISK_GB=80
         fi
     fi
     caf_generate validate || die 'invalid CyberAgentFlow / LLM network configuration'

@@ -56,7 +56,7 @@ You can also pass `--participant-os debian` or `--participant-os kali` to the in
 Enabling `cyber_agent_flow=true` automatically selects Kali and allocates at least
 4096 MB RAM, even if `participant_os=debian`.
 
-Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+The default participant disk is 80 GB for both Kali and Debian. The installer starts from a cloud
 image and downloads and installs the desktop/tools during provisioning, so Kali
 usually takes longer. You do not need to build a template yourself.
 
@@ -79,7 +79,8 @@ participant VM. See the example config alongside this README for the other optio
   and an amd64 `binfmt_misc` handler so Docker can execute images that publish
   only `linux/amd64`.
 - Intel Macs use AMD64 cloud images and SCSI disks.
-- About 140 GB of free space for the default expanded disks, plus enough RAM to
+- About 240 GB of free space for the default expanded disks (including 80 GB for
+  APP), plus enough RAM to
   run the selected guests. Defaults are 8 GB CORE, 4 GB APP, and 2 GB
   PARTICIPANT.
 - Python 3, `curl`, `openssl`, `shasum`, and `hdiutil`, which macOS provides.
@@ -273,6 +274,16 @@ one-time SSH key and removes that key after provisioning.
 
 ## Status
 
+Regular installs and reinstalls show each guest's setup phase, elapsed time,
+and changing package-log samples by default; `--verbose` is not required.
+For example, `participant guest: Unpacking chromium-common ...` shows activity
+while the Kali package stage remains at the same percentage. Each poll prints
+only the latest log line if it changed, rather than every package message.
+Before the bootstrap log is readable, the installer tries
+`/var/log/cloud-init-output.log`. Missing logs or temporarily unavailable VMware
+Tools leave the usual waiting/progress message visible. This also applies while
+`--no-wait` waits for participant isolation.
+
 From another Terminal window:
 
 ```bash
@@ -345,7 +356,7 @@ For a new lab, add `--participant-os kali` to the installer command, or set
 Config values are overridden by environment values, then CLI flags.
 Debian remains the default; CORE continues to use Debian 12.
 
-Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and a 40 GB
+Kali gets XFCE, `kali-linux-default`, **2048 MB RAM**, 2 CPUs, and an 80 GB
 disk. Resource overrides remain `SF_PARTICIPANT_MEMORY_MB`,
 `SF_PARTICIPANT_CORES`, and `SF_PARTICIPANT_DISK_GB` (Kali minimum: 25 GB).
 The username remains `participant`.
@@ -468,6 +479,12 @@ bash scripts/provision/vmware-fusion-mac/install-scenarioforge-lab.sh --reinstal
 Replace `participant` with `core` or `app` to rebuild either of those VMs alone.
 Do not run `cleanup` first: reinstall uses the existing VMs, saved state, and
 credentials to identify and recreate the selected guests.
+
+While waiting, reinstall reports the guest's bootstrap phase, reported
+percentage, and elapsed time. The percentage tracks setup stages and may stay
+unchanged while packages install. Changing package-log samples are also shown
+by default. Before VMware Tools can report progress,
+the installer shows a waiting message without a percentage.
 
 **This erases the selected VMs' disks and guest data.** It retains saved login
 credentials and lab network settings. Other VMs and host networks are not

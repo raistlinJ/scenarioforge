@@ -56,7 +56,7 @@ function Read-InstallerConfig {
         participant_os = 'debian'; kali_image_url = ''; kali_sums_url = ''
         core_memory_mb = 8192; app_memory_mb = 4096; participant_memory_mb = 2048
         core_cores = 4; app_cores = 2; participant_cores = 2
-        core_disk_gb = 80; app_disk_gb = 40; participant_disk_gb = 20
+        core_disk_gb = 80; app_disk_gb = 80; participant_disk_gb = 80
         core_password = ''; app_password = ''; participant_password = ''; web_admin_password = ''; ssh_public_key = ''
         core_minimal_ref = 'main'; core_ref = 'master'; scenarioforge_ref = 'main'
         flag_generators = $false; vulnhub = $false; flag_generators_ref = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
@@ -73,9 +73,6 @@ function Read-InstallerConfig {
     if ($env:SF_PARTICIPANT_OS) { $config.participant_os = $env:SF_PARTICIPANT_OS }
     if ($ParticipantOSOverride) { $config.participant_os = $ParticipantOSOverride }
     if ($config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
-    if ($config.participant_os -eq 'kali' -and -not $provided.ContainsKey('participant_disk_gb')) {
-        $config.participant_disk_gb = 40
-    }
     return $config
 }
 
@@ -85,14 +82,14 @@ function Assert-InstallerConfig {
     if ($Config.cyber_agent_flow -and $Config.participant_os -ne 'kali') {
         Write-Host 'CyberAgentFlow enabled; selecting Kali for the participant VM.'
         $Config.participant_os = 'kali'
-        if ($Config.participant_disk_gb -lt 25) { $Config.participant_disk_gb = 40 }
+        if ($Config.participant_disk_gb -lt 25) { $Config.participant_disk_gb = 80 }
     }
     if ($Config.cyber_agent_flow -and $Config.participant_memory_mb -lt 4096) {
         Write-Host 'CyberAgentFlow enabled; allocating 4096 MB RAM to the participant VM.'
         $Config.participant_memory_mb = 4096
     }
     if ($Config.participant_os -eq 'kali' -and $Config.participant_disk_gb -lt 25) {
-        throw 'Kali participant_disk_gb must be at least 25 (default: 40).'
+        throw 'Kali participant_disk_gb must be at least 25 (default: 80).'
     }
     foreach ($key in @('desktop_shortcut', 'no_wait', 'flag_generators', 'vulnhub', 'manage_hitl_network', 'cyber_agent_flow')) {
         if ($Config[$key] -isnot [bool]) { throw "$key must be a JSON boolean." }
@@ -555,7 +552,7 @@ ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
 Use -CyberAgentFlow with Kali and the grouped LLM settings in the example JSON.
 Overrides: -LabDir, -StateDir, -VmwareDir, -PythonExe, -QemuImg, -NoDesktopShortcut
 Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confirmation.
-Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 40 GB disk).
+Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 80 GB disk).
 HITL networking is created automatically when needed; use -NoManageHitlNetwork to require an existing vmnet.
 Cleanup removes owned HITL networks; -Force allows changed settings, -KeepHitlNetwork preserves the network.
 Image preparation uses Windows Python and qemu-img.exe.

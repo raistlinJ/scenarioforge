@@ -41,7 +41,7 @@ printf 'VALUES|%s|%s|%s|%s\n' "$PARTICIPANT_OS" "$PARTICIPANT_MEMORY_MB" "$PARTI
 """)
     assert result.returncode == 0, result.stderr
     line = next(line for line in result.stdout.splitlines() if line.startswith("VALUES|"))
-    assert line.startswith("VALUES|kali|2048|40|")
+    assert line.startswith("VALUES|kali|2048|80|")
     assert line.endswith(f"genericcloud-{guest_arch}.tar.xz")
 
 
@@ -67,8 +67,8 @@ create_vms
     assert len(disks) == 3
     assert disks[0].endswith("|80|qcow2")
     assert f"debian-12-generic-{guest_arch}.qcow2" in disks[0]
-    assert disks[1].endswith("|40|qcow2")
-    assert disks[2] == "DISK|/images/kali.raw|40|raw"
+    assert disks[1].endswith("|80|qcow2")
+    assert disks[2] == "DISK|/images/kali.raw|80|raw"
     participant = next(tmp_path.rglob("scenarioforge-participant.vmx")).read_text()
     core = next(tmp_path.rglob("scenarioforge-core.vmx")).read_text()
     assert 'memsize = "2048"' in participant
@@ -88,7 +88,7 @@ parse_args install --config {shlex.quote(str(config))} --participant-os debian
 printf 'VALUES|%s|%s|%s\n' "$PARTICIPANT_OS" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_DISK_GB"
 """)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines()[-1] == "VALUES|debian|2048|20"
+    assert result.stdout.splitlines()[-1] == "VALUES|debian|2048|80"
     result = shell(platform, host_arch, "parse_args install --participant-os invalid")
     assert result.returncode != 0
     assert "--participant-os must be debian or kali" in result.stderr

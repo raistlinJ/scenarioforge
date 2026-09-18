@@ -195,9 +195,9 @@ function Test-OwnedVM {
 }
 
 function Invoke-GuestCommand {
-    param($State, $Credentials, [string]$Role, [string[]]$Arguments, [switch]$AllowFailure)
+    param($State, $Credentials, [string]$Role, [string[]]$Arguments, [switch]$AllowFailure, [int]$TimeoutSeconds = 30)
     $vm = $State.VMs[$Role]
-    Invoke-HostCommand $State.Vmrun (@('-T', 'ws', '-gu', $vm.User, '-gp', $Credentials[$Role], $Arguments[0], $vm.Path) + @($Arguments | Select-Object -Skip 1)) -AllowFailure:$AllowFailure
+    Invoke-HostCommand $State.Vmrun (@('-T', 'ws', '-gu', $vm.User, '-gp', $Credentials[$Role], $Arguments[0], $vm.Path) + @($Arguments | Select-Object -Skip 1)) -AllowFailure:$AllowFailure -TimeoutSeconds $TimeoutSeconds
 }
 
 function Get-GuestProgress {
@@ -211,6 +211,20 @@ function Get-GuestProgress {
         if ($result.Code -eq 0) { return (Get-Content -LiteralPath $temp -Raw).Trim() }
     } finally { Remove-Item -LiteralPath $temp -Force }
     return 'waiting for VMware Tools / bootstrap (see guest console)'
+}
+
+function Get-GuestActivity {
+    param($State, $Credentials, [ValidateSet('core', 'app', 'participant')][string]$Role)
+    $temp = [IO.Path]::GetTempFileName()
+    try {
+        foreach ($path in @("/var/log/scenarioforge-$Role-bootstrap.log", '/var/log/cloud-init-output.log')) {
+            $result = Invoke-GuestCommand $State $Credentials $Role @('copyFileFromGuestToHost', $path, $temp) -AllowFailure -TimeoutSeconds 5
+            if ($result.Code -ne 0) { continue }
+            $line = [string](Get-Content -LiteralPath $temp -Tail 1)
+            if ($line.Trim()) { return $line.TrimEnd() }
+        }
+        return ''
+    } finally { Remove-Item -LiteralPath $temp -Force }
 }
 
 function Remove-ParticipantUplink {
@@ -245,7 +259,9 @@ function Complete-LabSetup {
         if (-not (Test-Path -LiteralPath $State.VMs[$role].Path) -or -not (Test-OwnedVM $State $role)) { throw "$role VM is missing or belongs to a different installation. Use cleanup before reinstalling." }
         Start-LabVM $State $role
     }
-    $deadline = [DateTime]::UtcNow.AddMinutes($State.Config.wait_minutes)
+    $started = [DateTime]::UtcNow
+    $deadline = $started.AddMinutes($State.Config.wait_minutes)
+    $lastActivity = @{}
     if ($State.OptionalPending -and 'app' -in $roles) {
         $archive = Join-Path $State.LabDir 'scenarioforge-optional-content.tar.gz'
         do {
@@ -265,7 +281,15 @@ function Complete-LabSetup {
             $phase = Get-GuestProgress $State $Credentials $role
             if ($phase -like 'failed*') { throw "$role bootstrap failed: $phase. Check the guest console before retrying resume." }
             $ready[$role] = $phase -eq 'ready'
-            Write-Host "$role : $phase"
+            $elapsed = ([DateTime]::UtcNow - $started).ToString('hh\:mm\:ss')
+            Write-Host "$role : $phase (elapsed $elapsed)"
+            if (-not $ready[$role]) {
+                $activity = Get-GuestActivity $State $Credentials $role
+                if ($activity -and $activity -ne $lastActivity[$role]) {
+                    Write-Host "$role guest: $activity"
+                    $lastActivity[$role] = $activity
+                }
+            }
         }
         if ('participant' -in $roles -and $ready.participant -and $State.UplinkAttached) { Remove-ParticipantUplink $State $StateFile }
         if ($ready.participant -and (($State.Config.no_wait -and -not $State.ContainsKey('ReinstallRoles')) -or ($ready.core -and $ready.app))) {

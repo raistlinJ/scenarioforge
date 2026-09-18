@@ -65,7 +65,7 @@ You can also pass `--participant-os debian` or `--participant-os kali` to the in
 Enabling `cyber_agent_flow=true` automatically selects Kali and allocates at least
 4096 MB RAM, even if `participant_os=debian`.
 
-Kali's default disk is 40 GB (Debian: 20 GB). The installer starts from a cloud
+The default participant disk is 80 GB for both Kali and Debian. The installer starts from a cloud
 image and downloads and installs the desktop/tools during provisioning, so Kali
 usually takes longer. You do not need to build a template yourself.
 
@@ -118,7 +118,7 @@ Run on the target Proxmox node as `root`. The node needs:
 - Directory-backed storage for Cloud-Init snippets, normally `local`. The
   installer enables its `snippets` content type without removing existing
   content types.
-- About 14 GiB of guest RAM and 140 GiB of provisioned guest storage with the
+- About 14 GiB of guest RAM and 240 GiB of provisioned guest storage with the
   defaults. Thin-provisioned storage does not consume all of that immediately.
 
 All three VMs use standard virtual VGA while retaining a serial port for
@@ -182,10 +182,12 @@ Only one `--config` file may be supplied per invocation.
 
 Output is timestamped and classified as `PROGRESS`, `INFO`, `WARN`, `ERROR`,
 `DEBUG`, or `DRY-RUN`. Normal mode reports every major stage, image download,
-VM creation, and the recurring readiness state of all three guests. Add
+VM creation, the recurring readiness state of all three guests, and the latest
+bootstrap-log line whenever it changes. This includes package activity during
+long Kali installs, without requiring `--verbose`. Until a guest's bootstrap
+log is available, it samples `/var/log/cloud-init-output.log`. Add
 `--verbose` to also show safe command diagnostics, repository/checksum details,
-Proxmox task activity, and the latest available bootstrap-log line from each
-guest. Verbose mode deliberately does not enable shell tracing because tracing
+and Proxmox task activity. Verbose mode deliberately does not enable shell tracing because tracing
 could expose generated passwords.
 
 Progress output includes an overall percentage and elapsed time. Percentages
@@ -473,7 +475,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_CORE_VMID` / `SF_APP_VMID` / `SF_PARTICIPANT_VMID` | `9401` / `9402` / `9403` |
 | `SF_PARTICIPANT_OS` | `debian` (or `kali`) |
 | `SF_CORE_MEMORY_MB` / `SF_APP_MEMORY_MB` / `SF_PARTICIPANT_MEMORY_MB` | `8192` / `4096` / `2048` |
-| `SF_CORE_DISK_GB` / `SF_APP_DISK_GB` / `SF_PARTICIPANT_DISK_GB` | `80` / `40` / `20` (Kali: `40`) |
+| `SF_CORE_DISK_GB` / `SF_APP_DISK_GB` / `SF_PARTICIPANT_DISK_GB` | `80` / `80` / `80` |
 | `SF_APP_MANAGEMENT_CIDR` | `172.31.250.2/24` |
 | `SF_CORE_MANAGEMENT_CIDR` | `172.31.250.3/24` |
 | `SF_CORE_HITL_CIDR` | `10.254.200.3/24` |
@@ -576,7 +578,7 @@ Kali uses the official 2026.2 amd64 generic cloud archive, verifies its SHA256
 against the published checksum list, and extracts its sparse `disk.raw`.
 It installs `kali-desktop-xfce` and `kali-linux-default` during first boot.
 The login remains `participant` with the generated or supplied participant
-password. Its defaults are 2048 MB RAM, 2 CPUs, and a 40 GB disk; override with
+password. Its defaults are 2048 MB RAM, 2 CPUs, and an 80 GB disk; override with
 `SF_PARTICIPANT_MEMORY_MB`, `SF_PARTICIPANT_CORES`, and
 `SF_PARTICIPANT_DISK_GB`.
 
@@ -684,6 +686,23 @@ sudo bash scripts/provision/proxmox/install-scenarioforge-lab.sh --reinstall all
 Replace `participant` with `core` or `app` to rebuild either of those VMs alone.
 Do not run `cleanup` first: reinstall uses the existing VMs, saved state, and
 credentials to identify and recreate the selected guests.
+
+While waiting, reinstall reports the guest's bootstrap phase, reported
+percentage, and elapsed time. It also prints the latest bootstrap-log line
+when it changes, so package activity is visible without a second terminal:
+
+```text
+participant reinstall: [25%] installing Kali XFCE and the default Kali tools (elapsed 00h:04m:00s)
+participant guest: Unpacking chromium-common ...
+```
+
+The percentage tracks setup stages, not individual packages; it can stay at
+25% while many packages install. Log lines are sampled on each poll, so this
+is not a complete log stream. Before the guest agent is available, the message
+reports that it is waiting for the guest agent / Cloud-Init. Reinstall falls
+back to `/var/log/cloud-init-output.log` until the guest bootstrap log is
+available. Normal `install` runs also show sampled guest log activity by
+default, including while waiting for participant isolation with `--no-wait`.
 
 **This erases the selected VMs' disks and guest data.** It retains saved login
 credentials and lab network settings. Other VMs and host networks are not
