@@ -377,7 +377,10 @@ def test_proxmox_inventory_retains_hardware(tmp_path):
 
 
 @pytest.mark.parametrize('target', ['core', 'app', 'participant', 'all'])
-@pytest.mark.parametrize('mode', ['run', 'preview', 'bad_cache', 'unowned'])
+@pytest.mark.parametrize('mode', [
+    'run', 'preview', 'bad_cache', 'unowned', 'graceful',
+    'shutdown_timeout', 'late_shutdown', 'stop_failed', 'still_running', 'ownership_changed',
+])
 def test_proxmox_reinstall_preserves_other_vmids_and_snippets(tmp_path, target, mode):
     installer = ROOT / 'scripts/provision/proxmox/install-scenarioforge-lab.sh'
     snippets = tmp_path / 'snippets'
@@ -406,11 +409,27 @@ PARTICIPANT_VMID=9403
 event() {{ printf '%s\\n' "$*" >> {shlex.quote(str(events))}; }}
 load_cleanup_scope() {{ :; }}
 storage_config() {{ printf '{{"path":%s}}' {shlex.quote(json.dumps(str(tmp_path)))}; }}
-vm_owned_by_installer() {{ [[ {mode} != unowned ]]; }}
+ownership_changed=0
+vm_owned_by_installer() {{ [[ {mode} != unowned && "$ownership_changed" == 0 ]]; }}
+stopped_vmids=''
 qm() {{
     case "$1" in
         config) printf 'memory: 4096\\ncores: 2\\nscsi0: local:disk,size=40G\\nnet0: virtio=02:00:00:00:00:10,bridge=hitl\\n' ;;
-        status) echo 'status: stopped' ;;
+        status)
+            case {mode} in
+                graceful|shutdown_timeout|late_shutdown|stop_failed|still_running|ownership_changed)
+                    if [[ " $stopped_vmids " == *" $2 "* ]]; then echo 'status: stopped'; else echo 'status: running'; fi ;;
+                *) echo 'status: stopped' ;;
+            esac ;;
+        shutdown)
+            event "qm $*"
+            if [[ {mode} == ownership_changed ]]; then ownership_changed=1; fi
+            if [[ {mode} == graceful || {mode} == late_shutdown ]]; then stopped_vmids="$stopped_vmids $2"; fi
+            [[ {mode} == graceful ]] ;;
+        stop)
+            event "qm $*"
+            [[ {mode} != stop_failed ]] || return 255
+            if [[ {mode} != still_running ]]; then stopped_vmids="$stopped_vmids $2"; fi ;;
         *) event "qm $*" ;;
     esac
 }}
@@ -429,16 +448,33 @@ detach_participant_bootstrap_uplink() {{ event detach; }}
 perform_reinstall
 '''
     result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
-    assert (result.returncode == 0) == (mode in ('run', 'preview')), result.stderr
+    rebuild = mode in ('run', 'graceful', 'shutdown_timeout', 'late_shutdown')
+    assert (result.returncode == 0) == (rebuild or mode == 'preview'), result.stderr
     calls = events.read_text().splitlines() if events.exists() else []
     selected = ['core', 'app', 'participant'] if target == 'all' else [target]
     for role, vmid in [('core', 9401), ('app', 9402), ('participant', 9403)]:
-        replaced = mode == 'run' and role in selected
+        replaced = rebuild and role in selected
         assert (f'qm destroy {vmid} --purge 1' in calls) == replaced
         assert (f'qm start {vmid}' in calls) == replaced
         for kind in ('user', 'network'):
             text = (snippets / f'scenarioforge-{role}-{kind}.yaml').read_text()
             assert text == ('replacement\n' if replaced else 'original')
-    assert ('detach' in calls) == (mode == 'run' and 'participant' in selected)
-    if mode != 'run':
+    assert ('detach' in calls) == (rebuild and 'participant' in selected)
+    shutdown_vmids = [call.split()[2] for call in calls if call.startswith('qm shutdown ')]
+    stop_vmids = [call.split()[2] for call in calls if call.startswith('qm stop ')]
+    selected_vmids = [str({'core': 9401, 'app': 9402, 'participant': 9403}[role]) for role in selected]
+    if mode in ('graceful', 'shutdown_timeout', 'late_shutdown'):
+        assert shutdown_vmids == selected_vmids
+        assert stop_vmids == (selected_vmids if mode == 'shutdown_timeout' else [])
+        first_destroy = next(i for i, call in enumerate(calls) if call.startswith('qm destroy '))
+        assert all(i < first_destroy for i, call in enumerate(calls) if call.startswith(('qm stop ', 'qm shutdown ')))
+    elif mode in ('stop_failed', 'still_running', 'ownership_changed'):
+        assert shutdown_vmids == selected_vmids[:1]
+        assert stop_vmids == ([] if mode == 'ownership_changed' else selected_vmids[:1])
+        assert 'state' not in calls
+        assert not any(call.startswith(('qm destroy ', 'qm start ')) for call in calls)
+        assert any(message in result.stderr for message in ('not stopped', 'Could not stop', 'VM ownership changed'))
+    else:
+        assert shutdown_vmids == stop_vmids == []
+    if mode in ('preview', 'bad_cache', 'unowned'):
         assert not any(call.startswith('qm ') or call == 'state' for call in calls)

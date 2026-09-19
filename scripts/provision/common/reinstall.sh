@@ -221,7 +221,21 @@ PY
             fi
         else
             target="${prefix}_VMID"; target="${!target}"
-            if qm status "$target" | grep -q 'status: running'; then qm shutdown "$target" --timeout 120; fi
+            if qm status "$target" | grep -q 'status: running'; then
+                log "Requesting a graceful shutdown of $role VMID $target (timeout: 120 seconds)"
+                if ! qm shutdown "$target" --timeout 120; then
+                    warn "$role VMID $target did not shut down gracefully"
+                fi
+                if qm status "$target" | grep -q 'status: running'; then
+                    # REINSTALL already authorizes replacing this guest's disk.
+                    # Recheck ownership before forcibly stopping a stuck guest.
+                    name="${prefix}_NAME"; name="${!name}"
+                    vm_owned_by_installer "$target" "$name" "scenarioforge-$role-user.yaml" \
+                        || die "VM ownership changed: $target"
+                    warn "Forcing $role VMID $target to stop for the confirmed reinstall"
+                    qm stop "$target" || die "Could not stop VMID $target; reinstall aborted before disk replacement"
+                fi
+            fi
             qm status "$target" | grep -q 'status: stopped' || die "VMID $target is not stopped"
         fi
     done
