@@ -69,6 +69,7 @@ APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-}"
 CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-}"
 CORE_HITL_CIDR="${SF_CORE_HITL_CIDR:-10.254.200.3/24}"
 PARTICIPANT_CIDR="${SF_PARTICIPANT_CIDR:-10.254.200.10/24}"
+PARTICIPANT_GATEWAY="${SF_PARTICIPANT_GATEWAY:-}"
 
 # These values are consumed by the shared guest-template functions sourced above.
 # shellcheck disable=SC2034
@@ -204,6 +205,7 @@ Network/address overrides:
   --core-management-cidr CIDR  default: selected management network subnet
   --core-hitl-cidr CIDR        default: 10.254.200.3/24
   --participant-cidr CIDR      default: 10.254.200.10/24
+  --participant-gateway IP    HITL router (default: first usable address except CORE HITL IP)
 
 Repository overrides:
   --core-minimal-ref REF       default: main
@@ -267,6 +269,7 @@ apply_vmware_config_value() {
         core_management_cidr) assign_config_setting CORE_MANAGEMENT_CIDR SF_CORE_MANAGEMENT_CIDR "$value" ;;
         core_hitl_cidr) assign_config_setting CORE_HITL_CIDR SF_CORE_HITL_CIDR "$value" ;;
         participant_cidr) assign_config_setting PARTICIPANT_CIDR SF_PARTICIPANT_CIDR "$value" ;;
+        participant_gateway) assign_config_setting PARTICIPANT_GATEWAY SF_PARTICIPANT_GATEWAY "$value" ;;
         core_minimal_ref) assign_config_setting CORE_MINIMAL_REF SF_CORE_MINIMAL_REF "$value" ;;
         core_ref) assign_config_setting CORE_REPO_REF SF_CORE_REPO_REF "$value" ;;
         scenarioforge_ref) assign_config_setting SCENARIOFORGE_REF SF_SCENARIOFORGE_REF "$value" ;;
@@ -293,9 +296,9 @@ parse_args() {
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
             --core-password) REQUESTED_CORE_PASSWORD="${2:?missing value for --core-password}"; shift 2 ;;
             --app-password) REQUESTED_APP_PASSWORD="${2:?missing value for --app-password}"; shift 2 ;;
-            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; shift 2 ;;
-            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; shift 2 ;;
-            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; shift 2 ;;
+            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; REINSTALL_CORE_DISK_GB="$CORE_DISK_GB"; shift 2 ;;
+            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; REINSTALL_APP_DISK_GB="$APP_DISK_GB"; shift 2 ;;
+            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; REINSTALL_PARTICIPANT_DISK_GB="$PARTICIPANT_DISK_GB"; shift 2 ;;
             --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-password) REQUESTED_PARTICIPANT_PASSWORD="${2:?missing value for --participant-password}"; shift 2 ;;
@@ -322,6 +325,7 @@ parse_args() {
             --app-management-cidr) APP_MANAGEMENT_CIDR="${2:?missing value}"; shift 2 ;;
             --core-management-cidr) CORE_MANAGEMENT_CIDR="${2:?missing value}"; shift 2 ;;
             --core-hitl-cidr) CORE_HITL_CIDR="${2:?missing value}"; shift 2 ;;
+            --participant-gateway) PARTICIPANT_GATEWAY="${2:?missing value for --participant-gateway}"; shift 2 ;;
             --participant-cidr) PARTICIPANT_CIDR="${2:?missing value}"; shift 2 ;;
             --core-minimal-ref) CORE_MINIMAL_REF="${2:?missing value}"; shift 2 ;;
             --core-ref) CORE_REPO_REF="${2:?missing value}"; shift 2 ;;
@@ -546,6 +550,7 @@ validate_inputs() {
     validate_cidr "CORE management CIDR" "$CORE_MANAGEMENT_CIDR"
     validate_cidr "CORE HITL CIDR" "$CORE_HITL_CIDR"
     validate_cidr "participant CIDR" "$PARTICIPANT_CIDR"
+    resolve_participant_gateway
     [[ -z "$SSH_PUBLIC_KEY_FILE" || -r "$SSH_PUBLIC_KEY_FILE" ]] \
         || die "SSH public key is not readable: $SSH_PUBLIC_KEY_FILE"
     [[ ! -e "$STATE_FILE" ]] || die "installer state already exists at $STATE_FILE; use status or cleanup"
@@ -628,6 +633,7 @@ write_state() {
         shell_assignment APP_MANAGEMENT_CIDR "$APP_MANAGEMENT_CIDR"
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment PARTICIPANT_CIDR "$PARTICIPANT_CIDR"
+        shell_assignment PARTICIPANT_GATEWAY "$PARTICIPANT_GATEWAY"
         shell_assignment PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"
         shell_assignment INSTALL_STARTED_EPOCH "$INSTALL_STARTED_EPOCH"
         shell_assignment INSTALL_PERCENT "$INSTALL_PERCENT"

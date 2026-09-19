@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'common'))
 import cyber_agent_flow as caf
 import image_cache
+import hitl_gateway
 SHARED = HERE.parent / 'proxmox' / 'install-scenarioforge-lab.sh'
 TESTED_CATALOG_COMMIT = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
 CORE_HITL_CIDR = '10.254.200.3/24'
@@ -227,6 +228,7 @@ def cloud_config(role, config, script, checksum='', commit=''):
                           CORE_REPO_REF=config['core_ref'], CORE_USE_SYSTEMD_RESOLVED_STUB=1)
         else:
             values.update(CORE_HITL_CIDR=CORE_HITL_CIDR, CORE_PASSWORD=config['core_password'],
+                          PARTICIPANT_GATEWAY=hitl_gateway.resolve(CORE_HITL_CIDR, '10.254.200.10/24', config.get('participant_gateway', '')),
                           SCENARIOFORGE_ADMIN_PASSWORD=config['web_admin_password'],
                           INSTALL_FLAG_GENERATORS=int(config['flag_generators']), INSTALL_VULNHUB=int(config['vulnhub']),
                           OPTIONAL_CONTENT_SHA256=checksum, FLAG_GENERATORS_RESOLVED_COMMIT=commit,
@@ -264,7 +266,7 @@ def network_layout(role, config, macs):
         networks = [('custom', config['hitl_vmnet']), ('nat', '')]
         interfaces = {'participant': nic(0, 'ens18', addresses=['10.254.200.10/24'], dhcp4=False, dhcp6=False,
                                           # Temporary NAT wins during bootstrap until its adapter is detached.
-                                          routes=[{'to': '0.0.0.0/0', 'via': CORE_HITL_CIDR.split('/')[0], 'metric': 2000}],
+                                          routes=[{'to': '0.0.0.0/0', 'via': hitl_gateway.resolve(CORE_HITL_CIDR, '10.254.200.10/24', config.get('participant_gateway', '')), 'metric': 2000}],
                                           **{'accept-ra': False}),
                       'bootstrap-uplink': nic(1, 'ens19', dhcp4=True, dhcp6=False)}
     if role == 'participant' and config.get('cyber_agent_flow', False):
@@ -400,6 +402,7 @@ def check_reinstall_cache(config, *, prompt_missing=False, force_download=False,
 
 def prepare_images(config, work):
     caf.validate(config)
+    hitl_gateway.resolve(CORE_HITL_CIDR, '10.254.200.10/24', config.get('participant_gateway', ''))
     participant_os = config.get('participant_os', 'debian')
     if participant_os not in ('debian', 'kali'):
         raise BuildError('participant_os must be debian or kali.')

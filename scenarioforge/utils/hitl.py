@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import re
 import hashlib
 import ipaddress
@@ -642,13 +643,37 @@ def preferred_hitl_link_ips(
     if preferred_ip in {network.network_address, network.broadcast_address}:
         return None
 
+    # Provisioning saves the participant's next-hop alongside the CORE interface
+    # address. Scope it to that interface/link so other HITL networks retain
+    # their normal allocation when a scenario supplies its own addresses.
+    gateway = None
+    configured_gateway = str(os.getenv('CORETG_HITL_GATEWAY') or '').strip()
+    configured_name = str(os.getenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME') or '').strip()
+    configured_ipv4 = str(os.getenv('CORETG_HITL_CORE_IFX_IPV4') or '').split(',')[0].strip()
+    try:
+        configured_iface = ipaddress.IPv4Interface(configured_ipv4)
+    except ValueError:
+        configured_iface = None
+    attachment = _normalize_hitl_attachment(iface_entry.get('attachment'))
+    if (configured_gateway and configured_iface == preferred_iface
+            and _normalize_rj45_ifname(str(iface_entry.get('name') or '')) == configured_name
+            and attachment in _HITL_ROUTER_ATTACHMENTS):
+        gateway = ipaddress.IPv4Address(configured_gateway)
+        if (gateway not in network
+                or gateway in {preferred_ip, network.network_address, network.broadcast_address}
+                or gateway.is_unspecified or gateway.is_multicast or gateway.is_loopback):
+            raise ValueError('CORETG_HITL_GATEWAY must be a usable router address in the configured HITL subnet')
+
     router_hosts: List[ipaddress.IPv4Address] = []
     for host in network.hosts():
-        if host == preferred_ip:
+        if host == preferred_ip or host == gateway:
             continue
         router_hosts.append(host)
         if len(router_hosts) >= 2:
             break
+    if gateway is not None:
+        router_hosts.insert(1 if attachment == 'new_router' else 0, gateway)
+        router_hosts = router_hosts[:2]
     if len(router_hosts) < 2:
         return None
 

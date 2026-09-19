@@ -42,7 +42,7 @@ def write_atomic(path, content):
 
 
 def sync_gateway_policy(cli_path, destination):
-    """Keep the actual LLM next-hop excluded without replacing user policy."""
+    """Exclude the LLM endpoint and next-hop without replacing user policy."""
     destination = str(ipaddress.IPv4Address(destination))
     routes = json.loads(subprocess.check_output(
         ['ip', '-j', '-4', 'route', 'get', destination], text=True))
@@ -55,18 +55,23 @@ def sync_gateway_policy(cli_path, destination):
     before = json.dumps(cli, sort_keys=True)
     policy = cli.setdefault('network_policy', {'allow': ['*'], 'disallow': []})
     denied = policy.setdefault('disallow', [])
-    previous = cli.get('llm_route_gateway', '')
-    # Only remove an old entry if this utility originally added it.
-    managed = bool(cli.get('llm_route_gateway_managed'))
-    if previous != gateway:
-        if managed and previous in denied:
+    addresses = {'llm_route_gateway': gateway, 'llm_route_destination': destination}
+    # Reconcile both addresses together: a provider can also be the gateway,
+    # or a former gateway can become the new provider. Never drop an address
+    # that is still needed, and only remove entries this utility added.
+    managed = {cli[key] for key in addresses if cli.get(key) and cli.get(key + '_managed')}
+    required = {address for address in addresses.values() if address}
+    for previous in managed - required:
+        if previous in denied:
             denied.remove(previous)
-        managed = False
-    if gateway and gateway not in denied:
-        denied.append(gateway)
-        managed = True
-    cli['llm_route_gateway'] = gateway
-    cli['llm_route_gateway_managed'] = managed
+    managed.intersection_update(required)
+    for address in addresses.values():
+        if address and address not in denied:
+            denied.append(address)
+            managed.add(address)
+    for key, address in addresses.items():
+        cli[key] = address
+        cli[key + '_managed'] = address in managed
     if json.dumps(cli, sort_keys=True) != before:
         write_atomic(cli_path, (json.dumps(cli, indent=2) + '\n').encode())
 
@@ -145,7 +150,7 @@ def main():
         raise
     if old != address:
         subprocess.run(['ip', '-4', 'route', 'del', old + '/32', 'dev', 'ens20'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print('Updated configuration, persistent route, and gateway deny entry. Reload CyberAgentFlow and update any browser-saved endpoint settings before starting a new session.')
+    print('Updated configuration, persistent route, and LLM endpoint/gateway deny entries. Reload CyberAgentFlow and update any browser-saved endpoint settings before starting a new session.')
 
 
 if __name__ == '__main__':

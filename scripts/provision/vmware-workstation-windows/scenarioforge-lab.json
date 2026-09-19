@@ -29,6 +29,7 @@
   "python_exe": "",
   "qemu_img": "",
   "git_exe": "",
+  "participant_gateway": "",
   "participant_os": "kali",
   "manage_hitl_network": true
 }

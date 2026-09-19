@@ -36,8 +36,12 @@ hitl_vmnet=vmnet2
 # manage_hitl_network=true
 
 # --- VM network addresses ---
+# CORE-side HITL interface address, not the participant's default gateway.
 core_hitl_cidr=10.254.200.3/24
 participant_cidr=10.254.200.10/24
+# Empty derives the first usable router address (10.254.200.1 here).
+# Set explicitly to match a scenario that uses a different HITL router.
+participant_gateway=
 
 # --- SSH access and login credentials ---
 ssh_public_key=

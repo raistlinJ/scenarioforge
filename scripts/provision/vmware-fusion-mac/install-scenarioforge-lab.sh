@@ -178,6 +178,7 @@ Network/address overrides:
   --core-management-cidr CIDR  default: selected management network subnet
   --core-hitl-cidr CIDR        default: 10.254.200.3/24
   --participant-cidr CIDR      default: 10.254.200.10/24
+  --participant-gateway IP    HITL router (default: first usable address except CORE HITL IP)
 
 Repository overrides:
   --core-minimal-ref REF       default: main
@@ -239,6 +240,7 @@ apply_vmware_config_value() {
         core_management_cidr) assign_config_setting CORE_MANAGEMENT_CIDR SF_CORE_MANAGEMENT_CIDR "$value" ;;
         core_hitl_cidr) assign_config_setting CORE_HITL_CIDR SF_CORE_HITL_CIDR "$value" ;;
         participant_cidr) assign_config_setting PARTICIPANT_CIDR SF_PARTICIPANT_CIDR "$value" ;;
+        participant_gateway) assign_config_setting PARTICIPANT_GATEWAY SF_PARTICIPANT_GATEWAY "$value" ;;
         core_minimal_ref) assign_config_setting CORE_MINIMAL_REF SF_CORE_MINIMAL_REF "$value" ;;
         core_ref) assign_config_setting CORE_REPO_REF SF_CORE_REPO_REF "$value" ;;
         scenarioforge_ref) assign_config_setting SCENARIOFORGE_REF SF_SCENARIOFORGE_REF "$value" ;;

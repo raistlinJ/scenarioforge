@@ -176,7 +176,7 @@ if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then
         || fail_bootstrap 'LLM provider URL hostname does not resolve to llm_provider_address'
 fi
 ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev ens20( |$)' || fail_bootstrap 'LLM provider traffic is not routed through ens20'
-/usr/local/sbin/update-llm-destination --sync-policy {q(c['llm_provider_address'])} || fail_bootstrap 'Could not exclude the LLM route gateway from CyberAgentFlow targets'
+/usr/local/sbin/update-llm-destination --sync-policy {q(c['llm_provider_address'])} || fail_bootstrap 'Could not exclude the LLM endpoint and route gateway from CyberAgentFlow targets'
 cat > /usr/local/bin/cyber-agent-flow <<'CAF_LAUNCH'
 #!/bin/bash
 set -e
@@ -212,7 +212,7 @@ cat > /home/participant/Desktop/update-llm-destination.desktop <<'CAF_UPDATE_DES
 [Desktop Entry]
 Type=Application
 Name=Update LLM Destination
-Comment=Update CyberAgentFlow endpoint, dedicated route, and gateway exclusion
+Comment=Update CyberAgentFlow endpoint, dedicated route, and target exclusions
 Exec=sudo /usr/local/sbin/update-llm-destination
 Icon=network-wired
 Terminal=true

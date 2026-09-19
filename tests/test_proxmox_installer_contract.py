@@ -745,9 +745,14 @@ confirm_cleanup
     assert "rerun cleanup with --force" in result.stderr
 
 
-@pytest.mark.parametrize("core_hitl_cidr", ["10.254.200.3/24", "10.80.12.1/24"])
+@pytest.mark.parametrize("core_hitl_cidr,participant_cidr,gateway,override", [
+    ("10.254.200.3/24", "10.254.200.10/24", "10.254.200.1", ""),
+    ("10.80.12.1/24", "10.80.12.10/24", "10.80.12.2", ""),
+    ("10.254.200.3/24", "10.254.200.10/24", "10.254.200.20", "10.254.200.20"),
+])
 @pytest.mark.parametrize("participant_os", ["debian", "kali"])
-def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, participant_os: str, core_hitl_cidr: str) -> None:
+@pytest.mark.parametrize("platform", ["proxmox", "vmware-workstation-linux", "vmware-fusion-mac"])
+def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, participant_os: str, core_hitl_cidr: str, participant_cidr: str, gateway: str, override: str, platform: str) -> None:
     user_key = tmp_path / "user.pub"
     transfer_key = tmp_path / "transfer.pub"
     user_key.write_text("ssh-ed25519 AAAAuser operator\n", encoding="utf-8")
@@ -755,11 +760,14 @@ def test_generated_cloud_init_and_guest_scripts_are_valid(tmp_path: Path, partic
         "ssh-ed25519 AAAAtransfer scenarioforge-installer-transfer\n",
         encoding="utf-8",
     )
+    installer = ROOT / "scripts/provision" / platform / "install-scenarioforge-lab.sh"
     render = f"""
-source {INSTALLER!s}
+source {installer!s}
 WORK_DIR={tmp_path!s}
 parse_args install --participant-os {participant_os}
 CORE_HITL_CIDR={core_hitl_cidr}
+PARTICIPANT_CIDR={participant_cidr}
+PARTICIPANT_GATEWAY={override}
 SSH_PUBLIC_KEY_FILE={shlex.quote(str(user_key))}
 CATALOG_TRANSFER_PUBLIC_KEY_FILE={shlex.quote(str(transfer_key))}
 CORE_PASSWORD=core-password-for-test
@@ -786,7 +794,7 @@ write_cloud_init_files
 
     network = yaml.safe_load((tmp_path / "participant-network.yaml").read_text())["ethernets"]
     assert network["participant"]["routes"] == [
-        {"to": "0.0.0.0/0", "via": core_hitl_cidr.split("/")[0], "metric": 2000}
+        {"to": "0.0.0.0/0", "via": gateway, "metric": 2000}
     ]
     assert network["bootstrap-uplink"]["dhcp4"] is True
 
@@ -834,6 +842,14 @@ write_cloud_init_files
         assert syntax.returncode == 0, syntax.stderr
 
     app_script = (tmp_path / "app-bootstrap.sh").read_text(encoding="utf-8")
+    # Render the actual runtime env heredoc without executing guest installation.
+    env_template = app_script.split('<<ENV_FILE\n', 1)[1].split('\nENV_FILE', 1)[0]
+    rendered_env = subprocess.run(
+        ['bash', '-c', 'set -eu; source "$1"; flask_secret=test; cat <<ENV_FILE\n' + env_template + '\nENV_FILE\n',
+         'test', str(tmp_path / 'app-installer.env')], capture_output=True, text=True, check=True,
+    ).stdout
+    assert f'CORETG_HITL_CORE_IFX_IPV4={core_hitl_cidr}\n' in rendered_env
+    assert f'CORETG_HITL_GATEWAY={gateway}\n' in rendered_env
     for start, end in (
         ("<<'GENERATOR_ZIP'\n", "\nGENERATOR_ZIP"),
         ("<<'GENERATOR_INSTALL'\n", "\nGENERATOR_INSTALL"),

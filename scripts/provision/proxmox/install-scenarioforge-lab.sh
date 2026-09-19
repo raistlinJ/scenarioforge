@@ -43,6 +43,7 @@ APP_MANAGEMENT_CIDR="${SF_APP_MANAGEMENT_CIDR:-172.31.250.2/24}"
 CORE_MANAGEMENT_CIDR="${SF_CORE_MANAGEMENT_CIDR:-172.31.250.3/24}"
 CORE_HITL_CIDR="${SF_CORE_HITL_CIDR:-10.254.200.3/24}"
 PARTICIPANT_CIDR="${SF_PARTICIPANT_CIDR:-10.254.200.10/24}"
+PARTICIPANT_GATEWAY="${SF_PARTICIPANT_GATEWAY:-}"
 
 CORE_MINIMAL_URL="${SF_CORE_MINIMAL_URL:-https://github.com/raistlinJ/coreemu-minimal.git}"
 CORE_MINIMAL_REF="${SF_CORE_MINIMAL_REF:-main}"
@@ -194,6 +195,10 @@ assign_config_setting() {
     if [[ -z "$environment_name" ]] || ! declare -p "$environment_name" >/dev/null 2>&1; then
         printf -v "$target" '%s' "$value"
     fi
+    case "$target" in
+        CORE_DISK_GB|APP_DISK_GB|PARTICIPANT_DISK_GB)
+            printf -v "REINSTALL_$target" '%s' "${!target}" ;;
+    esac
 }
 
 load_installer_config_file() {
@@ -248,7 +253,7 @@ load_config_from_args() {
             --core-vmid|--app-vmid|--participant-vmid|--lab-dir|--management-vmnet|--hitl-vmnet|\
             --ssh-public-key|--core-password|--app-password|--participant-password|--web-admin-password|\
             --wait-minutes|--interval|--app-management-cidr|--core-management-cidr|--core-hitl-cidr|\
-            --core-disk-gb|--app-disk-gb|--participant-disk-gb|--participant-os|--participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
+            --core-disk-gb|--app-disk-gb|--participant-disk-gb|--participant-os|--participant-gateway|--participant-cidr|--core-minimal-ref|--core-ref|--scenarioforge-ref|--flag-generators-ref)
                 shift 2
                 ;;
             *) shift ;;
@@ -313,6 +318,7 @@ apply_proxmox_config_value() {
         core_management_cidr) assign_config_setting CORE_MANAGEMENT_CIDR SF_CORE_MANAGEMENT_CIDR "$value" ;;
         core_hitl_cidr) assign_config_setting CORE_HITL_CIDR SF_CORE_HITL_CIDR "$value" ;;
         participant_cidr) assign_config_setting PARTICIPANT_CIDR SF_PARTICIPANT_CIDR "$value" ;;
+        participant_gateway) assign_config_setting PARTICIPANT_GATEWAY SF_PARTICIPANT_GATEWAY "$value" ;;
         core_minimal_ref) assign_config_setting CORE_MINIMAL_REF SF_CORE_MINIMAL_REF "$value" ;;
         core_ref) assign_config_setting CORE_REPO_REF SF_CORE_REPO_REF "$value" ;;
         scenarioforge_ref) assign_config_setting SCENARIOFORGE_REF SF_SCENARIOFORGE_REF "$value" ;;
@@ -388,6 +394,7 @@ Network/address overrides:
   --core-management-cidr CIDR  Default: 172.31.250.3/24
   --core-hitl-cidr CIDR        Default: 10.254.200.3/24
   --participant-cidr CIDR      Default: 10.254.200.10/24
+  --participant-gateway IP    HITL router (default: first usable address except CORE HITL IP)
 
 Repository overrides:
   --core-minimal-ref REF       Default: main
@@ -420,9 +427,9 @@ parse_args() {
             --hitl-bridge) HITL_BRIDGE="${2:?missing value for --hitl-bridge}"; shift 2 ;;
             --core-vmid) CORE_VMID="${2:?missing value for --core-vmid}"; shift 2 ;;
             --app-vmid) APP_VMID="${2:?missing value for --app-vmid}"; shift 2 ;;
-            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; shift 2 ;;
-            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; shift 2 ;;
-            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; shift 2 ;;
+            --core-disk-gb) CORE_DISK_GB="${2:?missing value for --core-disk-gb}"; REINSTALL_CORE_DISK_GB="$CORE_DISK_GB"; shift 2 ;;
+            --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; REINSTALL_APP_DISK_GB="$APP_DISK_GB"; shift 2 ;;
+            --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; REINSTALL_PARTICIPANT_DISK_GB="$PARTICIPANT_DISK_GB"; shift 2 ;;
             --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
@@ -437,6 +444,7 @@ parse_args() {
             --app-management-cidr) APP_MANAGEMENT_CIDR="${2:?missing value for --app-management-cidr}"; shift 2 ;;
             --core-management-cidr) CORE_MANAGEMENT_CIDR="${2:?missing value for --core-management-cidr}"; shift 2 ;;
             --core-hitl-cidr) CORE_HITL_CIDR="${2:?missing value for --core-hitl-cidr}"; shift 2 ;;
+            --participant-gateway) PARTICIPANT_GATEWAY="${2:?missing value for --participant-gateway}"; shift 2 ;;
             --participant-cidr) PARTICIPANT_CIDR="${2:?missing value for --participant-cidr}"; shift 2 ;;
             --core-minimal-ref) CORE_MINIMAL_REF="${2:?missing value for --core-minimal-ref}"; shift 2 ;;
             --core-ref) CORE_REPO_REF="${2:?missing value for --core-ref}"; shift 2 ;;
@@ -541,7 +549,13 @@ plain_ip() {
     printf '%s\n' "${1%/*}"
 }
 
+resolve_participant_gateway() {
+    PARTICIPANT_GATEWAY="$(python3 "$REINSTALL_COMMON_DIR/hitl_gateway.py" "$CORE_HITL_CIDR" "$PARTICIPANT_CIDR" "$PARTICIPANT_GATEWAY")" \
+        || die 'Invalid participant HITL gateway'
+}
+
 validate_networks() {
+    resolve_participant_gateway
     python3 - "$APP_MANAGEMENT_CIDR" "$CORE_MANAGEMENT_CIDR" "$CORE_HITL_CIDR" "$PARTICIPANT_CIDR" <<'PY'
 import ipaddress
 import sys
@@ -1515,6 +1529,7 @@ CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19
 CORETG_VM_MODE_HITL_CORE_IFX_ATTACHMENT=existing_router
 CORETG_VM_MODE_HITL_CORE_IFX_DESCRIPTION=ScenarioForge participant network
 CORETG_HITL_CORE_IFX_IPV4=$CORE_HITL_CIDR
+CORETG_HITL_GATEWAY=$PARTICIPANT_GATEWAY
 CORETG_HOST=127.0.0.1
 CORETG_PORT=9090
 CORETG_USE_RELOADER=0
@@ -1771,6 +1786,7 @@ PARTICIPANT_SCRIPT
 }
 
 write_cloud_init_files() {
+    resolve_participant_gateway
     local core_password_hash app_password_hash participant_password_hash standard_public_key app_public_key
     local core_script_b64 app_script_b64 participant_script_b64 core_config_b64 app_config_b64
     core_password_hash="$(printf '%s\n' "$CORE_PASSWORD" | openssl passwd -6 -stdin)"
@@ -1794,6 +1810,7 @@ write_cloud_init_files() {
         shell_assignment SCENARIOFORGE_REF "$SCENARIOFORGE_REF"
         shell_assignment CORE_MANAGEMENT_IP "$(plain_ip "$CORE_MANAGEMENT_CIDR")"
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
+        shell_assignment PARTICIPANT_GATEWAY "$PARTICIPANT_GATEWAY"
         shell_assignment CORE_PASSWORD "$CORE_PASSWORD"
         shell_assignment SCENARIOFORGE_ADMIN_PASSWORD "$SCENARIOFORGE_ADMIN_PASSWORD"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
@@ -1959,7 +1976,7 @@ ethernets:
     # Prefer temporary NAT during bootstrap; use the CORE HITL router after detach.
     routes:
       - to: 0.0.0.0/0
-        via: ${CORE_HITL_CIDR%/*}
+        via: $PARTICIPANT_GATEWAY
         metric: 2000
     dhcp4: false
     dhcp6: false
@@ -2058,6 +2075,7 @@ write_state() {
         shell_assignment APP_MANAGEMENT_CIDR "$APP_MANAGEMENT_CIDR"
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment PARTICIPANT_CIDR "$PARTICIPANT_CIDR"
+        shell_assignment PARTICIPANT_GATEWAY "$PARTICIPANT_GATEWAY"
         shell_assignment APP_NET0_MAC "$APP_NET0_MAC"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"

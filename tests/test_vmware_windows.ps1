@@ -108,6 +108,8 @@ try {
     Assert (-not $config.ContainsKey('wsl_distribution')) 'No Linux host dependency in config'
     $defaults = Read-InstallerConfig ''
     Assert (-not $defaults.flag_generators -and -not $defaults.vulnhub) 'Public install needs no private repository access'
+    Assert ($defaults.participant_gateway -eq '') 'Gateway defaults independently of CORE HITL address'
+    Assert ((Read-InstallerConfig '' -ParticipantGatewayOverride '10.254.200.2').participant_gateway -eq '10.254.200.2') 'Gateway CLI override'
     Assert-InstallerConfig $config
     $config.hitl_vmnet = $config.management_vmnet
     Assert-Throws { Assert-InstallerConfig $config } 'must differ'

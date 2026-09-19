@@ -26,7 +26,7 @@ def test_atomic_config_update_preserves_permissions(tmp_path):
     assert path.read_bytes() == b'{"url":"http://203.0.113.20"}'
 
 
-def test_gateway_exclusion_tracks_route_and_preserves_custom_policy(tmp_path, monkeypatch):
+def test_endpoint_and_gateway_exclusions_track_route_and_preserve_custom_policy(tmp_path, monkeypatch):
     path = tmp_path / 'cli.json'
     path.write_text(json.dumps({'network_policy': {'allow': ['10.0.0.0/24'], 'disallow': ['10.0.0.10']}}))
     route = {'dev': 'ens20', 'gateway': '192.168.80.2'}
@@ -36,14 +36,14 @@ def test_gateway_exclusion_tracks_route_and_preserves_custom_policy(tmp_path, mo
     module.sync_gateway_policy(path, '203.0.113.20')
     assert path.read_bytes() == first
     assert json.loads(first)['network_policy'] == {
-        'allow': ['10.0.0.0/24'], 'disallow': ['10.0.0.10', '192.168.80.2'],
+        'allow': ['10.0.0.0/24'], 'disallow': ['10.0.0.10', '192.168.80.2', '203.0.113.20'],
     }
     route['gateway'] = '192.168.80.3'
     module.sync_gateway_policy(path, '203.0.113.21')
-    assert json.loads(path.read_text())['network_policy']['disallow'] == ['10.0.0.10', '192.168.80.3']
+    assert json.loads(path.read_text())['network_policy']['disallow'] == ['10.0.0.10', '192.168.80.3', '203.0.113.21']
     del route['gateway']
     module.sync_gateway_policy(path, '192.168.80.20')
-    assert json.loads(path.read_text())['network_policy']['disallow'] == ['10.0.0.10']
+    assert json.loads(path.read_text())['network_policy']['disallow'] == ['10.0.0.10', '192.168.80.20']
 
 
 def test_preexisting_gateway_exclusion_is_not_removed(tmp_path, monkeypatch):
@@ -54,7 +54,31 @@ def test_preexisting_gateway_exclusion_is_not_removed(tmp_path, monkeypatch):
     module.sync_gateway_policy(path, '203.0.113.20')
     route['gateway'] = '192.168.80.3'
     module.sync_gateway_policy(path, '203.0.113.20')
+    assert json.loads(path.read_text())['network_policy']['disallow'] == ['192.168.80.2', '203.0.113.20', '192.168.80.3']
+
+
+def test_user_defined_endpoint_exclusion_is_preserved_after_endpoint_change(tmp_path, monkeypatch):
+    path = tmp_path / 'cli.json'
+    path.write_text(json.dumps({'network_policy': {'allow': ['*'], 'disallow': ['203.0.113.20']}}))
+    monkeypatch.setattr(module.subprocess, 'check_output', lambda *a, **kw: '[{"dev":"ens20"}]')
+    module.sync_gateway_policy(path, '203.0.113.20')
+    module.sync_gateway_policy(path, '203.0.113.21')
+    assert json.loads(path.read_text())['network_policy']['disallow'] == ['203.0.113.20', '203.0.113.21']
+
+
+def test_shared_endpoint_and_gateway_remain_excluded_until_neither_is_used(tmp_path, monkeypatch):
+    path = tmp_path / 'cli.json'
+    path.write_text('{}')
+    route = {'dev': 'ens20', 'gateway': '192.168.80.2'}
+    monkeypatch.setattr(module.subprocess, 'check_output', lambda *a, **kw: json.dumps([route]))
+    module.sync_gateway_policy(path, '192.168.80.2')
+    assert json.loads(path.read_text())['network_policy']['disallow'] == ['192.168.80.2']
+    route['gateway'] = '192.168.80.3'
+    module.sync_gateway_policy(path, '192.168.80.2')
     assert json.loads(path.read_text())['network_policy']['disallow'] == ['192.168.80.2', '192.168.80.3']
+    del route['gateway']
+    module.sync_gateway_policy(path, '192.168.80.20')
+    assert json.loads(path.read_text())['network_policy'] == {'allow': ['*'], 'disallow': ['192.168.80.20']}
 
 
 def test_wrong_route_does_not_change_config(tmp_path, monkeypatch):
@@ -111,7 +135,7 @@ def test_desktop_update_changes_policy_with_route_and_rolls_back(tmp_path, monke
         module.main()
         updated = json.loads(cli_path.read_text())
         assert updated['url'] == 'http://203.0.113.21:11434'
-        assert updated['network_policy']['disallow'] == ['10.0.0.10', '192.168.80.3']
+        assert updated['network_policy']['disallow'] == ['10.0.0.10', '192.168.80.3', '203.0.113.21']
         if dynamic:
             assert json.loads(dhcp.read_text())['provider'] == '203.0.113.21'
         else:

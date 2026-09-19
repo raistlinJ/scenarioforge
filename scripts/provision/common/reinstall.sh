@@ -194,7 +194,22 @@ PY
             settings="$(python3 "$REINSTALL_COMMON_DIR/reinstall_inventory.py" proxmox "$role" "$WORK_DIR/$role.config")" || die "Cannot read hardware for $role"
         fi
         eval "$settings" # Helper emits only fixed variable names and quoted scalar values.
+        variable="${prefix}_DISK_GB"
+        name="REINSTALL_$variable"
+        if declare -p "$name" >/dev/null 2>&1; then
+            printf -v "$variable" '%s' "${!name}"
+        else
+            name="SF_$variable"
+            if declare -p "$name" >/dev/null 2>&1; then
+                printf -v "$variable" '%s' "${!name}"
+            fi
+        fi
+        validate_integer "$role disk size" "${!variable}" 8
+        if [[ "$role" == participant && "$PARTICIPANT_OS" == kali ]]; then
+            validate_integer 'Kali participant disk size' "${!variable}" 25
+        fi
         log "Reinstall scope: $role ($target); its guest disk and data will be replaced"
+        log "Reinstall $role disk size: ${!variable} GB"
     done
     validate_integer 'wait minutes' "$WAIT_MINUTES" 1
     reinstall_cached_images

@@ -550,6 +550,13 @@ launcher. Provisioning verifies Docker daemon access, both Compose commands,
 and Claude CLI as `participant`, including when retrying setup. CyberAgentFlow
 itself is not started automatically. Log in as `participant` and run `cyber-agent-flow` in a terminal
 to launch web mode through `start_ws.sh`.
+Provisioning adds the configured LLM provider IP and its route gateway (if any)
+to CyberAgentFlow's `network_policy.disallow` in `configs/cli.json`. These are
+excluded as agent targets; the LLM connection remains available. The destination
+update utility and DHCP route refresh keep these exclusions current. Existing
+user-defined allow/deny entries are preserved; only obsolete entries added by
+the utility are removed when the endpoint or gateway changes.
+
 The generated `configs/cli.json` contains the endpoint/provider/model; set
 `MCP_API_KEY` in your guest session when authentication is needed. No API keys are
 placed in the provisioning config. The WebUI uses `configs/cli.json` for initial
@@ -576,6 +583,50 @@ Guest progress checks accept VMware Tools states `installed` and `running` and
 verify the actual guest operation with a timeout. Some headless Workstation
 sessions report `installed` while guest file transfers already work.
 
+
+## Participant HITL address and gateway
+
+The default addresses have separate roles:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| CORE HITL interface | `10.254.200.3/24` | CORE-side HITL/RJ45 address seeded into the scenario |
+| Participant address | `10.254.200.10/24` | Participant VM's own address |
+| Participant gateway | `10.254.200.1` | Scenario router used as the participant's default next-hop |
+
+The CORE HITL interface address is not the participant gateway. An empty
+`participant_gateway` derives the first usable address in the HITL subnet other
+than the CORE HITL interface address, matching the default existing-router
+allocation. If the scenario uses another router (for example `.2`), set its IP
+explicitly. The gateway must be in the participant subnet and distinct from
+the participant and CORE HITL interface addresses.
+
+Use `participant_gateway=10.254.200.1` in the config,
+`SF_PARTICIPANT_GATEWAY` in the environment, or `--participant-gateway 10.254.200.1`
+for a new installation. CLI overrides environment, which overrides config.
+The resolved gateway is saved with the lab. Older saved labs without this
+setting use the corrected default when rebuilt. `core_hitl_cidr` and
+`participant_cidr` still control their respective interface addresses.
+
+Provisioning writes `/opt/scenarioforge/.scenarioforge.env` on the APP VM,
+including the CORE connection credentials, HITL interface/subnet, and resolved
+`CORETG_HITL_GATEWAY` (default `10.254.200.1`). The service and normal CLI/app
+startup load this file, so later runs from that checkout use the saved gateway
+without rerunning provisioning or manually exporting it. The router address is
+applied to the configured HITL interface and subnet; other scenario networks
+keep their own allocation. Config/flag gateway overrides are saved here too.
+The file is owned by `scenarioforge` with mode `0600`.
+
+For an existing APP VM, add `CORETG_HITL_GATEWAY=10.254.200.1` (or your configured
+router IP) to that file after updating the application code, then restart
+`scenarioforge-web`. A new application process reads the updated file; an
+already-running scenario must be recreated to change its router address.
+Editing this file does not update the participant VM's persistent Netplan route;
+keep that route consistent if you change the gateway later.
+
+The HITL default route has metric 2000 so the temporary NAT route takes
+precedence during provisioning. This change applies when generating guest
+network configuration; it does not edit an already-running VM's Netplan files.
 
 ## Configure VM disk sizes
 

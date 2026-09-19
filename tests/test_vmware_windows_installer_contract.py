@@ -146,6 +146,7 @@ def test_native_builder_creates_real_seed_isos_and_portable_vmx(config, monkeypa
         if role == 'app':
             env = next(f for f in userdata['write_files'] if f['path'] == '/etc/scenarioforge-installer.env')
             decoded = base64.b64decode(env['content']).decode()
+            assert 'PARTICIPANT_GATEWAY=10.254.200.1\n' in decoded
             assert f'INSTALL_FLAG_GENERATORS={int(catalogs)}' in decoded
             assert f'INSTALL_VULNHUB={int(catalogs)}' in decoded
             if catalogs:
@@ -165,9 +166,19 @@ def test_network_layout_matches_guest_interfaces(config):
     _, net = builder.network_layout('participant', config, ['mac0', 'mac1'])
     assert not net['ethernets']['participant']['dhcp4']
     assert net['ethernets']['participant']['routes'] == [
-        {'to': '0.0.0.0/0', 'via': builder.CORE_HITL_CIDR.split('/')[0], 'metric': 2000}
+        {'to': '0.0.0.0/0', 'via': '10.254.200.1', 'metric': 2000}
     ]
     assert net['ethernets']['bootstrap-uplink']['dhcp4'] is True
+    config['participant_gateway'] = '10.254.200.2'
+    app_config = json.loads(builder.cloud_config('app', config, builder.guest_scripts()['app']).removeprefix('#cloud-config\n'))
+    app_env = next(f for f in app_config['write_files'] if f['path'] == '/etc/scenarioforge-installer.env')
+    assert 'PARTICIPANT_GATEWAY=10.254.200.2\n' in base64.b64decode(app_env['content']).decode()
+    _, net = builder.network_layout('participant', config, ['mac0', 'mac1'])
+    assert net['ethernets']['participant']['routes'][0]['via'] == '10.254.200.2'
+    assert net['ethernets']['participant']['addresses'] == ['10.254.200.10/24']
+    config['participant_gateway'] = '10.99.0.1'
+    with pytest.raises(ValueError, match='gateway'):
+        builder.network_layout('participant', config, ['mac0', 'mac1'])
 
 
 @pytest.mark.parametrize('role', ['core', 'app', 'participant'])

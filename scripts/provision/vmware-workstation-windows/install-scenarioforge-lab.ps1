@@ -19,6 +19,7 @@ param(
     [string]$PythonExe,
     [string]$QemuImg,
     [ValidateSet('debian', 'kali')][string]$ParticipantOS,
+    [string]$ParticipantGateway,
     [ValidateRange(20, 2147483647)][int]$CoreDiskGB,
     [ValidateRange(20, 2147483647)][int]$AppDiskGB,
     [ValidateRange(20, 2147483647)][int]$ParticipantDiskGB,
@@ -47,7 +48,8 @@ Import-Module (Join-Path $PSScriptRoot 'ScenarioForge.VMware.psm1') -Force -Disa
 
 function Read-InstallerConfig {
     param([string]$Path, [string]$ParticipantOSOverride,
-        [int]$CoreDiskGBOverride, [int]$AppDiskGBOverride, [int]$ParticipantDiskGBOverride)
+        [int]$CoreDiskGBOverride, [int]$AppDiskGBOverride, [int]$ParticipantDiskGBOverride,
+        [switch]$ReinstallDisksOnly, [string]$ParticipantGatewayOverride)
     $provided = @{}
     $config = @{
         lab_dir = $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Virtual Machines/ScenarioForge-Lab' } else { '' })
@@ -57,7 +59,7 @@ function Read-InstallerConfig {
         cyber_agent_flow = $false; cyber_agent_flow_url = 'https://github.com/raistlinJ/cyber-agent-flow.git'; cyber_agent_flow_ref = 'main'
         llm_provider_address = ''; llm_provider_url = ''; llm_provider_type = 'ollama_direct'; llm_model = ''
         llm_interface_cidr = ''; llm_gateway = ''; llm_vmnet = 'vmnet8'
-        participant_os = 'debian'; kali_image_url = ''; kali_sums_url = ''
+        participant_os = 'debian'; participant_gateway = ''; kali_image_url = ''; kali_sums_url = ''
         core_memory_mb = 8192; app_memory_mb = 4096; participant_memory_mb = 2048
         core_cores = 4; app_cores = 2; participant_cores = 2
         core_disk_gb = 80; app_disk_gb = 80; participant_disk_gb = 80
@@ -76,9 +78,21 @@ function Read-InstallerConfig {
     }
     if ($env:SF_PARTICIPANT_OS) { $config.participant_os = $env:SF_PARTICIPANT_OS }
     if ($ParticipantOSOverride) { $config.participant_os = $ParticipantOSOverride }
+    if ($env:SF_PARTICIPANT_GATEWAY) { $config.participant_gateway = $env:SF_PARTICIPANT_GATEWAY }
+    if ($ParticipantGatewayOverride) { $config.participant_gateway = $ParticipantGatewayOverride }
     foreach ($role in @('core', 'app', 'participant')) {
         $size = Get-Variable -Name "${role}DiskGBOverride" -ValueOnly
         if ($size -ne 0) { $config["${role}_disk_gb"] = $size }
+    }
+    if ($ReinstallDisksOnly) {
+        $overrides = @{}
+        foreach ($role in @('core', 'app', 'participant')) {
+            $key = "${role}_disk_gb"
+            if ($provided.ContainsKey($key) -or (Get-Variable -Name "${role}DiskGBOverride" -ValueOnly) -ne 0) {
+                $overrides[$key] = $config[$key]
+            }
+        }
+        return $overrides
     }
     if ($config.participant_os -cnotin @('debian', 'kali')) { throw 'participant_os must be debian or kali.' }
     return $config
@@ -113,7 +127,7 @@ function Assert-InstallerConfig {
         if ($Config[$key] -notmatch '^vmnet([1-7]|9|1[0-9])$') { throw "$key must be a custom vmnet1..19 network, excluding NAT vmnet8." }
     }
     if ($Config.management_vmnet -eq $Config.hitl_vmnet) { throw 'Management and HITL networks must differ.' }
-    foreach ($key in @('cyber_agent_flow_url', 'cyber_agent_flow_ref', 'llm_provider_address', 'llm_provider_url', 'llm_provider_type', 'llm_model', 'llm_interface_cidr', 'llm_gateway', 'llm_vmnet', 'participant_os', 'kali_image_url', 'kali_sums_url', 'lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
+    foreach ($key in @('cyber_agent_flow_url', 'cyber_agent_flow_ref', 'llm_provider_address', 'llm_provider_url', 'llm_provider_type', 'llm_model', 'llm_interface_cidr', 'llm_gateway', 'llm_vmnet', 'participant_os', 'participant_gateway', 'kali_image_url', 'kali_sums_url', 'lab_dir', 'vmware_dir', 'python_exe', 'qemu_img', 'git_exe', 'image_cache', 'ssh_public_key', 'core_minimal_ref', 'core_ref', 'scenarioforge_ref', 'flag_generators_ref', 'core_password', 'app_password', 'participant_password', 'web_admin_password')) {
         if ($Config[$key] -isnot [string] -or $Config[$key] -match '[\r\n\x00]') { throw "Invalid text value: $key" }
     }
     # Host VM files belong on a local Windows drive, not a UNC share or a drive root.
@@ -486,7 +500,8 @@ function Invoke-ReinstallBuild {
 }
 
 function Reinstall-LabVMs {
-    param($State, $Credentials, [string]$StateFile, [string]$Target, [switch]$Preview, [switch]$Confirmed, [switch]$RefreshImages)
+    param($State, $Credentials, [string]$StateFile, [string]$Target, [switch]$Preview, [switch]$Confirmed, [switch]$RefreshImages,
+        [hashtable]$DiskOverrides = @{})
     if ($Target -notin @('core', 'app', 'participant', 'all')) { throw 'Invalid reinstall target.' }
     $roles = if ($Target -eq 'all') { @('core', 'app', 'participant') } else { @($Target) }
     foreach ($role in $roles) {
@@ -497,6 +512,18 @@ function Reinstall-LabVMs {
         Write-Host "Reinstall scope: $role; its guest disk and data will be replaced."
     }
     $config = $State.Config.Clone()
+    foreach ($role in $roles) {
+        $key = "${role}_disk_gb"
+        if ($DiskOverrides.ContainsKey($key)) {
+            $size = $DiskOverrides[$key]
+            $minimum = if ($role -eq 'participant' -and $config.participant_os -eq 'kali') { 25 } else { 20 }
+            if (($size -isnot [int] -and $size -isnot [long]) -or $size -lt $minimum -or $size -gt 1048576) {
+                throw "Invalid ${key}: must be an integer between $minimum and 1048576."
+            }
+            $config[$key] = $size
+        }
+        Write-Host "Reinstall $role disk size: $($config[$key]) GB"
+    }
     $config.reinstall_roles = @($roles)
     $config.install_id = $State.InstallId
     foreach ($role in @('core', 'app', 'participant', 'web_admin')) {
@@ -541,6 +568,10 @@ function Reinstall-LabVMs {
         $State.ReinstallRoles = @($roles)
         $State.ReinstallWasComplete = $State.Complete
         $State.Complete = $false
+        foreach ($role in $roles) {
+            $key = "${role}_disk_gb"
+            if ($DiskOverrides.ContainsKey($key)) { $State.Config[$key] = $config[$key] }
+        }
         if ('participant' -in $roles) { $State.UplinkAttached = $true }
         Save-LabState $State $StateFile
         foreach ($role in $roles) {
@@ -570,14 +601,15 @@ function Invoke-Installer {
         Write-Host @'
 ScenarioForge VMware Workstation for Windows (PowerShell 7.4+)
   ./install-scenarioforge-lab.ps1 install [-ConfigFile lab.json] [-DryRun] [-Yes]
-  ./install-scenarioforge-lab.ps1 install -Reinstall core|app|participant|all [-DryRun] [-Yes]
+  ./install-scenarioforge-lab.ps1 install -Reinstall core|app|participant|all [-ConfigFile lab.json] [-DryRun] [-Yes]
   ./install-scenarioforge-lab.ps1 status [-Watch]
   ./install-scenarioforge-lab.ps1 resume [-NoWait]
   ./install-scenarioforge-lab.ps1 credentials
   ./install-scenarioforge-lab.ps1 cleanup [-DryRun] [-Force] [-Yes]
 Use -CyberAgentFlow with Kali and the grouped LLM settings in the example JSON.
 Overrides: -LabDir, -StateDir, -VmwareDir, -PythonExe, -QemuImg, -NoDesktopShortcut
-Disk sizes: -CoreDiskGB, -AppDiskGB, -ParticipantDiskGB (default: 80 each; new installs).
+Disk sizes: -CoreDiskGB, -AppDiskGB, -ParticipantDiskGB (default: 80 each; override on reinstall).
+HITL gateway: -ParticipantGateway IPv4 (default: 10.254.200.1; new installs).
 Desktop shortcuts default to enabled. Missing QEMU can be downloaded with confirmation.
 Use -ParticipantOS kali for a Kali XFCE participant with standard tools (2 GB RAM, 80 GB disk).
 HITL networking is created automatically when needed; use -NoManageHitlNetwork to require an existing vmnet.
@@ -595,7 +627,8 @@ See the adjacent README for prerequisites and isolated network configuration.
     if ($Reinstall) {
         if ($Command -ne 'install') { throw '-Reinstall is only valid with install.' }
         $state = Read-LabState $stateFile
-        Reinstall-LabVMs $state (Read-LabCredentials $StateDir) $stateFile $Reinstall -Preview:$DryRun -Confirmed:$Yes -RefreshImages:$Force
+        $diskOverrides = Read-InstallerConfig -Path $ConfigFile -CoreDiskGBOverride $CoreDiskGB -AppDiskGBOverride $AppDiskGB -ParticipantDiskGBOverride $ParticipantDiskGB -ReinstallDisksOnly
+        Reinstall-LabVMs $state (Read-LabCredentials $StateDir) $stateFile $Reinstall -Preview:$DryRun -Confirmed:$Yes -RefreshImages:$Force -DiskOverrides $diskOverrides
         return
     }
     if ($Command -ne 'install') {
@@ -629,7 +662,7 @@ See the adjacent README for prerequisites and isolated network configuration.
         } while ($true)
         return
     }
-    $config = Read-InstallerConfig $ConfigFile $ParticipantOS $CoreDiskGB $AppDiskGB $ParticipantDiskGB
+    $config = Read-InstallerConfig $ConfigFile $ParticipantOS $CoreDiskGB $AppDiskGB $ParticipantDiskGB -ParticipantGatewayOverride $ParticipantGateway
     foreach ($pair in @(@('LabDir', 'lab_dir'), @('VmwareDir', 'vmware_dir'), @('PythonExe', 'python_exe'), @('QemuImg', 'qemu_img'))) {
         $value = Get-Variable -Name $pair[0] -ValueOnly
         if ($value) { $config[$pair[1]] = $value }
