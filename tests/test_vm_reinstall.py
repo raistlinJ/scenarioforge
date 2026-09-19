@@ -284,9 +284,34 @@ def test_reinstall_flag_parsing(platform, target, valid):
         assert result.stdout.strip() == f'reinstall:{target}:1'
 
 
+@pytest.mark.parametrize('payload,code,expected', [
+    ('Total running VMs: 1\n/lab/participant.vmx', 0, 0),
+    ('Total running VMs: 1\n/lab/other.vmx', 0, 1),
+    ('Total running VMs: 0', 0, 1),
+    ('', 0, 2),
+    ('VMware unavailable', 0, 2),
+    ('Total running VMs: 0', 1, 2),
+])
+def test_reinstall_vmware_power_status_fails_closed(payload, code, expected):
+    script = f'''
+source {shlex.quote(str(COMMON / 'reinstall.sh'))}
+VMRUN_TYPE=ws
+timeout() {{ printf '%s\\n' {shlex.quote(payload)}; return {code}; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 2; }}
+if reinstall_vmware_running /lab/participant.vmx; then exit 0; else exit 1; fi
+'''
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+    assert result.returncode == expected, result.stderr
+    if expected == 2:
+        assert 'reinstall aborted before disk replacement' in result.stderr
+
+
 @pytest.mark.parametrize('platform', ['vmware-workstation-linux', 'vmware-fusion-mac'])
 @pytest.mark.parametrize('target', ['core', 'app', 'participant', 'all'])
-@pytest.mark.parametrize('mode', ['run', 'preview', 'bad_cache', 'unowned'])
+@pytest.mark.parametrize('mode', [
+    'run', 'preview', 'bad_cache', 'unowned', 'graceful', 'shutdown_timeout',
+    'late_shutdown', 'soft_pending', 'stop_failed', 'still_running', 'ownership_changed', 'status_failed',
+])
 def test_unix_reinstall_scope_and_preflight(tmp_path, platform, target, mode):
     installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'
     suffix = '.vmwarevm' if platform == 'vmware-fusion-mac' else ''
@@ -334,7 +359,39 @@ download_verified_image() {{ event "cache $4"; [[ {mode} != bad_cache ]]; }}
 write_vmware_cloud_init_files() {{ event seed-inputs; }}
 prepare_optional_content() {{ event catalogs; }}
 write_state() {{ event "state $INSTALL_COMPLETE $PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"; }}
-vm_running() {{ return 1; }}
+stopped_vms='|'
+shutdown_attempted=0
+test_epoch=1000
+date() {{ if [[ "$*" == +%s ]]; then echo "$test_epoch"; else command date "$@"; fi; }}
+sleep() {{ test_epoch=$(( test_epoch + 120 )); }}
+timeout() {{
+    # Exercise the real power-status parser and shutdown flow without VMware.
+    shift 4
+    local action="$1" vmx="${{2:-}}" kind="${{3:-}}" candidate
+    case "$action" in
+        list)
+            [[ {mode} != status_failed || "$shutdown_attempted" == 0 ]] || return 99
+            case {mode} in run|preview|bad_cache|unowned) echo 'Total running VMs: 0'; return ;; esac
+            local running=()
+            for candidate in "$CORE_VMX" "$APP_VMX" "$PARTICIPANT_VMX"; do
+                [[ "$stopped_vms" == *"|$candidate|"* ]] || running+=("$candidate")
+            done
+            printf 'Total running VMs: %s\\n' "${{#running[@]}}"
+            if (( ${{#running[@]}} )); then printf '%s\\n' "${{running[@]}}"; fi ;;
+        stop)
+            event "stop $kind $vmx"
+            if [[ "$kind" == soft ]]; then
+                shutdown_attempted=1
+                if [[ {mode} == ownership_changed ]]; then echo 'ownership removed' > "$vmx"; fi
+                if [[ {mode} == graceful || {mode} == late_shutdown ]]; then stopped_vms="$stopped_vms$vmx|"; fi
+                [[ {mode} == graceful || {mode} == soft_pending ]] || return 124
+            else
+                [[ {mode} != stop_failed ]] || return 1
+                if [[ {mode} != still_running ]]; then stopped_vms="$stopped_vms$vmx|"; fi
+            fi ;;
+        *) return 99 ;;
+    esac
+}}
 prepare_disk() {{ event "disk $2"; touch "$2"; }}
 create_seed_iso() {{ event "seed $1"; touch "$3"; }}
 append_guestinfo_cloud_init() {{ :; }}
@@ -345,12 +402,13 @@ detach_participant_uplink() {{ event detach; PARTICIPANT_BOOTSTRAP_UPLINK_ATTACH
 perform_reinstall
 '''
     result = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
-    assert (result.returncode == 0) == (mode in ('run', 'preview')), result.stderr
+    rebuild = mode in ('run', 'graceful', 'shutdown_timeout', 'late_shutdown', 'soft_pending')
+    assert (result.returncode == 0) == (rebuild or mode == 'preview'), result.stderr
     calls = events.read_text().splitlines() if events.exists() else []
     selected = ['core', 'app', 'participant'] if target == 'all' else [target]
     for role in ('core', 'app', 'participant'):
         directory = lab / (f'scenarioforge-{role}' + suffix)
-        rebuilt = mode == 'run' and role in selected
+        rebuilt = rebuild and role in selected
         assert (directory / 'original').exists() != rebuilt
         assert (f'wait {role}' in calls) == rebuilt
         if rebuilt:
@@ -359,9 +417,23 @@ perform_reinstall
             assert 'ethernet0.address = "00:50:56:00:00:10"' in vmx
             if role == 'participant':
                 assert 'ethernet1.connectionType = "nat"' in vmx
-    assert ('detach' in calls) == (mode == 'run' and 'participant' in selected)
-    assert ('catalogs' in calls) == (mode == 'run' and 'app' in selected)
-    if mode != 'run':
+    assert ('detach' in calls) == (rebuild and 'participant' in selected)
+    assert ('catalogs' in calls) == (mode not in ('preview', 'bad_cache', 'unowned') and 'app' in selected)
+    soft = [call.removeprefix('stop soft ') for call in calls if call.startswith('stop soft ')]
+    hard = [call.removeprefix('stop hard ') for call in calls if call.startswith('stop hard ')]
+    selected_paths = [str(lab / (f'scenarioforge-{role}' + suffix) / f'scenarioforge-{role}.vmx') for role in selected]
+    if mode in ('graceful', 'shutdown_timeout', 'late_shutdown', 'soft_pending'):
+        assert soft == selected_paths
+        assert hard == (selected_paths if mode in ('shutdown_timeout', 'soft_pending') else [])
+        first_state = next(i for i, call in enumerate(calls) if call.startswith('state '))
+        assert all(i < first_state for i, call in enumerate(calls) if call.startswith('stop '))
+    elif mode in ('stop_failed', 'still_running', 'ownership_changed', 'status_failed'):
+        assert soft == selected_paths[:1]
+        assert hard == (selected_paths[:1] if mode in ('stop_failed', 'still_running') else [])
+        assert any(message in result.stderr for message in ('Could not stop', 'still running', 'ownership changed', 'Could not read VMware power status'))
+    else:
+        assert soft == hard == []
+    if not rebuild:
         assert not any(call.startswith(('state ', 'start ', 'disk ')) for call in calls)
 
 

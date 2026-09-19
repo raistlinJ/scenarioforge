@@ -472,6 +472,12 @@ credentials and lab network settings. Other VMs and host networks are not
 recreated. The command asks you to type `REINSTALL`; `-Yes` accepts that
 replacement without prompting. Stop any active exercises first.
 
+After confirmation, reinstall gives each running selected VM 120 seconds to
+shut down gracefully. If it remains running, the installer rechecks ownership
+and requests a VMware hard stop before recreation. It verifies that all selected
+VMs are stopped before replacing any disks. A failed power-status query aborts
+reinstall. This shutdown timeout is separate from the guest provisioning timeout.
+
 Normal installation caches base images, and cleanup preserves that cache.
 Reinstall verifies the required images **before replacing any VM**. If an image is missing,
 it shows the download source and asks `Download and verify this image before

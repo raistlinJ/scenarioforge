@@ -127,6 +127,16 @@ reinstall_wait_for_guest() {
     done
 }
 
+reinstall_vmware_running() {
+    local target="$1" output header
+    output="$(timeout 30 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" list)" \
+        || die 'Could not read VMware power status; reinstall aborted before disk replacement'
+    header="${output%%$'\n'*}"
+    [[ "$header" =~ ^Total\ running\ VMs:[[:space:]]*[0-9]+$ ]] \
+        || die 'Invalid VMware power status; reinstall aborted before disk replacement'
+    tail -n +2 <<<"$output" | grep -Fxq -- "$target"
+}
+
 perform_reinstall() {
     local role prefix target directory name variable response settings old_complete deadline
     local -a selected_roles=()
@@ -211,13 +221,26 @@ PY
         prefix="$(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')"
         if [[ "${VMRUN_TYPE:-}" ]]; then
             target="${prefix}_VMX"; target="${!target}"
-            if vm_running "$target"; then
-                timeout 120 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" stop "$target" soft
+            if reinstall_vmware_running "$target"; then
+                log "Requesting a graceful shutdown of $role (timeout: 120 seconds)"
                 deadline=$(( $(date +%s) + 120 ))
-                while vm_running "$target"; do
-                    (( $(date +%s) < deadline )) || die "VM is still running: $target; shut it down and retry"
-                    sleep 2
-                done
+                if timeout 120 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" stop "$target" soft; then
+                    while reinstall_vmware_running "$target"; do
+                        (( $(date +%s) < deadline )) || break
+                        sleep 2
+                    done
+                else
+                    warn "$role did not shut down gracefully"
+                fi
+                if reinstall_vmware_running "$target"; then
+                    vmx_owned "$target" || die "VM ownership changed: $target"
+                    warn "Forcing $role to stop for the confirmed reinstall"
+                    timeout 120 "${FUSION_VMRUN:-vmrun}" -T "$VMRUN_TYPE" stop "$target" hard \
+                        || die "Could not stop VM: $target; reinstall aborted before disk replacement"
+                fi
+                if reinstall_vmware_running "$target"; then
+                    die "VM is still running: $target; reinstall aborted before disk replacement"
+                fi
             fi
         else
             target="${prefix}_VMID"; target="${!target}"

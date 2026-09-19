@@ -8,7 +8,7 @@ $temporary = Join-Path ([IO.Path]::GetTempPath()) ('sf-reinstall-test-' + [Guid]
 New-Item -ItemType Directory $temporary | Out-Null
 try {
     foreach ($target in @('core', 'app', 'participant', 'all')) {
-        foreach ($mode in @('run', 'preview', 'bad-cache', 'build-failure', 'unowned', 'still-running', 'force-run', 'force-preview', 'force-bad-cache')) {
+        foreach ($mode in @('run', 'preview', 'bad-cache', 'build-failure', 'unowned', 'still-running', 'graceful', 'shutdown-timeout', 'late-shutdown', 'soft-pending', 'stop-failed', 'ownership-changed', 'status-failed', 'force-run', 'force-preview', 'force-bad-cache')) {
             & {
                 $case = Join-Path $temporary "$target-$mode"
                 $refresh = $mode.StartsWith('force-')
@@ -25,7 +25,12 @@ try {
                     $state.VMs[$role] = @{ Path = $path }
                 }
                 $script:events = @()
-                function Test-OwnedVM { param($State, $Role) return $mode -ne 'unowned' }
+                $script:stopped = @()
+                $script:shutdownAttempted = $false
+                $script:ownershipChanged = $false
+                $rebuild = $mode -in @('run', 'graceful', 'shutdown-timeout', 'late-shutdown', 'soft-pending')
+                $selected = @(if ($target -eq 'all') { 'core'; 'app'; 'participant' } else { $target })
+                function Test-OwnedVM { param($State, $Role) return $mode -ne 'unowned' -and -not $script:ownershipChanged }
                 function Protect-LabDirectory { param($Path) New-Item -ItemType Directory $Path | Out-Null }
                 function Ensure-WorkstationStarted { param($State) $script:events += 'open' }
                 function Invoke-ReinstallBuild {
@@ -50,10 +55,37 @@ try {
                 function Save-LabState { param($State, $Path) $script:events += 'save' }
                 function Get-RunningVMs {
                     param($State)
-                    if ($mode -eq 'still-running') { return @($State.VMs.Values | ForEach-Object { $_.Path }) }
+                    if ($mode -eq 'status-failed' -and $script:shutdownAttempted) { throw 'Cannot read power status' }
+                    if ($mode -in @('graceful', 'shutdown-timeout', 'late-shutdown', 'soft-pending', 'still-running', 'stop-failed', 'ownership-changed', 'status-failed')) {
+                        return @($State.VMs.Values | ForEach-Object { $_.Path } | Where-Object { $_ -notin $script:stopped })
+                    }
                     return @()
                 }
-                function Invoke-HostCommand { param($File, $Arguments, $TimeoutSeconds) $script:events += 'stop' }
+                function Start-Sleep {
+                    param($Seconds)
+                    # Advance the caller's deadline without waiting two minutes.
+                    Set-Variable -Name deadline -Value ([DateTime]::UtcNow.AddSeconds(-1)) -Scope 1
+                }
+                function Invoke-HostCommand {
+                    param($File, $Arguments, $TimeoutSeconds)
+                    Assert ($Arguments[2] -eq 'stop') 'Only stop commands expected'
+                    $path = $Arguments[3]
+                    $kind = $Arguments[4]
+                    $role = @($state.VMs.Keys | Where-Object { $state.VMs[$_].Path -eq $path })[0]
+                    Assert ($role -in $selected) 'Never stop unselected VMs'
+                    Assert ($TimeoutSeconds -eq 120) 'Shutdown commands must be bounded'
+                    $script:events += "stop:${kind}:$role"
+                    if ($kind -eq 'soft') {
+                        $script:shutdownAttempted = $true
+                        if ($mode -eq 'ownership-changed') { $script:ownershipChanged = $true }
+                        if ($mode -in @('graceful', 'late-shutdown')) { $script:stopped += $path }
+                        if ($mode -notin @('graceful', 'soft-pending')) { throw 'Graceful shutdown timed out' }
+                    } else {
+                        Assert ($kind -eq 'hard') 'Fallback must use hard stop'
+                        if ($mode -eq 'stop-failed') { throw 'Hard stop failed' }
+                        if ($mode -ne 'still-running') { $script:stopped += $path }
+                    }
+                }
                 function Complete-LabSetup {
                     param($State, $Credentials, $StateFile)
                     $script:events += 'complete'
@@ -64,12 +96,26 @@ try {
                 $failed = $false
                 try { Reinstall-LabVMs $state $credentials (Join-Path $case 'state.json') $target -Preview:($mode -eq 'preview') -Confirmed -RefreshImages:$refresh }
                 catch { $failed = $true }
-                Assert ($failed -eq ($mode -notin @('run', 'preview'))) "Unexpected result: $target $mode"
+                Assert ($failed -eq (-not $rebuild -and $mode -ne 'preview')) "Unexpected result: $target $mode"
                 foreach ($role in @('core', 'app', 'participant')) {
-                    $expected = if ($mode -eq 'run' -and ($target -eq $role -or $target -eq 'all')) { 'replacement' } else { 'original' }
+                    $expected = if ($rebuild -and ($target -eq $role -or $target -eq 'all')) { 'replacement' } else { 'original' }
                     Assert ((Get-Content $state.VMs[$role].Path) -eq $expected) "Preserve scope: $target $mode $role"
                 }
-                if ($mode -ne 'run') { Assert ('save' -notin $script:events -and 'complete' -notin $script:events) 'Failed preflight must not change state' }
+                if (-not $rebuild) { Assert ('save' -notin $script:events -and 'complete' -notin $script:events) 'Failed preflight must not change state' }
+                $stops = @($script:events | Where-Object { $_ -like 'stop:*' })
+                $expectedStops = @()
+                if ($mode -in @('graceful', 'shutdown-timeout', 'late-shutdown', 'soft-pending')) {
+                    foreach ($role in $selected) {
+                        $expectedStops += "stop:soft:$role"
+                        if ($mode -in @('shutdown-timeout', 'soft-pending')) { $expectedStops += "stop:hard:$role" }
+                    }
+                    $firstSave = [Array]::IndexOf($script:events, 'save')
+                    foreach ($stop in $expectedStops) { Assert ([Array]::IndexOf($script:events, $stop) -lt $firstSave) 'All guests stop before replacement' }
+                } elseif ($mode -in @('stop-failed', 'still-running', 'ownership-changed', 'status-failed')) {
+                    $expectedStops += "stop:soft:$($selected[0])"
+                    if ($mode -in @('stop-failed', 'still-running')) { $expectedStops += "stop:hard:$($selected[0])" }
+                }
+                Assert (($stops -join ',') -eq ($expectedStops -join ',')) "Unexpected shutdown sequence: $target $mode"
                 if ($mode -eq 'preview') { Assert (($script:events -join ',') -eq 'cache') 'Preview only checks cache' }
             }
         }

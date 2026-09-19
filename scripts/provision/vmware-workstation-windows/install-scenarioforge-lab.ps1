@@ -518,8 +518,24 @@ function Reinstall-LabVMs {
         foreach ($role in $roles) {
             if (-not (Test-OwnedVM $State $role)) { throw "VM ownership changed: $role" }
             if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) {
-                Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'stop', $State.VMs[$role].Path, 'soft') -TimeoutSeconds 120 | Out-Null
-                if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) { throw "$role is still running; shut it down and retry." }
+                Write-Host "Requesting a graceful shutdown of $role (timeout: 120 seconds)"
+                $deadline = [DateTime]::UtcNow.AddSeconds(120)
+                try {
+                    Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'stop', $State.VMs[$role].Path, 'soft') -TimeoutSeconds 120 | Out-Null
+                } catch {
+                    Write-Warning "$role did not shut down gracefully: $_"
+                    $deadline = [DateTime]::UtcNow
+                }
+                while (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) {
+                    if ([DateTime]::UtcNow -ge $deadline) { break }
+                    Start-Sleep -Seconds 2
+                }
+                if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) {
+                    if (-not (Test-OwnedVM $State $role)) { throw "VM ownership changed: $role" }
+                    Write-Warning "Forcing $role to stop for the confirmed reinstall"
+                    Invoke-HostCommand $State.Vmrun @('-T', 'ws', 'stop', $State.VMs[$role].Path, 'hard') -TimeoutSeconds 120 | Out-Null
+                }
+                if (@(Get-RunningVMs $State) -contains $State.VMs[$role].Path) { throw "$role is still running; reinstall aborted before disk replacement." }
             }
         }
         $State.ReinstallRoles = @($roles)
