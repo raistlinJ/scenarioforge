@@ -55,7 +55,7 @@ flag_generators=true
 vulnhub=true
 
 # --- Provisioning wait behavior ---
-wait_minutes=90
+wait_minutes=180
 no_wait=false
 
 # --- VM display and host shortcuts ---

@@ -436,7 +436,7 @@ The commonly useful settings are:
 | `SF_VMWARE_MANAGEMENT_VMNET` | `vmnet1` |
 | `SF_VMWARE_HITL_VMNET` | `vmnet2` |
 | `SF_IMAGE_CACHE` | `~/.cache/scenarioforge-vmware-lab/images` |
-| `SF_WAIT_MINUTES` | `90` |
+| `SF_WAIT_MINUTES` | `180` |
 | `SF_VERBOSE` | `0` |
 | `SF_CORE_MEMORY_MB` / `SF_CORE_CORES` / `SF_CORE_DISK_GB` | `8192` / `4` / `80` |
 | `SF_APP_MEMORY_MB` / `SF_APP_CORES` / `SF_APP_DISK_GB` | `4096` / `2` / `80` |

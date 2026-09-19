@@ -71,7 +71,7 @@ KALI_SUMS_URL="${SF_KALI_SUMS_URL:-https://kali.download/cloud-images/kali-2026.
 IMAGE_CACHE="${SF_IMAGE_CACHE:-/var/lib/vz/template/cache/scenarioforge}"
 
 SSH_PUBLIC_KEY_FILE="${SF_SSH_PUBLIC_KEY_FILE:-}"
-WAIT_MINUTES="${SF_WAIT_MINUTES:-90}"
+WAIT_MINUTES="${SF_WAIT_MINUTES:-180}"
 DRY_RUN=0
 ASSUME_YES=0
 WAIT_FOR_BOOTSTRAP=1
@@ -372,7 +372,7 @@ Important options:
   --web-admin-password PASS    Set the coreadmin Web UI password (default: generated)
   --flag-generators            Install raistlinJ/flag-generators catalogs on APP
   --vulnhub                    Install the repo's Vulhub vulnerability snapshot on APP
-  --wait-minutes N             Bootstrap timeout (default: 90)
+  --wait-minutes N             Bootstrap timeout (default: 180)
   --no-wait                    Return after the participant's temporary uplink is removed
   --verbose                    Show additional host command and download diagnostics
   --watch                      Keep printing status until all three guests are ready
@@ -2131,7 +2131,7 @@ guest_bootstrap_percent() {
 }
 
 guest_bootstrap_failure_text() {
-    local vmid="$1" phase cloud_state
+    local vmid="$1" phase cloud_state unit unit_state
     phase="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
     if [[ "$phase" == failed* ]]; then
         printf '%s\n' "$phase"
@@ -2140,6 +2140,20 @@ guest_bootstrap_failure_text() {
     cloud_state="$(guest_command_output "$vmid" systemctl show cloud-final --property ActiveState --value)"
     if [[ "$cloud_state" == "failed" ]]; then
         printf 'cloud-final failed while bootstrap phase was: %s\n' "${phase:-unknown}"
+        return
+    fi
+    # After the Kali kernel handoff, cloud-final no longer owns provisioning.
+    # A service failure (including failure to execute the bootstrap script) can
+    # leave the last saved phase at 80% without triggering the script's ERR trap.
+    if [[ "$vmid" == "$PARTICIPANT_VMID" ]]; then
+        for unit in scenarioforge-participant-bootstrap.service scenarioforge-participant-reboot.service; do
+            unit_state="$(guest_command_output "$vmid" systemctl show "$unit" --property ActiveState --value)"
+            if [[ "$unit_state" == failed ]]; then
+                printf '%s failed while bootstrap phase was: %s; inspect journalctl -u %s in the participant VM\n' \
+                    "$unit" "${phase:-unknown}" "$unit"
+                return
+            fi
+        done
     fi
 }
 

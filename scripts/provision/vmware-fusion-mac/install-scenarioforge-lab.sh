@@ -158,7 +158,7 @@ Important options:
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
   --flag-generators           install raistlinJ flag-generator catalogs on APP
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
-  --wait-minutes N            bootstrap timeout (default: 90)
+  --wait-minutes N            bootstrap timeout (default: 180)
   --no-wait                   return after participant isolation is complete
   --desktop-shortcut          create a host desktop browser shortcut (default)
   --no-desktop-shortcut       skip the host desktop browser shortcut

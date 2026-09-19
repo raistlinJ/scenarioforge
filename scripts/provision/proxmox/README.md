@@ -153,7 +153,9 @@ sudo scripts/provision/proxmox/install-scenarioforge-lab.sh install --verbose
 The confirmation prompt requires typing `INSTALL`. Use `--yes` for an
 unattended invocation. CORE, ScenarioForge, and the participant desktop build
 concurrently and commonly take 20–60 minutes depending on the node and Internet
-connection. The default timeout is 90 minutes.
+connection. The default timeout is 180 minutes (three hours) to allow for
+Kali tool downloads, package installation, and the kernel reboot. Override it
+with `--wait-minutes N` or `wait_minutes=N` in your config file.
 
 ### Config file
 
@@ -488,7 +490,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_FLAG_GENERATORS_REF` | `5f612eecb8ff5df74a0e517d0de1e54385a62044` (tested metadata snapshot) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
-| `SF_WAIT_MINUTES` | `90` |
+| `SF_WAIT_MINUTES` | `180` |
 | `SF_VERBOSE` | `0` (`1` enables verbose diagnostics) |
 | `SF_STATUS_INTERVAL` | `10` seconds |
 
@@ -762,6 +764,22 @@ setup and remove it after readiness succeeds. Reinstall waits for the selected
 guests even when the original installation used the no-wait option. On failure,
 check the guest console and bootstrap log; a participant that fails setup keeps
 its temporary NAT adapter for diagnosis.
+
+If a Kali participant stays at `80%: rebooting into the full Kali kernel`, the
+message is the last saved bootstrap phase, not confirmation that it is still
+rebooting. Inspect the running kernel, resume service, and bootstrap log from
+the Proxmox host (replace `9403` with your participant VMID):
+
+```bash
+qm guest exec 9403 -- bash -lc 'uname -r; uptime; systemctl status scenarioforge-participant-bootstrap.service scenarioforge-participant-reboot.service scenarioforge-participant-reboot.timer cloud-final.service --no-pager -l; tail -n 80 /var/log/scenarioforge-participant-bootstrap.log'
+qm guest exec 9403 -- journalctl -b -u scenarioforge-participant-bootstrap.service -u scenarioforge-participant-reboot.service --no-pager -n 100
+```
+
+If the guest agent is unavailable, run the commands after `--` in the participant
+console as root. The host detects failed reboot/resume services as well as
+Cloud-Init failures. A unit that never started may still require checking the
+boot journal. Preserve this evidence before retrying `--reinstall participant`,
+which recreates the VM rather than resuming the retained guest.
 
 Use the same state directory as the original installation. Its default is
 `/etc/scenarioforge-lab`; if you originally set `SCENARIOFORGE_LAB_STATE_DIR`, set it to

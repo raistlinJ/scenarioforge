@@ -4,7 +4,7 @@
   "management_vmnet": "vmnet1",
   "hitl_vmnet": "vmnet2",
   "desktop_shortcut": true,
-  "wait_minutes": 90,
+  "wait_minutes": 180,
   "no_wait": false,
   "core_memory_mb": 8192,
   "app_memory_mb": 4096,

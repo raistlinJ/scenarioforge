@@ -53,7 +53,7 @@ function Read-InstallerConfig {
         lab_dir = $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Virtual Machines/ScenarioForge-Lab' } else { '' })
         vmware_dir = ''; python_exe = ''; qemu_img = ''; git_exe = ''
         image_cache = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'ScenarioForge/image-cache' } else { '' }); management_vmnet = 'vmnet1'; hitl_vmnet = 'vmnet2'
-        desktop_shortcut = $true; no_wait = $false; wait_minutes = 90; manage_hitl_network = $true
+        desktop_shortcut = $true; no_wait = $false; wait_minutes = 180; manage_hitl_network = $true
         cyber_agent_flow = $false; cyber_agent_flow_url = 'https://github.com/raistlinJ/cyber-agent-flow.git'; cyber_agent_flow_ref = 'main'
         llm_provider_address = ''; llm_provider_url = ''; llm_provider_type = 'ollama_direct'; llm_model = ''
         llm_interface_cidr = ''; llm_gateway = ''; llm_vmnet = 'vmnet8'

@@ -451,21 +451,29 @@ show_completion_credentials
         assert expected in result.stdout
 
 
-def test_guest_cloud_init_failure_is_reported_from_a_stale_phase() -> None:
+@pytest.mark.parametrize('failed_unit', [
+    'cloud-final',
+    'scenarioforge-participant-bootstrap.service',
+    'scenarioforge-participant-reboot.service',
+    '',
+])
+@pytest.mark.parametrize('vmid', ['9401', '9403'])
+def test_guest_service_failure_is_reported_from_a_stale_phase(failed_unit, vmid) -> None:
     probe = f"""
 source {shlex.quote(str(INSTALLER))}
+PARTICIPANT_VMID=9403
 guest_command_output() {{
     shift
     case "$*" in
         'cat /var/lib/scenarioforge/bootstrap-status')
-            printf '%s\\n' 'waiting for core-daemon gRPC on 0.0.0.0:50051'
+            printf '%s\\n' 'rebooting into the full Kali kernel'
             ;;
-        'systemctl show cloud-final --property ActiveState --value')
+        'systemctl show {failed_unit} --property ActiveState --value')
             printf '%s\\n' failed
             ;;
     esac
 }}
-guest_bootstrap_failure_text 9401
+guest_bootstrap_failure_text {vmid}
 """
     result = subprocess.run(
         ["bash", "-c", probe],
@@ -474,8 +482,15 @@ guest_bootstrap_failure_text 9401
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "cloud-final failed while bootstrap phase was" in result.stdout
-    assert "waiting for core-daemon gRPC" in result.stdout
+    if failed_unit == 'cloud-final' or (failed_unit and vmid == '9403'):
+        assert f"{failed_unit} failed while bootstrap phase was" in result.stdout
+        assert "rebooting into the full Kali kernel" in result.stdout
+        if failed_unit != 'cloud-final':
+            assert f"journalctl -u {failed_unit}" in result.stdout
+    else:
+        # Missing units / an unavailable agent must not become false failures,
+        # and participant service state must not affect CORE or APP.
+        assert result.stdout == ''
 
 
 def test_status_watch_waits_for_fresh_install_state(tmp_path: Path) -> None:

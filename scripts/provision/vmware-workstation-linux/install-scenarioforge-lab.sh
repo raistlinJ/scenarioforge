@@ -87,7 +87,7 @@ UBUNTU_IMAGE_URL="${SF_UBUNTU_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/c
 UBUNTU_SUMS_URL="${SF_UBUNTU_SUMS_URL:-https://cloud-images.ubuntu.com/noble/current/SHA256SUMS}"
 
 SSH_PUBLIC_KEY_FILE="${SF_SSH_PUBLIC_KEY_FILE:-}"
-WAIT_MINUTES="${SF_WAIT_MINUTES:-90}"
+WAIT_MINUTES="${SF_WAIT_MINUTES:-180}"
 STATUS_INTERVAL="${SF_STATUS_INTERVAL:-10}"
 COMMAND=install
 DRY_RUN=0
@@ -185,7 +185,7 @@ Important options:
   --web-admin-password PASS   set the coreadmin Web UI password (default: generated)
   --flag-generators           install raistlinJ flag-generator catalogs on APP
   --vulnhub                   install the repo's Vulhub vulnerability snapshot on APP
-  --wait-minutes N            bootstrap timeout (default: 90)
+  --wait-minutes N            bootstrap timeout (default: 180)
   --no-wait                   return after participant isolation is complete
   --desktop-shortcut          create host browser and participant VM shortcuts (default)
   --no-desktop-shortcut       skip both host desktop shortcuts
