@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import importlib.util
 import io
 import json
@@ -9,9 +10,22 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / 'scripts/provision/common'
+
+
+def assert_current_bootstrap(user_data, role):
+    source = (COMMON.parent / 'proxmox/install-scenarioforge-lab.sh').read_text()
+    delimiter = role.upper() + '_SCRIPT'
+    expected = source.split(f"<<'{delimiter}'\n", 1)[1].split(f'\n{delimiter}\n', 1)[0] + '\n'
+    payload = yaml.safe_load(user_data)
+    entry = next(item for item in payload['write_files']
+                 if item['path'] == f'/usr/local/sbin/scenarioforge-{role}-bootstrap')
+    assert base64.b64decode(entry['content']).decode() == expected
+
+
 spec = importlib.util.spec_from_file_location('reinstall_cache', COMMON / 'image_cache.py')
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
@@ -356,7 +370,9 @@ event() {{ printf '%s\\n' "$*" >> {shlex.quote(str(events))}; }}
 load_state() {{ :; }}
 require_linux_workstation() {{ :; }}
 download_verified_image() {{ event "cache $4"; [[ {mode} != bad_cache ]]; }}
-write_vmware_cloud_init_files() {{ event seed-inputs; }}
+if [[ {mode} != run ]]; then
+    write_vmware_cloud_init_files() {{ event seed-inputs; }}
+fi
 prepare_optional_content() {{ event catalogs; }}
 write_state() {{ event "state $INSTALL_COMPLETE $PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"; }}
 stopped_vms='|'
@@ -393,7 +409,10 @@ timeout() {{
     esac
 }}
 prepare_disk() {{ event "disk $2"; touch "$2"; }}
-create_seed_iso() {{ event "seed $1"; touch "$3"; }}
+create_seed_iso() {{
+    event "seed $1"; touch "$3"
+    if [[ {mode} == run ]]; then cp "$WORK_DIR/$1-user.yaml" "${{3%/*}}/current-user.yaml"; fi
+}}
 append_guestinfo_cloud_init() {{ :; }}
 start_vm() {{ event "start $1"; }}
 transfer_optional_content_to_app() {{ event transfer; }}
@@ -412,6 +431,8 @@ perform_reinstall
         assert (directory / 'original').exists() != rebuilt
         assert (f'wait {role}' in calls) == rebuilt
         if rebuilt:
+            if mode == 'run':
+                assert_current_bootstrap((directory / 'current-user.yaml').read_text(), role)
             vmx = (directory / f'scenarioforge-{role}.vmx').read_text()
             assert 'memsize = "4096"' in vmx
             assert 'ethernet0.address = "00:50:56:00:00:10"' in vmx
@@ -507,12 +528,14 @@ qm() {{
 }}
 download_verified_image() {{ event cache; [[ {mode} != bad_cache ]]; }}
 prepare_optional_content() {{ event catalogs; }}
-write_guest_bootstraps() {{ :; }}
-write_cloud_init_files() {{
-    for role in core app participant; do
-        for kind in user network; do echo replacement > "$WORK_DIR/$role-$kind.yaml"; done
-    done
-}}
+if [[ {mode} != run ]]; then
+    write_guest_bootstraps() {{ :; }}
+    write_cloud_init_files() {{
+        for role in core app participant; do
+            for kind in user network; do echo replacement > "$WORK_DIR/$role-$kind.yaml"; done
+        done
+    }}
+fi
 write_state() {{ event state; }}
 transfer_optional_content_to_app() {{ event transfer; }}
 reinstall_wait_for_guest() {{ event "wait $1"; }}
@@ -530,7 +553,13 @@ perform_reinstall
         assert (f'qm start {vmid}' in calls) == replaced
         for kind in ('user', 'network'):
             text = (snippets / f'scenarioforge-{role}-{kind}.yaml').read_text()
-            assert text == ('replacement\n' if replaced else 'original')
+            if replaced and mode == 'run':
+                if kind == 'user':
+                    assert_current_bootstrap(text, role)
+                else:
+                    assert yaml.safe_load(text)['version'] == 2
+            else:
+                assert text == ('replacement\n' if replaced else 'original')
     assert ('detach' in calls) == (rebuild and 'participant' in selected)
     shutdown_vmids = [call.split()[2] for call in calls if call.startswith('qm shutdown ')]
     stop_vmids = [call.split()[2] for call in calls if call.startswith('qm stop ')]

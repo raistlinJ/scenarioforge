@@ -540,6 +540,7 @@ function Reinstall-LabVMs {
         if (-not $Confirmed -and (Read-Host 'Type REINSTALL to erase and recreate the selected VMs') -cne 'REINSTALL') { throw 'Reinstall canceled.' }
         Ensure-WorkstationStarted $State
         $config.lab_dir = $stage
+        Write-Host "Generating fresh guest configuration and bootstrap scripts from the current checkout for: $($roles -join ', ')"
         Invoke-ReinstallBuild $config $requestFile
         # Build every replacement before stopping or deleting any existing VM.
         foreach ($role in $roles) {

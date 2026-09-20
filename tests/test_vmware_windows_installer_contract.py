@@ -199,6 +199,10 @@ def test_reinstall_builder_only_builds_selected_vm_from_cache(config, tmp_path, 
             (lab / f'scenarioforge-{other}/keep').write_text('original')
     builder.prepare_images(config, tmp_path)
     assert len(calls) == 1
+    seed = read_iso(lab / f'scenarioforge-{role}/scenarioforge-{role}-cidata.iso')
+    bootstrap = next(f for f in seed['user-data']['write_files']
+                     if f['path'] == f'/usr/local/sbin/scenarioforge-{role}-bootstrap')
+    assert base64.b64decode(bootstrap['content']).decode() == builder.guest_scripts()[role]
     for other in ('core', 'app', 'participant'):
         directory = lab / f'scenarioforge-{other}'
         assert (directory / 'keep').exists() == (other != role)

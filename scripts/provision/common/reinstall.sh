@@ -222,6 +222,7 @@ PY
         [[ "$response" == REINSTALL ]] || die 'Reinstall canceled'
     fi
     if reinstall_selects app; then prepare_optional_content; fi
+    log "Generating fresh guest configuration and bootstrap scripts from the current checkout for: ${selected_roles[*]}"
     if [[ "${VMRUN_TYPE:-}" ]]; then
         write_vmware_cloud_init_files
     else

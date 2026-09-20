@@ -531,6 +531,18 @@ resize existing VMs; reinstall retains the saved/existing disk sizes.
 
 ## Reinstall selected VMs using cached images
 
+All three roles—CORE, APP, and participant—receive freshly generated Cloud-Init
+configuration and bootstrap scripts from the provisioner's current repository
+checkout. Run `git pull --ff-only` in that checkout before reinstalling to pick
+up the latest provisioning changes. Reinstall does not update the host checkout
+automatically or reuse a previous guest's bootstrap/Cloud-Init files. Cached
+base images remain reusable; they do not determine which setup scripts run.
+
+CORE reruns its CORE installation and ScenarioForge service setup; APP reruns
+its application/dependency setup and writes `.scenarioforge.env`; participant
+reruns its selected software setup. All retain saved lab settings and repository
+refs: a branch fetches its current code, while a pinned version stays pinned.
+
 Use `--reinstall core`, `--reinstall app`, `--reinstall participant`, or `--reinstall all` to rebuild selected guests with the current provisioning scripts:
 
 Run on the provision host from the repository root, using the same account as
