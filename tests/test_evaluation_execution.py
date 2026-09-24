@@ -150,3 +150,17 @@ const fetch = async path => {
 '''
     result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_execute_eval_options_stay_on_coordinator(monkeypatch):
+    monkeypatch.setattr('sys.argv', ['cli.py', 'execute', '--xml', 'local.xml',
+        '--evaluation-export', '--evaluation-output-dir', '/private/output',
+        '--eval-allow', '10.77.0.0/24', '--eval-disallow=10.77.0.1/32',
+        '--suite-id', 'example-suite', '--evaluation-tasks', '/private/tasks.json',
+        '--eval-split', 'validation'])
+    tokens = cli._build_remote_cli_tokens(remote_xml_path='/remote/scenario.xml',
+        remote_preview_plan_path=None, remote_host='localhost', remote_port=50051)
+    assert '/remote/scenario.xml' in tokens
+    for private in ['--evaluation-export', '--evaluation-output-dir', '/private/output',
+                    '10.77.0.0/24', '--eval-disallow=10.77.0.1/32', 'example-suite', '/private/tasks.json', 'validation']:
+        assert private not in tokens
