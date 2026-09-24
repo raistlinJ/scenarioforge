@@ -1785,6 +1785,16 @@ PARTICIPANT_SCRIPT
         "$WORK_DIR/participant-bootstrap.sh"
 }
 
+# Proxmox PCI slots retain their interface names when a clone gets new MACs.
+# VMware shares this generator but requires explicit MAC-based renaming.
+network_interface_match() {
+    if [[ -n "${VMRUN_TYPE:-}" ]]; then
+        printf "    match: {macaddress: '%s'}\n    set-name: %s\n" "$1" "$2"
+    else
+        printf "    match: {name: '%s'}\n" "$2"
+    fi
+}
+
 write_cloud_init_files() {
     resolve_participant_gateway
     local core_password_hash app_password_hash participant_password_hash standard_public_key app_public_key
@@ -1935,20 +1945,18 @@ EOF
 version: 2
 ethernets:
   management:
-    match: {macaddress: '$CORE_NET0_MAC'}
-    set-name: ens18
+$(network_interface_match "$CORE_NET0_MAC" ens18)
     addresses: [$CORE_MANAGEMENT_CIDR]
   hitl:
-    match: {macaddress: '$CORE_NET1_MAC'}
-    set-name: ens19
+$(network_interface_match "$CORE_NET1_MAC" ens19)
     dhcp4: false
     dhcp6: false
     accept-ra: false
     optional: true
   uplink:
-    match: {macaddress: '$CORE_NET2_MAC'}
-    set-name: ens20
+$(network_interface_match "$CORE_NET2_MAC" ens20)
     dhcp4: true
+    dhcp-identifier: mac
     dhcp6: false
 EOF
 
@@ -1956,13 +1964,12 @@ EOF
 version: 2
 ethernets:
   uplink:
-    match: {macaddress: '$APP_NET0_MAC'}
-    set-name: ens18
+$(network_interface_match "$APP_NET0_MAC" ens18)
     dhcp4: true
+    dhcp-identifier: mac
     dhcp6: false
   management:
-    match: {macaddress: '$APP_NET1_MAC'}
-    set-name: ens19
+$(network_interface_match "$APP_NET1_MAC" ens19)
     addresses: [$APP_MANAGEMENT_CIDR]
 EOF
 
@@ -1970,8 +1977,7 @@ EOF
 version: 2
 ethernets:
   participant:
-    match: {macaddress: '$PARTICIPANT_NET0_MAC'}
-    set-name: ens18
+$(network_interface_match "$PARTICIPANT_NET0_MAC" ens18)
     addresses: [$PARTICIPANT_CIDR]
     # Prefer temporary NAT during bootstrap; use the CORE HITL router after detach.
     routes:
@@ -1982,9 +1988,9 @@ ethernets:
     dhcp6: false
     accept-ra: false
   bootstrap-uplink:
-    match: {macaddress: '$PARTICIPANT_NET1_MAC'}
-    set-name: ens19
+$(network_interface_match "$PARTICIPANT_NET1_MAC" ens19)
     dhcp4: true
+    dhcp-identifier: mac
     dhcp6: false
 EOF
 }
@@ -2947,7 +2953,7 @@ perform_install() {
     write_guest_bootstraps
     if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
     write_cloud_init_files
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name ens20 >> "$WORK_DIR/participant-network.yaml"; fi
     install_snippets
 
     progress 38 "Creating the CORE, ScenarioForge, and participant VMs"

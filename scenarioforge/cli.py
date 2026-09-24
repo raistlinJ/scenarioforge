@@ -4,6 +4,7 @@ import base64
 from copy import deepcopy
 import datetime
 import fnmatch
+import hashlib
 import importlib
 import json
 import logging
@@ -4465,10 +4466,13 @@ _POST_EXECUTION_VALIDATION_OPTIONS = {
 _CHECK_ARTIFACTS_OPTIONS = {
     '-check-artifacts',
     '--check-artifacts',
+    '--evaluation-export',
 }
 # Flags that take a value, so the value token has to be dropped as well.
 _CHECK_ARTIFACTS_VALUE_OPTIONS = {
     '--check-artifacts-delay',
+    '--evaluation-output-dir', '--eval-allow', '--eval-disallow',
+    '--evaluation-tasks', '--suite-id', '--readiness-report', '--eval-split',
 }
 
 _POST_EXECUTION_ERROR_FIELDS = (
@@ -5215,6 +5219,9 @@ def _print_artifact_check_summary(
             for c in checks
         ],
     }
+    for key in ('status', 'xml_sha256', 'checked_at', 'core_host', 'session_confirmed'):
+        if key in payload:
+            marker_payload[key] = payload[key]
     if error_text:
         marker_payload['error'] = error_text
     print(
@@ -5284,6 +5291,10 @@ def _run_cli_artifact_checks(
     scenario_name = str(getattr(args, 'scenario', '') or '').strip() or None
     xml_path = os.path.abspath(str(getattr(args, 'xml', '') or '').strip()) if getattr(args, 'xml', '') else ''
 
+    from pathlib import Path
+    initial_xml_hash = hashlib.sha256(Path(xml_path).read_bytes()).hexdigest() if xml_path and Path(xml_path).is_file() else None
+    session_confirmed = False
+
     resolved_sid, source = _resolve_cli_check_session_id(
         backend, session_id=session_id, scenario_name=scenario_name, core_cfg=core_cfg,
     )
@@ -5319,6 +5330,7 @@ def _run_cli_artifact_checks(
                 live_ids.append(int((entry or {}).get('id')))
             except Exception:
                 continue
+        session_confirmed = int(resolved_sid) in live_ids
         if live_ids and int(resolved_sid) not in live_ids:
             known = ', '.join(str(i) for i in sorted(live_ids)) or 'none'
             return _print_artifact_check_summary(
@@ -5389,6 +5401,10 @@ def _run_cli_artifact_checks(
         }
     payload.setdefault('scenario', scenario_name or '')
     payload.setdefault('session_id', resolved_sid)
+    final_xml_hash = hashlib.sha256(Path(xml_path).read_bytes()).hexdigest() if xml_path and Path(xml_path).is_file() else None
+    payload.update(xml_sha256=final_xml_hash if final_xml_hash == initial_xml_hash else None,
+                   checked_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                   core_host=str(core_cfg.get('host') or 'localhost'), session_confirmed=session_confirmed)
     return _print_artifact_check_summary(payload, strict=strict, stream=target)
 
 
@@ -6130,7 +6146,7 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
         # The remote CLI never sees these flags (they are stripped from the
         # delegated command), so the checks run here, where the backend and the
         # SSH session already exist.
-        if bool(getattr(args, 'check_artifacts', False)):
+        if bool(getattr(args, 'check_artifacts', False)) and not bool(getattr(args, 'evaluation_export', False)):
             checks_ok = _run_cli_artifact_checks(
                 backend=backend,
                 args=args,
@@ -6141,6 +6157,9 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
                 stream=progress_stream,
             )
             if not checks_ok:
+                return 1
+        if bool(getattr(args, 'evaluation_export', False)):
+            if not _post_execution_evaluation(args, backend=backend, core_cfg=core_cfg, session_id=session_id_int, stream=progress_stream):
                 return 1
         return 0
     finally:
@@ -7518,6 +7537,69 @@ def _run_flag_sequencing_phase(args: Any) -> int:
     return 0 if status_code < 400 else 1
 
 
+def _post_execution_evaluation(args, *, backend, core_cfg, session_id, stream=None):
+    from pathlib import Path
+    from .evaluation.execution import build_execution_package
+    try:
+        if getattr(args, 'readiness_report', None):
+            raise ValueError('execute collects fresh readiness; --readiness-report is for standalone evaluation-export')
+        suite_id = getattr(args, 'suite_id', None) or 'eval-' + uuid.uuid4().hex[:20]
+        output = getattr(args, 'evaluation_output_dir', None) or str(Path(args.xml).resolve().parent / 'evaluation-packages' / suite_id)
+        definitions = json.loads(Path(args.evaluation_tasks).read_text()) if getattr(args, 'evaluation_tasks', None) else None
+        result = build_execution_package(backend=backend, xml_path=args.xml, scenario=args.scenario,
+            session_id=session_id, core_cfg=core_cfg, output=output, suite_id=suite_id,
+            allow=getattr(args, 'eval_allow', None) or None,
+            disallow=getattr(args, 'eval_disallow', None) or [], definitions=definitions,
+            split=getattr(args, 'eval_split', 'development'))
+        print('EVALUATION_PACKAGE_JSON: ' + json.dumps(result), file=stream or sys.stdout, flush=True)
+        return bool(result['readiness_passed'])
+    except Exception as exc:
+        logging.error('Evaluation package generation failed: %s', exc)
+        return False
+
+
+def _add_cli_evaluation_args(container: Any) -> None:
+    container.add_argument('--evaluation-export', action='store_true', help='After successful execute, check readiness and generate an evaluation package and ZIP')
+    container.add_argument('--evaluation-output-dir', help='New directory for execute-time evaluation output (default: beside saved XML)')
+    container.add_argument('--suite-id', help='Stable evaluation suite identifier')
+    container.add_argument('--evaluation-tasks', help='Reviewed JSON task definitions; default: one complete flag-collection task')
+    container.add_argument('--readiness-report', help='JSON or captured check-artifacts stdout from this deployment')
+    container.add_argument('--eval-allow', action='append', default=[], help='Allowed evaluation targets (repeatable); required for standalone export, defaults to graph host addresses after execute')
+    container.add_argument('--eval-disallow', action='append', default=[], help='Participant excluded IP/CIDR (repeatable)')
+    container.add_argument('--eval-split', choices=['development', 'validation', 'test'], default='development')
+
+
+def _run_evaluation_export_phase(args: Any) -> int:
+    from pathlib import Path
+    from .evaluation.export import export_package, read_readiness
+    try:
+        if not args.suite_id or not args.output_dir:
+            raise ValueError('evaluation-export requires --suite-id and --output-dir')
+        backend = _load_web_backend_module()
+        xml_path = os.path.abspath(args.xml)
+        scenario = _cli_phase_scenario(args, backend=backend)
+        state = _flow_state_from_xml(xml_path, scenario)
+        if not isinstance(state, dict) or not state.get('chain'):
+            raise ValueError('No resolved saved chain. Run flag-sequencing first.')
+        graph = backend._attack_graph_for_chain(chain_nodes=state['chain'], scenario_label=scenario,
+                                                flag_assignments=state.get('flag_assignments', []))
+        definitions = json.loads(Path(args.evaluation_tasks).read_text()) if args.evaluation_tasks else None
+        readiness = read_readiness(args.readiness_report) if args.readiness_report else None
+        manifest = export_package(xml_path=xml_path, graph=graph, output=args.output_dir,
+                                  suite_id=args.suite_id, allow=args.eval_allow, disallow=args.eval_disallow,
+                                  definitions=definitions, split=args.eval_split,
+                                  readiness=readiness, session_id=args.session_id)
+        result = {'ok': True, 'phase': 'evaluation-export', 'suite_id': manifest['id'],
+                  'package_hash': manifest['package_hash'], 'output': str(Path(args.output_dir).resolve()),
+                  'readiness_attached': readiness is not None}
+    except Exception as exc:
+        _emit_phase_json({'ok': False, 'phase': 'evaluation-export', 'error': str(exc)},
+                         output_path=args.plan_output, stream=sys.stderr)
+        return 1
+    _emit_phase_json(result, output_path=args.plan_output)
+    return 0
+
+
 def _add_cli_guide_args(container: Any) -> None:
     container.add_argument('--guide-audience', choices=['both', 'facilitator', 'participant'], default='both', help='Guides to export (default: both)')
     container.add_argument('--guide-format', choices=['both', 'html', 'markdown'], default='both', help='Guide output format (default: both)')
@@ -7815,7 +7897,7 @@ def _run_attack_graph_phase(args: Any) -> int:
     return 0
 
 
-CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'guides', 'topo', 'check-artifacts', 'list-sessions')
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'guides', 'evaluation-export', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -7886,7 +7968,7 @@ def _add_cli_phase_arg(container: Any) -> None:
         nargs='?',
         choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, guides, topo, check-artifacts, or list-sessions',
+        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, guides, evaluation-export, topo, check-artifacts, or list-sessions',
     )
 
 
@@ -8455,6 +8537,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     _add_cli_attack_graph_args(ap, include_force=False)
     _add_cli_artifact_check_args(ap)
     _add_cli_guide_args(ap)
+    _add_cli_evaluation_args(ap)
     return ap
 
 
@@ -8486,6 +8569,10 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase == 'flag-sequencing':
         _add_cli_core_connection_args(ap)
         _add_cli_flag_sequencing_args(ap)
+    elif phase == 'evaluation-export':
+        _add_cli_evaluation_args(ap)
+        ap.add_argument('--output-dir', required=True, help='New evaluation package directory')
+        ap.add_argument('--session-id', type=int, help='CORE session identity')
     elif phase == 'guides':
         _add_cli_guide_args(ap)
         ap.add_argument('--output-dir', help='Output directory (default: guides beside XML)')
@@ -8498,6 +8585,7 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
         _add_cli_execute_topo_args(ap)
         if phase == 'execute':
             _add_cli_artifact_check_args(ap)
+            _add_cli_evaluation_args(ap)
     elif phase == 'check-artifacts':
         _add_cli_core_connection_args(ap)
         _add_cli_artifact_check_args(ap)
@@ -8522,6 +8610,8 @@ def main():
                 action.required = False
     args = ap.parse_args()
     _configure_cli_logging(args)
+    if args.phase == 'evaluation-export':
+        return _run_evaluation_export_phase(args)
 
     # Remote SSH runner may provide sudo password on stdin; make it available to
     # docker-invoking subprocesses (e.g. flag-node-generators) via env.
@@ -11243,6 +11333,7 @@ def main():
     if (
         args.phase == 'execute'
         and bool(getattr(args, 'check_artifacts', False))
+        and not bool(getattr(args, 'evaluation_export', False))
         and session_id is not None
     ):
         if backend_for_cli is None:
@@ -11266,6 +11357,13 @@ def main():
             strict=bool(getattr(args, 'strict', False)),
         )
         if not checks_ok:
+            return 1
+    if args.phase == 'execute' and bool(getattr(args, 'evaluation_export', False)):
+        if backend_for_cli is None or session_id is None:
+            logging.error('Evaluation export requires the WebUI backend and a resolved CORE session ID')
+            return 1
+        _, eval_core_cfg, _ = _resolve_cli_core_context(args, backend=backend_for_cli, scenario_name=args.scenario)
+        if not _post_execution_evaluation(args, backend=backend_for_cli, core_cfg=eval_core_cfg, session_id=session_id):
             return 1
     return 0
 

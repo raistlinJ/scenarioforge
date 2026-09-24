@@ -252,6 +252,8 @@ def cloud_config(role, config, script, checksum='', commit=''):
 
 def network_layout(role, config, macs):
     def nic(index, name, **settings):
+        if settings.get('dhcp4'):
+            settings['dhcp-identifier'] = 'mac'
         return {'match': {'macaddress': macs[index]}, 'set-name': name, **settings}
     if role == 'core':
         networks = [('custom', config['management_vmnet']), ('custom', config['hitl_vmnet']), ('nat', '')]

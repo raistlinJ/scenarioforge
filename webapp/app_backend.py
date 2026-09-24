@@ -46285,6 +46285,12 @@ except Exception:
         pass
 
 
+from webapp.evaluation_artifacts import EvaluationArtifacts
+_execution_evaluation_artifacts = EvaluationArtifacts(sys.modules[__name__])
+from webapp.routes import evaluation_artifacts as _evaluation_artifact_routes
+_evaluation_artifact_routes.register(app, backend=sys.modules[__name__], artifacts=_execution_evaluation_artifacts)
+
+
 try:
     from webapp.routes import async_run_monitor as _async_run_monitor_routes
 
@@ -46326,6 +46332,7 @@ try:
         normalize_core_config_public=lambda cfg: _normalize_core_config(cfg, include_password=False),
         sse_marker_prefix=_SSE_MARKER_PREFIX,
         download_report_endpoint='download_report',
+        schedule_evaluation_artifact=lambda **kwargs: _execution_evaluation_artifacts.schedule(**kwargs),
     )
 except Exception:
     try:

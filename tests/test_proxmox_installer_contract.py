@@ -766,6 +766,8 @@ source {installer!s}
 WORK_DIR={tmp_path!s}
 parse_args install --participant-os {participant_os}
 CORE_HITL_CIDR={core_hitl_cidr}
+CORE_MANAGEMENT_CIDR=172.31.250.3/24
+APP_MANAGEMENT_CIDR=172.31.250.2/24
 PARTICIPANT_CIDR={participant_cidr}
 PARTICIPANT_GATEWAY={override}
 SSH_PUBLIC_KEY_FILE={shlex.quote(str(user_key))}
@@ -797,6 +799,25 @@ write_cloud_init_files
         {"to": "0.0.0.0/0", "via": gateway, "metric": 2000}
     ]
     assert network["bootstrap-uplink"]["dhcp4"] is True
+
+    for role in ('core', 'app', 'participant'):
+        interfaces = yaml.safe_load((tmp_path / f'{role}-network.yaml').read_text())['ethernets']
+        for nic in interfaces.values():
+            if platform == 'proxmox':
+                assert nic['match']['name'] in ('ens18', 'ens19', 'ens20')
+                assert 'macaddress' not in nic['match']
+                assert 'set-name' not in nic
+            else:
+                assert 'macaddress' in nic['match']
+                assert 'set-name' in nic
+        uplink = interfaces['bootstrap-uplink' if role == 'participant' else 'uplink']
+        assert uplink['dhcp4'] is True
+        assert 'addresses' not in uplink
+        assert uplink['dhcp-identifier'] == 'mac'
+        if role != 'participant':
+            assert interfaces['management']['addresses']
+        else:
+            assert interfaces['participant']['addresses'] == [participant_cidr]
 
     core_user = yaml.safe_load((tmp_path / "core-user.yaml").read_text(encoding="utf-8"))
     app_user = yaml.safe_load((tmp_path / "app-user.yaml").read_text(encoding="utf-8"))

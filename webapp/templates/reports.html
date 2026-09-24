@@ -103,6 +103,9 @@
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Attack Graph (pdf)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Participant Steps Guide (html)</a></li>
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Facilitator Guide (html)</a></li>
+                      {% if r.run_id %}
+                      <li><a class="dropdown-item report-download-action" href="#" data-kind="evaluation-package" data-run-id="{{ r.run_id|e }}" data-scenario="{{ row_scenario|e }}">Evaluation package (ZIP)</a></li>
+                      {% endif %}
                       <li><a class="dropdown-item report-download-action" href="#" data-kind="solutions-script" data-scenario="{{ row_scenario|e }}" data-preview-plan="{{ (r.preview_plan_path or '')|e }}" data-xml-path="{{ (r.scenario_xml_path or '')|e }}">Solutions Script (sh)</a></li>
                       {% endif %}
                     </ul>
@@ -278,6 +281,7 @@ function reportDownloadLabel(kind){
     'attack-graph-pdf': 'Attack Graph (.pdf)',
     'participant-guide': 'Participant Steps Guide',
     'facilitator-guide': 'Facilitator Guide',
+    'evaluation-package': 'Evaluation package',
     'solutions-script': 'Solutions Script',
   };
   return labels[String(kind || '').trim()] || 'download';
@@ -337,6 +341,7 @@ function buildReportDownloadsHtml(r){
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="attack-graph-pdf"${attrs}>Attack Graph (pdf)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="participant-guide"${attrs}>Participant Steps Guide (html)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="facilitator-guide"${attrs}>Facilitator Guide (html)</a></li>`;
+    if (r.run_id) items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="evaluation-package" data-run-id="${escapeHtml(r.run_id)}"${attrs}>Evaluation package (ZIP)</a></li>`;
     items += `<li><a class="dropdown-item report-download-action" href="#" data-kind="solutions-script"${attrs}>Solutions Script (sh)</a></li>`;
   }
   return `<div class="dropdown"><button class="btn btn-sm btn-outline-secondary dropdown-toggle text-nowrap" type="button" data-bs-toggle="dropdown" aria-expanded="false">Download</button><ul class="dropdown-menu">${items}</ul></div>`;
@@ -2609,6 +2614,28 @@ async function handleReportDownloadAction(link) {
   const previewPlanPath = String(link.dataset.previewPlan || '').trim();
   const xmlPath = String(link.dataset.xmlPath || '').trim();
   if (!kind || !scenario) throw new Error('Missing report export context.');
+  if (kind === 'evaluation-package') {
+    const runId = String(link.dataset.runId || '');
+    if (!runId) throw new Error('Missing execution ID.');
+    const endpoint = `/api/reports/${encodeURIComponent(runId)}/evaluation`;
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const response = await fetch(endpoint, { cache: 'no-store' });
+      const status = await response.json();
+      if (!response.ok) throw new Error(status.error || 'Evaluation export unavailable.');
+      if (status.state === 'preparing') {
+        setReportGenerationStatus('Checking deployment and preparing evaluation package…');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (status.state !== 'complete') throw new Error(status.message || 'Execute the scenario to generate its evaluation package.');
+      const archive = await fetch(`${endpoint}/download`, { cache: 'no-store' });
+      if (!archive.ok) throw new Error('Could not download evaluation package.');
+      await startReportArtifactDownload(await archive.blob(), `${status.suite_id}.zip`, 'Evaluation package');
+      if (!status.readiness_passed) window.alert('The package was downloaded, but readiness checks did not pass. The evaluation runner will refuse execution until you collect passing checks and export a new package.');
+      return;
+    }
+    throw new Error('Evaluation generation is still running. Try the download again shortly.');
+  }
   setReportGenerationStatus('Loading saved Flow data…');
   const preview = await fetchReportFlowPreview(scenario, previewPlanPath, xmlPath);
   const chain = Array.isArray(preview.chain) ? preview.chain : [];

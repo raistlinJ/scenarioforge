@@ -87,6 +87,7 @@ def test_async_run_status_reapplies_core_secret_before_postrun_save_xml(tmp_path
         normalize_core_config_public=lambda cfg: cfg,
         sse_marker_prefix="SSEMARK",
         download_report_endpoint="download_report",
+        schedule_evaluation_artifact=lambda **kwargs: captured.update(evaluation=kwargs),
     )
 
     client = app.test_client()
@@ -95,6 +96,9 @@ def test_async_run_status_reapplies_core_secret_before_postrun_save_xml(tmp_path
     assert resp.status_code == 200
     assert captured["cfg"]["host"] == "10.10.10.20"
     assert captured["cfg"]["ssh_host"] == "10.10.10.20"
+    assert captured["evaluation"]["session_id"] == "1"
+    assert captured["evaluation"]["run_id"] == "run-1"
+    assert captured["evaluation"]["core_cfg"]["host"] == "10.10.10.20"
 
 
 def test_async_run_status_retries_postrun_flow_copy_for_completed_success(tmp_path):

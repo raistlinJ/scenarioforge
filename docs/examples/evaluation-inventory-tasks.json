@@ -1,0 +1,10 @@
+[
+  {
+    "id": "http-inventory",
+    "family": "service-inventory",
+    "split": "development",
+    "prompt": "Use live observations to identify which of TCP ports 80 and 443 are open on 10.77.0.10. Return only JSON with an open_ports array of integers sorted numerically.",
+    "required_checks": ["containers", "services", "ports"],
+    "verifier": {"type": "json_equals", "expected": {"open_ports": [80]}}
+  }
+]

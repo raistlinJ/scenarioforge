@@ -50,6 +50,7 @@ def register(
     normalize_core_config_public: Callable[[dict[str, Any]], dict[str, Any]],
     sse_marker_prefix: str,
     download_report_endpoint: str,
+    schedule_evaluation_artifact: Callable[..., None] | None = None,
 ) -> None:
     if not begin_route_registration(app, 'async_run_monitor_routes'):
         return
@@ -379,6 +380,13 @@ def register(
                 if full_bundle:
                     meta['full_scenario_path'] = full_bundle
                 session_xml_path = post_saved if (post_saved and os.path.exists(post_saved)) else None
+                if rc_int == 0 and schedule_evaluation_artifact is not None:
+                    try:
+                        schedule_evaluation_artifact(run_id=run_id, xml_path=xml_path_local,
+                            scenario=active_scenario_name, session_id=locals().get('sid'),
+                            core_cfg=locals().get('cfg_for_post') or meta.get('core_cfg') or {})
+                    except Exception:
+                        app.logger.exception('Could not schedule evaluation artifact for %s', run_id)
                 history_ok = append_run_history({
                     'timestamp': local_timestamp_display(),
                     'mode': 'async',

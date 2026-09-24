@@ -1,5 +1,11 @@
 # ScenarioForge lab on VMware Workstation for Windows
 
+APP and CORE internet uplinks and the participant's temporary bootstrap uplink
+use DHCP with each NIC's MAC as the client identifier. Lab management and
+participant addresses remain static. VMware keeps MAC-based NIC matching and
+renaming; changing a VM's MACs also requires updating its cloud-init network
+configuration. These settings apply to newly provisioned VMs and reinstalls.
+
 Omit both `llm_interface_cidr` and `llm_gateway` for automatic DHCP on the
 dedicated LLM interface. The selected vmnet must provide DHCP. The guest ignores
 DHCP default routes and DNS settings and maintains only a route to the provider

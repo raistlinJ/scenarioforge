@@ -229,7 +229,7 @@ PY
         write_guest_bootstraps
         if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
         write_cloud_init_files
-        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
+        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name ens20 >> "$WORK_DIR/participant-network.yaml"; fi
     fi
     # All selected VMs, credentials, cached images and provisioning inputs have
     # passed preflight before the first guest is stopped or removed.

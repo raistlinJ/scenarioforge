@@ -160,6 +160,10 @@ def test_network_layout_matches_guest_interfaces(config):
         macs = [f'00:50:56:00:00:{i:02x}' for i in range(count)]
         networks, net = builder.network_layout(role, config, macs)
         assert len(networks) == count
+        uplink = net['ethernets']['bootstrap-uplink' if role == 'participant' else 'uplink']
+        assert uplink['dhcp4'] is True
+        assert uplink['dhcp-identifier'] == 'mac'
+        assert 'addresses' not in uplink
         interfaces = list(net['ethernets'].values())
         assert [nic['match']['macaddress'] for nic in interfaces] == macs
         assert [nic['set-name'] for nic in interfaces] == ['ens' + str(18 + i) for i in range(count)]

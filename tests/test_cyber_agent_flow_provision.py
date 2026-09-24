@@ -46,6 +46,7 @@ def test_automatic_dhcp_ignores_general_routes_and_installs_route_service(config
     config.update(llm_interface_cidr='', llm_gateway='')
     nic = caf.interface(config, 'mac')
     assert nic['dhcp4'] is True
+    assert nic['dhcp-identifier'] == 'mac'
     assert nic['dhcp4-overrides']['use-routes'] is False
     assert nic['dhcp4-overrides']['use-dns'] is False
     assert 'routes' not in nic
@@ -107,12 +108,17 @@ validate_caf >&2
 WORK_DIR={shlex.quote(str(tmp_path))}
 write_guest_bootstraps
 caf_generate inject "$WORK_DIR/participant-bootstrap.sh"
-caf_generate network 00:50:56:01:02:03
+caf_generate network 00:50:56:01:02:03 {'--match-name ens20' if platform == 'proxmox' else ''}
 '''
     result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     network = json.loads(result.stdout.strip().removeprefix('llm: '))
     assert network['routes'][0]['to'] == '203.0.113.20/32'
+    if platform == 'proxmox':
+        assert network['match'] == {'name': 'ens20'}
+        assert 'set-name' not in network
+    else:
+        assert network['match'] == {'macaddress': '00:50:56:01:02:03'}
     generated = (tmp_path / 'participant-bootstrap.sh').read_text()
     assert '/opt/cyber-agent-flow' in generated
     subprocess.run(['bash', '-n', str(tmp_path / 'participant-bootstrap.sh')], check=True)

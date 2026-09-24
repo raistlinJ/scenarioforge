@@ -249,6 +249,11 @@ def register(
         entry['preview_plan_path'] = preview_path or ''
         return entry
 
+    def _private_evaluation_path(path):
+        root = os.path.realpath(os.path.join(outputs_dir(), 'evaluation-packages'))
+        target = os.path.realpath(path)
+        return target == root or target.startswith(root + os.sep)
+
     @app.route('/download_report')
     def download_report():
         result_path = request.args.get('path')
@@ -309,6 +314,8 @@ def register(
                 chosen = p
                 break
         if chosen:
+            if _private_evaluation_path(chosen):
+                return jsonify(error='Use the authorized evaluation artifact download'), 403
             try:
                 if log is not None:
                     log.info("[download] serving file: %s", os.path.abspath(chosen))
@@ -362,6 +369,8 @@ def register(
                             log.info("[download] basename match: %s -> %s", base_name, chosen_alt)
                     except Exception:
                         pass
+                    if _private_evaluation_path(chosen_alt):
+                        return jsonify(error='Use the authorized evaluation artifact download'), 403
                     return send_file(chosen_alt, as_attachment=True)
         except Exception:
             pass

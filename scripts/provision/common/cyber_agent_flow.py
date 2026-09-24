@@ -61,7 +61,8 @@ def interface(config, mac):
     c = validate(config)
     if not c['llm_interface_cidr']:
         return {'match': {'macaddress': mac}, 'set-name': 'ens20',
-                'dhcp4': True, 'dhcp6': False, 'accept-ra': False, 'link-local': [],
+                'dhcp4': True, 'dhcp6': False, 'dhcp-identifier': 'mac',
+                'accept-ra': False, 'link-local': [],
                 'dhcp4-overrides': {'use-routes': False, 'use-dns': False, 'use-domains': False,
                                     'use-ntp': False, 'use-hostname': False, 'send-hostname': False}}
     provider = ipaddress.IPv4Address(c['llm_provider_address'])
@@ -238,10 +239,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['validate', 'inject', 'network'])
     parser.add_argument('value', nargs='?')
+    parser.add_argument('--match-name', help='Match a stable Proxmox interface name instead of a MAC')
     args = parser.parse_args()
     c = from_environment()
     if args.action == 'inject' and c['cyber_agent_flow']:
         path = Path(args.value)
         path.write_text(inject(path.read_text(), c))
     elif args.action == 'network' and c['cyber_agent_flow']:
-        print('  llm: ' + json.dumps(interface(c, args.value)))
+        nic = interface(c, args.value)
+        if args.match_name:
+            nic['match'] = {'name': args.match_name}
+            nic.pop('set-name', None)
+        print('  llm: ' + json.dumps(nic))

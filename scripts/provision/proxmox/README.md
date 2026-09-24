@@ -18,6 +18,25 @@ Management uses a separate bridge and explicit guest CIDRs; it does not derive
 addresses from the Proxmox host uplink. Both guest management CIDRs must share a
 subnet. This server installer does not create desktop shortcuts on your workstation.
 
+Proxmox network configuration matches stable interface names (`ens18`, `ens19`,
+`ens20`), so clones with the same virtual NIC layout keep their static lab IPs
+when Proxmox assigns new MAC addresses. APP and CORE uplinks on `uplink_bridge`
+(default `vmbr0`) use DHCP, as does the participant's temporary bootstrap uplink.
+DHCP uses each NIC's MAC as its client identifier so clones with new MACs do not
+reuse a DHCP identity inherited in the guest image.
+Separate cloned labs must use separate management and HITL bridges/VLANs when
+reusing the same static addresses. Keep the NIC order and virtual hardware layout
+unchanged. The optional LLM NIC also matches by name; its DHCP/static setting is
+still controlled by the LLM configuration above.
+
+This applies to newly provisioned VMs and reinstalls. For an existing template,
+update its custom network snippet and the guest's saved network configuration:
+replace each MAC match and `set-name` pair with `match: {name: ens18}` (using that
+NIC's actual name). Preserve all addresses, DHCP settings, and routes. Confirm
+names with `ip -br link` from the guest console before editing, then reboot and
+verify networking before making new clones. Do not run a reinstall merely to
+update an existing template; reinstall recreates the selected VM.
+
 `install-scenarioforge-lab.sh` provisions the recommended ScenarioForge VM-mode
 lab on one Proxmox VE node:
 

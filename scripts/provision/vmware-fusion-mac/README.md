@@ -1,5 +1,11 @@
 # ScenarioForge three-VM installer for VMware Fusion on macOS
 
+APP and CORE internet uplinks and the participant's temporary bootstrap uplink
+use DHCP with each NIC's MAC as the client identifier. Lab management and
+participant addresses remain static. VMware keeps MAC-based NIC matching and
+renaming; changing a VM's MACs also requires updating its cloud-init network
+configuration. These settings apply to newly provisioned VMs and reinstalls.
+
 CyberAgentFlow provisioning installs and verifies the guest Python environment,
 Docker, Docker Compose (`docker compose` and `docker-compose`), and the native
 Claude Code CLI before marking the participant ready. It creates a **CyberAgentFlow Web** launcher on the

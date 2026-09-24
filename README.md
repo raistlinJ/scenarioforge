@@ -341,6 +341,10 @@ uv run catalog-rest-batch-test --target all --scope all \
 
 The `catalog-rest-batch-test` scope names match the Web UI filters (`untested`, `failed`, `all`) and writes JSON exports under `outputs/catalog-rest-batch-tests/`. CORE VM connection info can be passed via `--core-json`, `--core-secret-id`, or discrete `--core-host`/`--core-port`/`--core-ssh-host`/`--core-ssh-port`/`--core-ssh-username`/`--core-ssh-password`/`--core-venv-bin` flags; in VM mode (`CORETG_WEBUI_MODE=vm`) it can also fall back to `.scenarioforge.env`. See [docs/CATALOG_BATCH_TESTING.md](docs/CATALOG_BATCH_TESTING.md#native-and-vm-mode).
 
+### Evaluation suites for artifact comparisons
+
+Successful WebUI executions prepare an **Evaluation package (ZIP)** under **Reports → Download**. CLI users can request it with `execute --evaluation-export`, or export separately with `evaluation-export`. Packages include participant tasks, private verifiers, attack-graph provenance, and deployment readiness evidence for CyberAgentFlow. See [the evaluation export workflow](docs/EVALUATION_EXPORT.md).
+
 ### CLI: create a lab and export its guides
 
 Run from the repository root after installing the Python environment and configuring
