@@ -3,7 +3,12 @@
 `evaluation-export` produces a versioned package for the question: **does a frozen
 generated artifact improve agent task performance?** The package supplies common
 tasks and evaluator-only answers. CyberAgentFlow supplies model configuration,
-artifact/tool conditions, budgets, repetitions, execution, and dataset export.
+artifact/tool conditions, budgets, repetitions, execution, and dataset export through
+the **cyber-agent-flow-eval project** (`cyber-agent-flow-eval`), configured with
+`engine.path` pointing to the CAF checkout and optional `engine.python`. CAF's main application
+handles interactive sessions, analysis, artifact generation, repair and tests. The
+evaluator consumes selected artifacts and shares the agent engine/tool modules;
+it does not launch the main WebUI or generate artifacts during a trial.
 There are no dynamic hints, model calls, or artifact-generation steps in this export.
 
 ## Generate with scenario execution
@@ -15,7 +20,9 @@ Evaluation package (ZIP)**. The download waits for generation to finish. It is
 available to administrators and builders authorized for that scenario, and contains
 evaluator-only answers: do not distribute the complete ZIP to participants.
 
-The WebUI default creates a whole-scenario flag task. CAF owns execution scope:
+Without saved task definitions, the WebUI default creates a whole-scenario flag task.
+Saved `FlowState.evaluation_tasks` supplies authored tasks to automatic export.
+CAF's evaluation YAML owns execution scope:
 configure allow/disallow only in the CAF evaluation YAML. ScenarioForge exports
 objectives and topology, not execution permissions. Scenarios need resolved flags
 and addresses for the default task. Older executions require a new execution or
@@ -126,16 +133,17 @@ This example's addresses and answer are illustrative, not discovered facts about
 your deployment. Readiness validates environment prerequisites; expected service
 answers must still be reviewed against deployed truth.
 
-On Kali, copy the complete package to a coordinator-owned location. From
-CyberAgentFlow, use its separate Python environment:
+On Kali, copy the complete package to a coordinator-owned location. From the
+cyber-agent-flow-eval checkout, use its environment and configure `engine.path`
+(and optionally `engine.python`) to point at the CAF installation:
 
 ```bash
-venv/bin/python -m experiments import-suite /path/to/training-dev-v1 \
+.venv/bin/cyber-agent-flow-eval import-suite /path/to/training-dev-v1 \
   --config configs/experiments/scenarioforge-observational.yaml \
   --output configs/experiments/training-dev-v1.yaml
 
-venv/bin/python -m experiments plan configs/experiments/training-dev-v1.yaml
-venv/bin/python -m experiments run configs/experiments/training-dev-v1.yaml \
+.venv/bin/cyber-agent-flow-eval plan configs/experiments/training-dev-v1.yaml
+.venv/bin/cyber-agent-flow-eval run configs/experiments/training-dev-v1.yaml \
   --output eval-runs/training-dev-v1
 ```
 
@@ -205,9 +213,10 @@ participant values; author the starting values explicitly in the evaluation task
 
 The task contract records evidence provenance; it does not install the clue or prove
 the entire discovery path is solvable. Install/configure the generator and verify
-the injected file, access prerequisites, and routing in CORE. The WebUI automatic
-export still uses the ordinary default task; use the CLI to export authored discovery
-tasks from a WebUI-deployed scenario.
+the injected file, access prerequisites, and routing in CORE. WebUI automatic export
+uses saved `FlowState.evaluation_tasks` when present, otherwise the ordinary default
+task. An external task JSON file can be supplied to the CLI for a scenario deployed
+from either interface.
 
 CAF retains its private execution policy and refuses policy disclosure for discovery
 suites. Its artifact checks also reject literal hidden facts and hidden-subnet IPv4

@@ -345,6 +345,14 @@ The `catalog-rest-batch-test` scope names match the Web UI filters (`untested`, 
 
 Successful WebUI executions prepare an **Evaluation package (ZIP)** under **Reports → Download**. CLI users can request it with `execute --evaluation-export`, or export separately with `evaluation-export`. Packages include participant tasks, private verifiers, attack-graph provenance, and deployment readiness evidence for CyberAgentFlow. See [the evaluation export workflow](docs/EVALUATION_EXPORT.md).
 
+The consumer is CAF's **separate evaluation CLI**, which shares the main app's agent
+engine but owns trial configuration, scoring and datasets. The main CAF app creates,
+repairs and tests reusable artifacts before they are selected for evaluation.
+Version 3 packages support explicit starting/discoverable facts; guides and graphs
+include starting knowledge while discovery participant briefings omit hidden targets.
+CAF retains its own allow/disallow settings. In the air-gapped lab, manually transfer
+the ZIP from app-vm to participant-vm; target traffic goes through CORE's HITL network.
+
 ### CLI: create a lab and export its guides
 
 Run from the repository root after installing the Python environment and configuring
