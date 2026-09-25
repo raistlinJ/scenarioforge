@@ -1073,6 +1073,50 @@ fail_bootstrap() {
 trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
+# The cloud kernel omits mouse/USB drivers needed by the graphical console.
+# Finish this handoff before building CORE or declaring the guest ready.
+if [[ "$(uname -r)" == *cloud* ]]; then
+    [[ ! -f /var/lib/scenarioforge/core-kernel-reboot ]] \
+        || fail_bootstrap 'CORE did not boot the standard kernel after reboot'
+    set_bootstrap_status 2 'installing the standard kernel for CORE desktop input'
+    architecture="$(dpkg --print-architecture)"
+    case "$architecture" in amd64|arm64) ;; *) fail_bootstrap 'unsupported CORE architecture' ;; esac
+    apt-get update
+    apt-get install -y "linux-image-$architecture"
+    kernel="$(find /boot -maxdepth 1 -name "vmlinuz-*-$architecture" ! -name '*cloud*' | sort -V | tail -n 1)"
+    [[ -n "$kernel" ]] || fail_bootstrap 'standard CORE kernel was not installed'
+    install -d /etc/default/grub.d
+    # Select the newest standard kernel whenever update-grub runs. Do not rely
+    # on GRUB_TOP_LEVEL: older GRUB versions in Debian images lack that option.
+    cat > /etc/default/grub.d/99-scenarioforge-core-kernel.cfg <<'CORE_GRUB'
+scenarioforge_architecture="$(dpkg --print-architecture)"
+scenarioforge_kernel="$(find /boot -maxdepth 1 -name "vmlinuz-*-$scenarioforge_architecture" ! -name '*cloud*' | sort -V | tail -n 1)"
+if [ -n "$scenarioforge_kernel" ]; then
+    GRUB_DISABLE_SUBMENU=false
+    GRUB_DEFAULT="Advanced options for Debian GNU/Linux>Debian GNU/Linux, with Linux ${scenarioforge_kernel#/boot/vmlinuz-}"
+fi
+unset scenarioforge_architecture scenarioforge_kernel
+CORE_GRUB
+    update-grub
+    cat > /etc/systemd/system/scenarioforge-core-bootstrap.service <<'CORE_UNIT'
+[Unit]
+Description=Finish ScenarioForge CORE provisioning after kernel reboot
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/usr/local/sbin/scenarioforge-core-bootstrap
+[Install]
+WantedBy=multi-user.target
+CORE_UNIT
+    systemctl daemon-reload
+    systemctl enable scenarioforge-core-bootstrap.service
+    touch /var/lib/scenarioforge/core-kernel-reboot
+    set_bootstrap_status 3 'rebooting into the standard CORE kernel'
+    systemd-run --unit=scenarioforge-core-reboot --on-active=10s /usr/bin/systemctl reboot
+    exit 0
+fi
 set_bootstrap_status 5 'preparing coreemu-minimal source installer'
 install -d -m 0755 /opt/bootstrap
 if [[ ! -d /opt/bootstrap/coreemu-minimal/.git ]]; then
@@ -1202,6 +1246,9 @@ if ! systemctl is-active --quiet lightdm; then
 fi
 command -v core-gui >/dev/null
 
+if [[ -f /etc/systemd/system/scenarioforge-core-bootstrap.service ]]; then
+    systemctl disable scenarioforge-core-bootstrap.service
+fi
 touch /var/lib/scenarioforge/core-ready
 set_bootstrap_status 100 'ready'
 echo 'CORE provisioning complete.'
@@ -2144,7 +2191,7 @@ guest_bootstrap_percent() {
 }
 
 guest_bootstrap_failure_text() {
-    local vmid="$1" phase cloud_state unit unit_state
+    local vmid="$1" phase cloud_state unit unit_state role
     phase="$(guest_command_output "$vmid" cat /var/lib/scenarioforge/bootstrap-status)"
     if [[ "$phase" == failed* ]]; then
         printf '%s\n' "$phase"
@@ -2155,15 +2202,16 @@ guest_bootstrap_failure_text() {
         printf 'cloud-final failed while bootstrap phase was: %s\n' "${phase:-unknown}"
         return
     fi
-    # After the Kali kernel handoff, cloud-final no longer owns provisioning.
-    # A service failure (including failure to execute the bootstrap script) can
-    # leave the last saved phase at 80% without triggering the script's ERR trap.
-    if [[ "$vmid" == "$PARTICIPANT_VMID" ]]; then
-        for unit in scenarioforge-participant-bootstrap.service scenarioforge-participant-reboot.service; do
+    # Kernel handoff services own provisioning after the first boot.
+    role=""
+    [[ "$vmid" != "$CORE_VMID" ]] || role=core
+    [[ "$vmid" != "$PARTICIPANT_VMID" ]] || role=participant
+    if [[ -n "$role" ]]; then
+        for unit in "scenarioforge-$role-bootstrap.service" "scenarioforge-$role-reboot.service"; do
             unit_state="$(guest_command_output "$vmid" systemctl show "$unit" --property ActiveState --value)"
             if [[ "$unit_state" == failed ]]; then
-                printf '%s failed while bootstrap phase was: %s; inspect journalctl -u %s in the participant VM\n' \
-                    "$unit" "${phase:-unknown}" "$unit"
+                printf '%s failed while bootstrap phase was: %s; inspect journalctl -u %s in the %s VM\n' \
+                    "$unit" "${phase:-unknown}" "$unit" "$role"
                 return
             fi
         done

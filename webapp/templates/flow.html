@@ -872,6 +872,8 @@
   let heldChainIndices = new Set();
   let heldFactRows = new Set();
   let flowInitialFactsOverride = null;
+  let currentStartingFacts = [];
+  let currentDiscovery = false;
   let flowGoalFactsOverride = null;
   // These describe an explicitly accepted chain-expansion decision.  Keep them
   // with the saved FlowState so a later page load cannot lose why a generic or
@@ -971,6 +973,8 @@
       if (key && flowStateByScenario && typeof flowStateByScenario === 'object') flowStateByScenario[key] = cleared;
       currentChain = [];
       currentFlagAssignments = [];
+      currentStartingFacts = [];
+      currentDiscovery = false;
       selectedChainIndex = -1;
       const xmlPath = (typeof window.coretgGetLatestXmlPathForScenario === 'function')
         ? String(window.coretgGetLatestXmlPathForScenario(scenarioName) || '').trim()
@@ -2762,6 +2766,8 @@
       }
     } catch (e) { }
     try {
+      currentStartingFacts = Array.isArray(p && p.starting_facts) ? p.starting_facts : [];
+      currentDiscovery = !!(p && p.discovery);
       if (p && p.initial_facts) {
         flowInitialFactsOverride = normalizeFactsOverride(p.initial_facts);
       }
@@ -13163,9 +13169,68 @@
     lines.push('');
   }
 
-  function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options) {
+
+function startingFactsGuideLines(facts, assignments, discovery) {
+  const rows = Array.isArray(facts) ? facts.slice() : [];
+  if (!discovery) (assignments || []).forEach((assignment) => {
+    Object.entries(assignment.chain_supplied_input_values || {}).forEach(([artifact, value]) => {
+      if (value !== null && value !== '') rows.push({artifact, value: typeof value === 'string' ? value : JSON.stringify(value)});
+    });
+  });
+  const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/[\\*_[\]#|]/g, c => '\\' + c).replace(/\r?\n/g, ' ').replace(/\x60/g, '&#96;');
+  const seen = new Set();
+  const lines = ['## Starting facts', '', 'Information supplied before the exercise:', ''];
+  rows.forEach(fact => {
+    if (!fact || !fact.artifact || fact.value === undefined) return;
+    // Discovery briefings use only the task's explicit starting facts.
+    if (discovery && !fact.task_id) return;
+    const key = JSON.stringify([fact.task_id || '', fact.artifact, fact.value]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const task = fact.task_id ? ' (task: ' + escape(fact.task_id) + ')' : '';
+    lines.push('- ' + escape(fact.artifact) + task + ': ' + escape(fact.value));
+  });
+  if (!seen.size) lines.push('No explicit starting facts recorded.');
+  lines.push('');
+  return lines;
+}
+
+function vulnerabilityGuidanceMarkdown(entries) {
+  const lines = [];
+  (entries || []).forEach(entry => {
+    const render = value => String(value).replace(/\{\{([A-Z_]+)\}\}/g, (token, name) =>
+      (entry.templateVars || {})[name] || token);
+    const levels = entry.hint_levels || {};
+    ['low', 'medium', 'high'].forEach(level => {
+      const hints = Array.isArray(levels[level]) ? levels[level] : [];
+      if (hints.length) {
+        lines.push('### Vulnerability hints: ' + level, '');
+        hints.forEach(hint => lines.push('- ' + render(hint)));
+        lines.push('');
+      }
+    });
+    const access = entry.access_instructions || {};
+    ['summary', 'commands'].forEach(key => {
+      const values = Array.isArray(access[key]) ? access[key] : (access[key] ? [access[key]] : []);
+      values.forEach(value => lines.push('- ' + render(value)));
+    });
+  });
+  return lines;
+}
+
+function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options) {
     const opts = (options && typeof options === 'object') ? options : {};
     const facilitatorMode = !!opts.facilitator;
+  const startingPreview = opts.preview || {};
+  const discovery = !!(opts.discovery || startingPreview.discovery);
+  const startingLines = startingFactsGuideLines(opts.startingFacts || startingPreview.starting_facts, assignments, discovery);
+  if (discovery && !facilitatorMode) {
+    return ['# Participant Discovery Briefing', '', ...startingLines,
+      'Explore from the supplied starting facts and recover the challenge flags.',
+      'Additional networks and credentials must be learned from scenario evidence.', ''].join('\n');
+  }
+
     const vulnReadmeEntries = Array.isArray(opts.vulnReadmeEntries) ? opts.vulnReadmeEntries : [];
     const vulnReadmesByStep = new Map();
     vulnReadmeEntries.forEach((entry) => {
@@ -13556,7 +13621,8 @@
     lines.push(`Generated: ${now}`);
     lines.push(`Challenge steps: ${nodes.length}`);
     lines.push('');
-    lines.push(facilitatorMode ? '## Prepare the Session' : '## Quick Start');
+    lines.push(...startingLines);
+  lines.push(facilitatorMode ? '## Prepare the Session' : '## Quick Start');
     lines.push('');
     if (facilitatorMode) {
       lines.push('Use this guide to prepare the exercise, coach participants, and check their results.');
@@ -14716,7 +14782,7 @@
         scenario,
         currentChain,
         currentFlagAssignments,
-        { facilitator, vulnReadmeEntries, participantNetworkSetup }
+        { facilitator, vulnReadmeEntries, participantNetworkSetup, startingFacts: currentStartingFacts, discovery: currentDiscovery }
       );
       const title = facilitator ? `Facilitator Guide - ${scenario}` : `Participant Steps Guide - ${scenario}`;
       blob = new Blob([markdownToHtmlDocument(title, markdown)], { type: 'text/html;charset=utf-8' });

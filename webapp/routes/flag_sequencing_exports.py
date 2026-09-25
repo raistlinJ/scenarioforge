@@ -363,10 +363,15 @@ def register(app, *, backend_module: Any) -> None:
             scenario_label=scenario_label or scenario_norm,
             flag_assignments=flag_assignments,
         )
+        from scenarioforge.evaluation.starting_facts import collect_starting_facts
+        saved_flow = flow_meta if isinstance(flow_meta, dict) else {}
+        definitions = payload.get('evaluation_tasks', saved_flow.get('evaluation_tasks'))
+        starting_facts = collect_starting_facts(flow=saved_flow, assignments=flag_assignments, definitions=definitions)
         attack_graph = backend._attack_graph_for_chain(
             chain_nodes=chain_nodes,
             scenario_label=scenario_label or scenario_norm,
             flag_assignments=flag_assignments,
+            starting_facts=starting_facts,
         )
         attack_graph_dot = backend._attack_graph_dot(attack_graph)
         attack_graph_pdf_base64 = backend._attack_graph_pdf_base64(attack_graph_dot or '')
@@ -376,6 +381,7 @@ def register(app, *, backend_module: Any) -> None:
                 scenario_label or scenario_norm,
                 chain_nodes,
                 flag_assignments,
+                starting_facts=starting_facts,
             )
         except Exception:
             app.logger.exception('[flow.afb_from_chain] solutions script generation failed')
@@ -389,6 +395,7 @@ def register(app, *, backend_module: Any) -> None:
                 'flag_assignments': flag_assignments,
                 'afb': afb,
                 'attack_graph': attack_graph,
+                'starting_facts': starting_facts,
                 'attack_graph_dot': attack_graph_dot,
                 'attack_graph_pdf_base64': attack_graph_pdf_base64,
                 'solutions_script': solutions_script,

@@ -1,0 +1,30 @@
+manifest_version: 1
+id: network-discovery-clue
+kind: flag-generator
+name: Internal network configuration clue
+runtime:
+  type: docker-compose
+  compose_file: docker-compose.yml
+  service: generator
+inputs:
+  - name: seed
+    type: string
+    required: true
+  - name: secret
+    type: string
+    required: true
+    sensitive: true
+  - name: internal_subnet
+    type: string
+    required: true
+artifacts:
+  requires: []
+  optional_requires: []
+  produces:
+    - Flag(flag_id)
+    - FlagDelivery(mode)
+    - FlagFile(path)
+    - File(path)
+    - InternalNetwork(subnet)
+injects:
+  - File(path) -> /opt/scenario

@@ -22,8 +22,12 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
     state = cli._flow_state_from_xml(str(xml_path), scenario)
     if not isinstance(state, dict) or not state.get('chain'):
         raise ValueError('No saved resolved Flow chain; run flag sequencing before execution')
+    from .starting_facts import collect_starting_facts
+    if definitions is None:
+        definitions = state.get('evaluation_tasks')
+    starting_facts = collect_starting_facts(flow=state, assignments=state.get('flag_assignments', []), definitions=definitions)
     graph = backend._attack_graph_for_chain(chain_nodes=state['chain'], scenario_label=scenario,
-                                          flag_assignments=state.get('flag_assignments', []))
+                                          flag_assignments=state.get('flag_assignments', []), starting_facts=starting_facts)
     readiness = {'status': 'unverified', 'checks': []}
     if session_id is not None:
         stream = io.StringIO()

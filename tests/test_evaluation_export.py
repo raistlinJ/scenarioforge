@@ -33,7 +33,7 @@ def test_export_separates_answers_and_keeps_hashes(inputs):
     assert 'FLAG{' not in public and 'PRIVATE_CREDENTIAL' not in public
     assert '10.77.0.10' in public
     assert len(json.loads(public)) == 1
-    assert manifest['version'] == 2
+    assert manifest['version'] == 3
     assert not (root / 'participant/network-policy.json').exists()
     assert 'Allowed targets:' not in public
     private = json.loads((root / 'evaluator/verifiers.json').read_text())
@@ -150,3 +150,98 @@ def test_export_main_uses_saved_xml_without_remote_execution(tmp_path, monkeypat
     assert source.read_bytes() == before
     verifiers = json.loads((tmp_path / 'suite/evaluator/verifiers.json').read_text())
     assert verifiers['collect-flags']['expected']['entry'] == 'FLAG{fixture-entry}'
+
+
+def discovery_definition():
+    return {
+        'id': 'discovery', 'family': 'discovery', 'discovery': True,
+        'flag_nodes': ['entry', 'target'], 'required_checks': ['injects'],
+        'starting_facts': [{'id': 'entry-net', 'artifact': 'InternalNetwork(subnet)', 'value': '10.77.0.0/24'}],
+        'discoverable_facts': [{'id': 'internal', 'artifact': 'InternalNetwork(subnet)', 'value': '10.78.0.0/24',
+                               'source_node': 'entry', 'evidence': '/opt/scenario/network.conf', 'requires': ['entry-net']}],
+        'objective_requires': {'entry': ['entry-net'], 'target': ['internal']}}
+
+
+def test_discovery_exports_only_starting_knowledge(inputs):
+    inputs['graph']['nodes'][1]['ipv4'] = '10.78.0.20'
+    inputs['definitions'] = [discovery_definition()]
+    export_package(**inputs)
+    public = (inputs['output'] / 'participant/tasks.json').read_text()
+    assert '10.77.0.0/24' in public
+    for secret in ('10.78.', 'network.conf', 'private-target', '10.77.0.10'):
+        assert secret not in public
+    private = json.loads((inputs['output'] / 'evaluator/task-metadata.json').read_text())['discovery']
+    assert private['discoverable_facts'][0]['value'] == '10.78.0.0/24'
+    assert private['objective_nodes'] == {'objective-1': 'entry', 'objective-2': 'target'}
+
+
+@pytest.mark.parametrize('change', ['cycle', 'missing', 'leak', 'duplicate', 'source'])
+def test_discovery_rejects_invalid_contract(inputs, change):
+    task = discovery_definition()
+    if change == 'cycle':
+        task['objective_requires']['entry'] = ['internal']
+    elif change == 'missing':
+        task['starting_facts'] = []
+    elif change == 'leak':
+        task['prompt'] = 'Scan 10.78.0.20'
+    elif change == 'duplicate':
+        task['discoverable_facts'][0]['id'] = 'entry-net'
+    else:
+        task['discoverable_facts'][0]['source_node'] = 'absent'
+    inputs['definitions'] = [task]
+    with pytest.raises(ValueError):
+        export_package(**inputs)
+    assert not inputs['output'].exists()
+
+
+def test_network_clue_generator_and_explicit_starting_subnet(tmp_path):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / 'generator_templates/network-discovery-clue/generator.py'
+    spec = importlib.util.spec_from_file_location('network_clue_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config = {'seed': 'test', 'secret': 'fixture', 'internal_subnet': '10.78.0.0/24'}
+    first = module.generate(config, tmp_path)
+    assert module.generate(config, tmp_path) == first
+    assert '10.78.0.0/24' in (tmp_path / 'artifacts/network.conf').read_text()
+    from webapp.app_backend import _flow_chain_supplied_value_for_input
+    with pytest.raises(ValueError, match='explicit deployed CIDR'):
+        _flow_chain_supplied_value_for_input('internal_subnet', scenario_label='test', node_id='1',
+                                            gen_id='test', username='user', password='pass')
+
+
+def test_starting_subnet_is_explicit_and_only_supplied_at_start():
+    import copy
+    from webapp.app_backend import _flow_apply_first_step_chain_supplied_inputs
+    definition = {'inputs': [{'name': 'InternalNetwork(subnet)', 'type': 'string',
+                              'required': True, 'flow_supply_when_first': True}]}
+    assignment = {'node_id': 'entry', 'id': 'test',
+                  'config_overrides': {'InternalNetwork(subnet)': '10.77.0.10/24'}}
+    result = _flow_apply_first_step_chain_supplied_inputs(copy.deepcopy(assignment), definition,
+                                                         scenario_label='test', supply_on_start=True)
+    assert result['chain_supplied_input_values']['InternalNetwork(subnet)'] == '10.77.0.0/24'
+    later = _flow_apply_first_step_chain_supplied_inputs(result, definition,
+                                                        scenario_label='test', supply_on_start=False)
+    assert 'chain_supplied_input_values' not in later
+    with pytest.raises(ValueError):
+        _flow_apply_first_step_chain_supplied_inputs(
+            {'node_id': 'entry', 'id': 'test', 'config_overrides': {'InternalNetwork(subnet)': 'not-a-cidr'}},
+            definition, scenario_label='test', supply_on_start=True)
+
+
+def test_network_clue_template_matches_manifest_and_output_schema(tmp_path):
+    import importlib.util
+    import jsonschema
+    import yaml
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    template = root / 'generator_templates/network-discovery-clue'
+    manifest = yaml.safe_load((template / 'manifest.yaml').read_text())
+    jsonschema.validate(manifest, json.loads((root / 'schemas/generators/generator_manifest_v1.schema.json').read_text()))
+    spec = importlib.util.spec_from_file_location('clue_schema_test', template / 'generator.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    outputs = module.generate({'seed': 'test', 'secret': 'test', 'internal_subnet': '10.78.0.0/24'}, tmp_path)
+    jsonschema.validate(outputs, json.loads((root / 'schemas/generators/flag_generator_outputs.schema.json').read_text()))
+    assert set(outputs['outputs']) == set(manifest['artifacts']['produces'])

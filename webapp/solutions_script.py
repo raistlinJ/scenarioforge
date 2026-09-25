@@ -627,7 +627,8 @@ def build_solutions_script(scenario: str,
                            chain_nodes: list[dict[str, Any]],
                            flag_assignments: list[dict[str, Any]] | None,
                            *,
-                           tool_version: str = TOOL_VERSION) -> str:
+                           tool_version: str = TOOL_VERSION,
+                           starting_facts: list[dict[str, Any]] | None = None) -> str:
     """Render an executable bash Solutions Script for the resolved chain."""
     scenario_label = _clean(scenario) or "scenario"
     nodes = [n for n in (chain_nodes or []) if isinstance(n, dict) and _clean(n.get("id"))]
@@ -673,6 +674,11 @@ def build_solutions_script(scenario: str,
     w = out.append
 
     w("#!/usr/bin/env bash")
+    from scenarioforge.evaluation.starting_facts import collect_starting_facts, starting_facts_markdown
+    public_facts = starting_facts if starting_facts is not None else collect_starting_facts(assignments=flag_assignments)
+    for line in starting_facts_markdown(public_facts).splitlines():
+        w('# ' + line)
+
     w("#")
     w(f"# ScenarioForge Solutions Script  (format v{tool_version})")
     w(f"# Scenario : {scenario_label}")

@@ -7578,9 +7578,11 @@ def _run_evaluation_export_phase(args: Any) -> int:
         state = _flow_state_from_xml(xml_path, scenario)
         if not isinstance(state, dict) or not state.get('chain'):
             raise ValueError('No resolved saved chain. Run flag-sequencing first.')
+        from .evaluation.starting_facts import collect_starting_facts
+        definitions = json.loads(Path(args.evaluation_tasks).read_text()) if args.evaluation_tasks else state.get('evaluation_tasks')
+        starting_facts = collect_starting_facts(flow=state, assignments=state.get('flag_assignments', []), definitions=definitions)
         graph = backend._attack_graph_for_chain(chain_nodes=state['chain'], scenario_label=scenario,
-                                                flag_assignments=state.get('flag_assignments', []))
-        definitions = json.loads(Path(args.evaluation_tasks).read_text()) if args.evaluation_tasks else None
+                                                flag_assignments=state.get('flag_assignments', []), starting_facts=starting_facts)
         readiness = read_readiness(args.readiness_report) if args.readiness_report else None
         manifest = export_package(xml_path=xml_path, graph=graph, output=args.output_dir,
                                   suite_id=args.suite_id,
@@ -7632,6 +7634,10 @@ def _run_guides_phase(args: Any) -> int:
                  for audience in audiences for fmt in formats}
         if not args.force and any(path.exists() for path in paths.values()):
             raise ValueError('Output file already exists; pass --force to overwrite it.')
+        from .evaluation.starting_facts import collect_starting_facts
+        definitions = json.loads(Path(args.evaluation_tasks).read_text()) if getattr(args, 'evaluation_tasks', None) else state.get('evaluation_tasks')
+        preview['starting_facts'] = collect_starting_facts(flow=state, assignments=preview.get('flag_assignments', []), definitions=definitions)
+        preview['discovery'] = any(task.get('discovery') for task in definitions or [])
         rendered = render_guides(scenario, preview, audiences)
         output_dir.mkdir(parents=True, exist_ok=True)
         for (audience, fmt), path in paths.items():
@@ -7742,6 +7748,9 @@ def _run_attack_graph_phase(args: Any) -> int:
         ),
     }
     try:
+        if getattr(args, 'evaluation_tasks', None):
+            from pathlib import Path
+            request_payload['evaluation_tasks'] = json.loads(Path(args.evaluation_tasks).read_text())
         with backend.app.test_request_context(
             '/api/flag-sequencing/afb_from_chain',
             method='POST',
@@ -8572,11 +8581,13 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
         ap.add_argument('--session-id', type=int, help='CORE session identity')
     elif phase == 'guides':
         _add_cli_guide_args(ap)
+        ap.add_argument('--evaluation-tasks', help='Task JSON supplying the same starting facts as evaluation-export')
         ap.add_argument('--output-dir', help='Output directory (default: guides beside XML)')
         ap.add_argument('--output-prefix', help='Output filename prefix (default: scenario name)')
         ap.add_argument('--force', action='store_true', help='Overwrite existing guide files')
     elif phase == 'attack-graph':
         _add_cli_attack_graph_args(ap)
+        ap.add_argument('--evaluation-tasks', help='Task JSON supplying the same starting facts as evaluation-export')
     elif phase in {'execute', 'topo'}:
         _add_cli_core_connection_args(ap)
         _add_cli_execute_topo_args(ap)

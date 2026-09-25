@@ -15,6 +15,36 @@
     "fact_dependencies"
   ],
   "properties": {
+    "starting_facts": {
+      "type": "array",
+      "description": "Concrete knowledge supplied before the exercise; task_id scopes task-specific briefings. Distinct from learned fact_dependencies.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "artifact",
+          "value"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "artifact": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "source_node": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "schema_version": {
       "type": "integer",
       "const": 2,

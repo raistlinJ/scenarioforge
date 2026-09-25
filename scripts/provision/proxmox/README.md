@@ -879,3 +879,16 @@ to the latest branch.
 
 See the [cross-platform command reference](../../../README.md#reinstall-one-vm-or-the-whole-lab)
 for equivalent commands on other hosts.
+
+### CORE desktop kernel
+
+CORE guests booting a Debian cloud kernel install the standard architecture
+kernel before building CORE. Provisioning selects the newest installed standard
+kernel in GRUB, reboots once, and resumes automatically. This provides the mouse
+and USB drivers needed by the graphical console; keep Proxmox's tablet pointer
+enabled. The cloud kernel remains installed as a fallback. A failed handoff is
+reported instead of repeatedly rebooting or marking CORE ready.
+
+This applies to new installs and CORE reinstalls, including the shared Linux
+guest bootstrap used by VMware. Existing guests are not changed by updating the
+host scripts. Reinstalling CORE replaces its guest disk.

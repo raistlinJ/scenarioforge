@@ -47,6 +47,9 @@ def register(app, *, backend_module: Any) -> None:
                         for key in ('chain_expansion', 'topology_inclusion'):
                             if key not in flow_state and isinstance(persisted_state.get(key), dict):
                                 flow_state[key] = dict(persisted_state[key])
+                        for key in ('starting_facts', 'evaluation_tasks'):
+                            if key not in flow_state and isinstance(persisted_state.get(key), list):
+                                flow_state[key] = list(persisted_state[key])
                 if (
                     isinstance(flow_state, dict)
                     and ('flow_enabled' in flow_state)

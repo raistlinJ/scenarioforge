@@ -475,6 +475,8 @@ show_completion_credentials
 
 @pytest.mark.parametrize('failed_unit', [
     'cloud-final',
+    'scenarioforge-core-bootstrap.service',
+    'scenarioforge-core-reboot.service',
     'scenarioforge-participant-bootstrap.service',
     'scenarioforge-participant-reboot.service',
     '',
@@ -504,7 +506,9 @@ guest_bootstrap_failure_text {vmid}
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    if failed_unit == 'cloud-final' or (failed_unit and vmid == '9403'):
+    if failed_unit == 'cloud-final' or (
+        failed_unit.startswith('scenarioforge-participant-') and vmid == '9403'
+    ) or (failed_unit.startswith('scenarioforge-core-') and vmid == '9401'):
         assert f"{failed_unit} failed while bootstrap phase was" in result.stdout
         assert "rebooting into the full Kali kernel" in result.stdout
         if failed_unit != 'cloud-final':

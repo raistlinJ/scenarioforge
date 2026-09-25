@@ -1,0 +1,23 @@
+[
+  {
+    "id": "discover-and-recover",
+    "family": "network-discovery",
+    "discovery": true,
+    "flag_nodes": ["entry", "target"],
+    "required_checks": ["containers", "services", "ports", "injects"],
+    "starting_facts": [
+      {"id": "entry-network", "artifact": "InternalNetwork(subnet)", "value": "10.77.0.0/24"}
+    ],
+    "discoverable_facts": [
+      {
+        "id": "internal-network",
+        "artifact": "InternalNetwork(subnet)",
+        "value": "10.78.0.0/24",
+        "source_node": "entry",
+        "evidence": "/opt/scenario/network.conf",
+        "requires": ["entry-network"]
+      }
+    ],
+    "objective_requires": {"entry": ["entry-network"], "target": ["internal-network"]}
+  }
+]

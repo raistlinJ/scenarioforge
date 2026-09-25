@@ -194,6 +194,7 @@ Important notes:
 - The supported export format is **Attack Flow Builder native `.afb`**.
 - **Eligibility rules:** `flag-generators` are placed on vulnerability nodes only; `flag-node-generators` require non-vulnerability Docker-role nodes.
 - **Initial Facts / Goal Facts:** Flow accepts optional `initial_facts` and `goal_facts` overrides (artifacts + fields). Flag facts (`Flag(...)`) are filtered out.
+- **Concrete starting knowledge:** Saved FlowState can also contain `starting_facts`, a list of `{id, artifact, value}` records, and `evaluation_tasks`. These are distinct from the fact-type overrides above. Guides, graph exports, and preview responses expose the starting facts; task-specific records include `task_id`. The state-save endpoint preserves these two fields when an older client omits them; explicit empty lists clear them. Discovery participant guides use only the authored task starting facts.
 - **Sequencing algorithm:** Goal-aware scoring with pruning/backtracking (bounded by a 30s timeout) is used to select feasible generator assignments.
 - **XML handoff:** Save XML, call `POST /api/planner/ensure_plan`, then pass the returned XML path as `preview_plan` to Sequence and Resolve. An explicit `preview_plan` takes precedence over index-based “latest plan” lookup.
 - **Long requests:** Sequence and Resolve stream JSON-compatible whitespace heartbeats. Their final result is JSON; clients should inspect `ok`, even when the HTTP status is `200`. Send the stable request ID fields below on retries.

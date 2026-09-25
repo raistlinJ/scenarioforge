@@ -162,7 +162,10 @@ def _attack_graph_for_chain(
     chain_nodes: list[dict[str, Any]],
     scenario_label: str,
     flag_assignments: list[dict[str, Any]] | None = None,
+    starting_facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from scenarioforge.evaluation.starting_facts import collect_starting_facts
+    public_facts = collect_starting_facts(flow={'starting_facts': starting_facts or []}, assignments=flag_assignments)
     assignment_by_node_id: dict[str, dict[str, Any]] = {}
     try:
         for fa in (flag_assignments or []):
@@ -406,6 +409,7 @@ def _attack_graph_for_chain(
 
     return {
         'schema_version': 2,
+        'starting_facts': public_facts,
         'scenario': str(scenario_label or ''),
         'chain_order': chain_order,
         'assignment_order': [
@@ -480,6 +484,15 @@ def _attack_graph_dot(attack_graph: dict[str, Any]) -> str:
     lines.append('  graph [pad="0.25", nodesep="1.0", ranksep="1.6", splines=polyline, overlap=false];')
     lines.append('  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#64748b", fontsize=11, fontname="Trebuchet MS"];')
     lines.append('  edge [color="#2563eb", fontsize=10, fontname="Trebuchet MS", penwidth=1.4, arrowsize=0.8, decorate=false, labelfloat=false];')
+
+    starting = attack_graph.get('starting_facts') or []
+    if starting:
+        fact_lines = ['Starting facts (given)'] + [
+            f"{fact.get('artifact', '')}: {fact.get('value', '')}" +
+            (f" [task: {fact['task_id']}]" if fact.get('task_id') else '')
+            for fact in starting]
+        label = _esc('\n'.join(fact_lines))
+        lines.append(f'  "STARTING_FACTS" [shape=note, fillcolor="#ecfdf5", label="{label}"];')
 
     for idx, nid in enumerate(ordered_node_ids):
         n = node_by_id.get(nid)
@@ -22821,6 +22834,10 @@ def _flow_apply_first_step_chain_supplied_inputs(
                 password=password,
                 input_type=(input_meta or {}).get('type'),
             )
+        compact_name = re.sub(r'[^a-z0-9]+', '', str(name).lower())
+        if 'subnet' in compact_name or compact_name in {'networkcidr', 'internalnetwork'}:
+            import ipaddress
+            current = str(ipaddress.ip_network(str(current), strict=False))
         config_overrides[name] = current
         resolved_inputs[name] = current
         supplied_values[name] = current

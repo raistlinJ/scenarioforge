@@ -1208,6 +1208,10 @@ def register(app, *, backend_module: Any) -> None:
                 app.logger.warning('[flow.attackflow_preview] invalid flow: %s', (flow_errors_detail or (flow_errors or [])))
         except Exception:
             pass
+        from scenarioforge.evaluation.starting_facts import collect_starting_facts
+        saved_knowledge = flow_for_facts if isinstance(flow_for_facts, dict) else {}
+        out['starting_facts'] = collect_starting_facts(flow=saved_knowledge, assignments=flag_assignments)
+        out['discovery'] = any(task.get('discovery') for task in saved_knowledge.get('evaluation_tasks', []))
         if initial_facts_override:
             out['initial_facts'] = initial_facts_override
         if goal_facts_override:

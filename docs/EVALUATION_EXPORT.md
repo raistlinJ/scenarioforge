@@ -57,7 +57,7 @@ already performs the strict checks once.
 
 ### Execution scope belongs to CAF
 
-The export is version 2 and contains no network-policy file. The former
+The export is version 3 and contains no network-policy file. The former
 `--eval-allow` and `--eval-disallow` options have been removed. Neither export nor
 CAF scope settings change what ScenarioForge deploys.
 
@@ -168,7 +168,98 @@ starting state operationally. Graph relationships are preserved privately for
 provenance, not automatically provisioned. Splits and families are author labels;
 the system cannot prove tasks were held out from artifact generation.
 
-## Package contract: `scenarioforge-evaluation`, version 2
+## Hidden network discovery (version 3)
+
+Use `--evaluation-tasks docs/examples/evaluation-discovery-tasks.json` with either
+`execute --evaluation-export` or standalone `evaluation-export`. Replace the example
+node IDs and networks with your deployed scenario. The ordinary default task remains
+a disclosed-target task; hidden discovery is explicit, not inferred from topology.
+
+Set `discovery: true` and declare:
+
+- `starting_facts`: public `{id, artifact, value}` records, such as the entry subnet
+  and any initial credentials. Only these facts are appended to the briefing.
+- `discoverable_facts`: private `{id, artifact, value, source_node, evidence, requires}`
+  records. `requires` is an optional list of fact IDs. `evidence` identifies the file,
+  service response, or observation that actually reveals the value in the scenario.
+- `objective_requires`: private mapping from graph node IDs to required fact IDs.
+
+For example, supply `InternalNetwork(subnet) = 10.77.0.0/24` initially, place a clue
+for `10.78.0.0/24` on the entry host, and make the internal objective depend on that
+fact. Knowledge does not create connectivity: CORE must provide the intended routes
+and pivot requirements. Missing initial facts are never automatically disclosed.
+The exporter rejects missing references, duplicate IDs, circular prerequisites,
+and hidden fact values or hidden-subnet IPv4 addresses in participant content.
+
+Discovery flag tasks omit node names, objective IPs, and private node-to-objective
+mappings. They request `{"flags":["FLAG{recovered}"]}`; CAF matches recovered strings
+to private objectives and gives partial credit. This measures flag recovery, not
+proof of which evidence the agent read. There are no automatic hints.
+
+The [network clue generator](../generator_templates/network-discovery-clue/README.md)
+provides an importable template that emits `InternalNetwork(subnet)` and injects a
+configuration file. It requires an explicit deployed subnet value. First-step
+chain-supplied subnet inputs likewise require a configured CIDR instead of a
+synthesized placeholder. Existing initial-fact *type* declarations are not concrete
+participant values; author the starting values explicitly in the evaluation tasks.
+
+The task contract records evidence provenance; it does not install the clue or prove
+the entire discovery path is solvable. Install/configure the generator and verify
+the injected file, access prerequisites, and routing in CORE. The WebUI automatic
+export still uses the ordinary default task; use the CLI to export authored discovery
+tasks from a WebUI-deployed scenario.
+
+CAF retains its private execution policy and refuses policy disclosure for discovery
+suites. Its artifact checks also reject literal hidden facts and hidden-subnet IPv4
+addresses in condition catalogs/guidance. These are accidental-disclosure checks,
+not semantic secrecy guarantees. Keep evaluator files outside tool-accessible storage
+for strict experiments: the current same-user runner does not provide OS isolation.
+
+### Starting facts in guides and graphs
+
+Concrete starting knowledge is shared across Flow and Reports guides, CLI guides,
+attack-graph JSON (`starting_facts`), the DOT/PDF “Starting facts (given)” note,
+preview/export API responses, the frozen evaluation graph, and solutions-script
+comments. Ordinary evaluation prompts also include explicit scenario starting facts
+and supplied first-step values.
+
+Sources are `FlowState.starting_facts`, first-step `chain_supplied_input_values`,
+and task-specific `starting_facts`. Resolved generator inputs/outputs and
+discoverable facts are never inferred to be starting knowledge. `initial_facts`
+remains the sequencer's fact-type declaration, not concrete participant values.
+
+For consistent WebUI and automatic evaluation exports, persist `starting_facts`
+and/or `evaluation_tasks` in the saved XML's FlowState using the existing
+`save_flow_state_to_xml` API. Older clients preserve these fields when omitted;
+explicit empty lists clear them. Example FlowState fragment:
+
+```json
+{
+  "starting_facts": [
+    {"id": "entry-network", "artifact": "InternalNetwork(subnet)", "value": "10.77.0.0/24"}
+  ]
+}
+```
+
+Include the existing chain and other flow fields in the full API request. There
+is no new WebUI facts editor. When task definitions live in an external file,
+pass the same file to each CLI export:
+
+```bash
+python -m scenarioforge.cli guides --xml scenario.xml --scenario Training \
+  --evaluation-tasks discovery-tasks.json --output-dir guides
+
+python -m scenarioforge.cli attack-graph --xml scenario.xml --scenario Training \
+  --evaluation-tasks discovery-tasks.json
+```
+
+Task-specific facts carry task IDs. Discovery participant guides contain only
+those explicit task starting facts and a short discovery instruction; they omit
+detailed steps, hints, setup routes, and topology that could reveal hidden networks.
+Facilitator guides and attack graphs remain privileged, full-scenario materials;
+do not supply them to the evaluation agent.
+
+## Package contract: `scenarioforge-evaluation`, version 3
 
 ```text
 manifest.json

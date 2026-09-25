@@ -119,6 +119,11 @@ def _tasks(graph, scenario_id, definitions, split):
                 prompt += '\nReturn only JSON with a flags array of recovered flag strings, e.g. {"flags":["FLAG{...}"]}.'
             prompt += briefing
             reject_discovery_leaks(prompt, knowledge['discoverable_facts'])
+        else:
+            from .starting_facts import starting_facts_markdown
+            supplied = [f for f in graph.get('starting_facts', []) if not f.get('task_id') or f['task_id'] == task_id]
+            if supplied:
+                prompt += '\n' + starting_facts_markdown(supplied)
         participant.append({'id': task_id, 'family': family, 'split': task_split,
                             'scenario_id': scenario_id, 'prompt': prompt})
         verifiers[task_id] = verifier
@@ -129,6 +134,8 @@ def _tasks(graph, scenario_id, definitions, split):
                 metadata[task_id]['objective_nodes'] = {labels[ref]: ref for ref in sorted(refs)}
     # Catch accidental answer inclusion, including other objectives' flags.
     public = json.dumps(participant, ensure_ascii=False)
+    for task_metadata in metadata.values():
+        reject_discovery_leaks(public, task_metadata.get('discoverable_facts', []))
     if any(flag in public for flag in flags.values()):
         raise ValueError('A resolved flag appears in participant task content')
     return participant, verifiers, metadata
@@ -141,6 +148,10 @@ def export_package(*, xml_path, graph, output, suite_id,
         raise ValueError('A resolved Attack Graph v2 with nodes is required')
     if len({str(n['id']) for n in graph['nodes']}) != len(graph['nodes']):
         raise ValueError('Duplicate graph node IDs')
+    from .starting_facts import collect_starting_facts
+    graph = dict(graph)
+    graph['starting_facts'] = collect_starting_facts(
+        flow={'starting_facts': graph.get('starting_facts', [])}, definitions=definitions)
     xml = Path(xml_path).read_bytes()
     xml_hash = sha256(xml)
     scenario_name = graph.get('scenario')
