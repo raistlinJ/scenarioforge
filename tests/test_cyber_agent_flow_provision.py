@@ -108,17 +108,14 @@ validate_caf >&2
 WORK_DIR={shlex.quote(str(tmp_path))}
 write_guest_bootstraps
 caf_generate inject "$WORK_DIR/participant-bootstrap.sh"
-caf_generate network 00:50:56:01:02:03 {'--match-name ens20' if platform == 'proxmox' else ''}
+caf_generate network 00:50:56:01:02:03
 '''
     result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     network = json.loads(result.stdout.strip().removeprefix('llm: '))
     assert network['routes'][0]['to'] == '203.0.113.20/32'
-    if platform == 'proxmox':
-        assert network['match'] == {'name': 'ens20'}
-        assert 'set-name' not in network
-    else:
-        assert network['match'] == {'macaddress': '00:50:56:01:02:03'}
+    assert network['match'] == {'macaddress': '00:50:56:01:02:03'}
+    assert network['set-name'] == 'ens20'
     generated = (tmp_path / 'participant-bootstrap.sh').read_text()
     assert '/opt/cyber-agent-flow' in generated
     subprocess.run(['bash', '-n', str(tmp_path / 'participant-bootstrap.sh')], check=True)

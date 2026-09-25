@@ -23,7 +23,7 @@ def inputs(tmp_path):
                  'checks': [{'key': key, 'status': 'pass', 'items': []}
                             for key in ['containers', 'services', 'ports', 'injects']]}
     return {'xml_path': xml, 'graph': graph, 'output': tmp_path / 'package',
-            'suite_id': 'lab-study', 'allow': ['10.77.0.0/24'], 'readiness': readiness, 'session_id': 9}
+            'suite_id': 'lab-study', 'readiness': readiness, 'session_id': 9}
 
 
 def test_export_separates_answers_and_keeps_hashes(inputs):
@@ -33,6 +33,9 @@ def test_export_separates_answers_and_keeps_hashes(inputs):
     assert 'FLAG{' not in public and 'PRIVATE_CREDENTIAL' not in public
     assert '10.77.0.10' in public
     assert len(json.loads(public)) == 1
+    assert manifest['version'] == 2
+    assert not (root / 'participant/network-policy.json').exists()
+    assert 'Allowed targets:' not in public
     private = json.loads((root / 'evaluator/verifiers.json').read_text())
     assert private['collect-flags']['expected']['entry'] == 'FLAG{private-entry}'
     assert stat.S_IMODE((root / 'evaluator').stat().st_mode) == 0o700
@@ -45,7 +48,7 @@ def test_export_separates_answers_and_keeps_hashes(inputs):
         export_package(**inputs)
 
 
-@pytest.mark.parametrize('change', ['xml', 'scenario', 'session', 'scope', 'duplicate', 'leak', 'unresolved'])
+@pytest.mark.parametrize('change', ['xml', 'scenario', 'session', 'duplicate', 'leak', 'unresolved'])
 def test_invalid_export_leaves_no_package(inputs, change):
     if change == 'xml':
         inputs['readiness']['xml_sha256'] = 'wrong'
@@ -53,8 +56,6 @@ def test_invalid_export_leaves_no_package(inputs, change):
         inputs['readiness']['scenario'] = 'Wrong'
     elif change == 'session':
         inputs['session_id'] = 77
-    elif change == 'scope':
-        inputs['allow'] = ['192.0.2.0/24']
     elif change == 'duplicate':
         inputs['graph']['nodes'].append(inputs['graph']['nodes'][0])
     elif change == 'unresolved':
@@ -97,7 +98,7 @@ def test_cli_export_dispatch_from_saved_flow(inputs, monkeypatch, capsys):
     report.write_text(json.dumps(inputs['readiness']))
     args = cli._build_cli_parser().parse_args([
         'evaluation-export', '--xml', str(inputs['xml_path']), '--suite-id', 'lab-study',
-        '--output-dir', str(inputs['output']), '--eval-allow', '10.77.0.0/24',
+        '--output-dir', str(inputs['output']),
         '--readiness-report', str(report), '--session-id', '9'])
     assert cli._run_evaluation_export_phase(args) == 0
     assert json.loads(capsys.readouterr().out)['package_hash']
@@ -143,7 +144,7 @@ def test_export_main_uses_saved_xml_without_remote_execution(tmp_path, monkeypat
     monkeypatch.setattr(cli, '_configure_cli_logging', lambda *a: None)
     monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: pytest.fail('Export delegated execution'))
     monkeypatch.setattr(sys, 'argv', ['cli.py', 'evaluation-export', '--xml', str(source),
-        '--suite-id', 'fixture-suite', '--eval-allow', '10.77.0.0/24', '--output-dir', str(tmp_path / 'suite')])
+        '--suite-id', 'fixture-suite', '--output-dir', str(tmp_path / 'suite')])
     assert cli.main() == 0
     assert json.loads(capsys.readouterr().out)['readiness_attached'] is False
     assert source.read_bytes() == before

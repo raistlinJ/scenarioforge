@@ -1,6 +1,5 @@
 """Generate the evaluation artifact belonging to a successful execution."""
 import io
-import ipaddress
 import json
 import logging
 import os
@@ -12,7 +11,7 @@ from .export import export_package, sha256
 
 
 def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg,
-                            output, suite_id, allow=None, disallow=(), definitions=None, expected_xml_sha256=None, split="development"):
+                            output, suite_id, definitions=None, expected_xml_sha256=None, split="development"):
 
     from scenarioforge import cli
 
@@ -25,9 +24,6 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
         raise ValueError('No saved resolved Flow chain; run flag sequencing before execution')
     graph = backend._attack_graph_for_chain(chain_nodes=state['chain'], scenario_label=scenario,
                                           flag_assignments=state.get('flag_assignments', []))
-    if allow is None:
-        allow = sorted({str(ipaddress.ip_network(f"{node['ipv4']}/32", strict=False))
-                        for node in graph['nodes'] if node.get('ipv4')})
     readiness = {'status': 'unverified', 'checks': []}
     if session_id is not None:
         stream = io.StringIO()
@@ -50,7 +46,7 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
     if archive.exists():
         raise ValueError("Evaluation ZIP already exists; choose a new output directory")
     manifest = export_package(xml_path=xml_path, graph=graph, output=output, suite_id=suite_id,
-                              allow=allow, disallow=disallow, definitions=definitions,
+                              definitions=definitions,
                               readiness=readiness, split=split, session_id=int(session_id) if session_id is not None else None)
     output = Path(output)
     # Use manifest-relative paths, never arbitrary directory contents.
@@ -74,6 +70,6 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
              and readiness.get('xml_sha256') == sha256(before)
              and all(checks.get(key) == 'pass' for key in required))
     return {'state': 'complete', 'suite_id': suite_id, 'package_hash': manifest['package_hash'],
-            'archive': str(archive.resolve()), 'allow': allow, 'disallow': list(disallow),
+            'archive': str(archive.resolve()),
             'readiness_passed': ready,
             'message': 'Evaluation package ready' if ready else 'Package generated, but readiness did not pass; evaluation execution will be blocked'}

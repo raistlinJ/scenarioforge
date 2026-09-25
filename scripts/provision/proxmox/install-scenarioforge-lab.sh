@@ -1785,14 +1785,10 @@ PARTICIPANT_SCRIPT
         "$WORK_DIR/participant-bootstrap.sh"
 }
 
-# Proxmox PCI slots retain their interface names when a clone gets new MACs.
-# VMware shares this generator but requires explicit MAC-based renaming.
+# Images may boot with ethN names, so match the provisioned MAC and explicitly
+# rename each NIC before configuring its addresses and routes.
 network_interface_match() {
-    if [[ -n "${VMRUN_TYPE:-}" ]]; then
-        printf "    match: {macaddress: '%s'}\n    set-name: %s\n" "$1" "$2"
-    else
-        printf "    match: {name: '%s'}\n" "$2"
-    fi
+    printf "  %s:\n    match: {macaddress: '%s'}\n    set-name: %s\n" "$3" "$1" "$2"
 }
 
 write_cloud_init_files() {
@@ -1944,17 +1940,14 @@ EOF
     cat > "$WORK_DIR/core-network.yaml" <<EOF
 version: 2
 ethernets:
-  management:
-$(network_interface_match "$CORE_NET0_MAC" ens18)
+$(network_interface_match "$CORE_NET0_MAC" ens18 management)
     addresses: [$CORE_MANAGEMENT_CIDR]
-  hitl:
-$(network_interface_match "$CORE_NET1_MAC" ens19)
+$(network_interface_match "$CORE_NET1_MAC" ens19 hitl)
     dhcp4: false
     dhcp6: false
     accept-ra: false
     optional: true
-  uplink:
-$(network_interface_match "$CORE_NET2_MAC" ens20)
+$(network_interface_match "$CORE_NET2_MAC" ens20 uplink)
     dhcp4: true
     dhcp-identifier: mac
     dhcp6: false
@@ -1963,21 +1956,18 @@ EOF
     cat > "$WORK_DIR/app-network.yaml" <<EOF
 version: 2
 ethernets:
-  uplink:
-$(network_interface_match "$APP_NET0_MAC" ens18)
+$(network_interface_match "$APP_NET0_MAC" ens18 uplink)
     dhcp4: true
     dhcp-identifier: mac
     dhcp6: false
-  management:
-$(network_interface_match "$APP_NET1_MAC" ens19)
+$(network_interface_match "$APP_NET1_MAC" ens19 management)
     addresses: [$APP_MANAGEMENT_CIDR]
 EOF
 
     cat > "$WORK_DIR/participant-network.yaml" <<EOF
 version: 2
 ethernets:
-  participant:
-$(network_interface_match "$PARTICIPANT_NET0_MAC" ens18)
+$(network_interface_match "$PARTICIPANT_NET0_MAC" ens18 participant)
     addresses: [$PARTICIPANT_CIDR]
     # Prefer temporary NAT during bootstrap; use the CORE HITL router after detach.
     routes:
@@ -1987,8 +1977,7 @@ $(network_interface_match "$PARTICIPANT_NET0_MAC" ens18)
     dhcp4: false
     dhcp6: false
     accept-ra: false
-  bootstrap-uplink:
-$(network_interface_match "$PARTICIPANT_NET1_MAC" ens19)
+$(network_interface_match "$PARTICIPANT_NET1_MAC" ens19 bootstrap-uplink)
     dhcp4: true
     dhcp-identifier: mac
     dhcp6: false
@@ -2246,7 +2235,13 @@ report_guest_activity() {
     local label="$1" vmid="$2" path="$3" current previous
     current="$(guest_last_log_line "$vmid" "$path")"
     [[ -n "$current" ]] || current="$(guest_last_log_line "$vmid" /var/log/cloud-init-output.log)"
-    [[ -n "$current" ]] || return 0
+    if [[ -z "$current" ]]; then
+        if [[ "$(guest_command_output "$vmid" printf scenarioforge-agent-ready)" == scenarioforge-agent-ready ]]; then
+            current="No bootstrap or Cloud-Init log available yet; inspect cloud-init status --long and journalctl -u cloud-final in VM $vmid"
+        else
+            current="Guest agent execution unavailable; bootstrap progress is unknown. Open VM $vmid console and inspect: cloud-init status --long; systemctl status qemu-guest-agent; tail -n 80 /var/log/cloud-init-output.log"
+        fi
+    fi
     case "$label" in
         CORE)
             previous="$LAST_CORE_ACTIVITY"
@@ -2953,7 +2948,7 @@ perform_install() {
     write_guest_bootstraps
     if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
     write_cloud_init_files
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name ens20 >> "$WORK_DIR/participant-network.yaml"; fi
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
     install_snippets
 
     progress 38 "Creating the CORE, ScenarioForge, and participant VMs"

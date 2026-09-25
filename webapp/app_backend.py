@@ -22593,6 +22593,8 @@ def _flow_chain_supplied_value_for_input(
 ) -> Any:
     lowered = str(name or '').lower().strip()
     compact = re.sub(r'[^a-z0-9]+', '', lowered)
+    if 'subnet' in compact or compact in {'networkcidr', 'internalnetwork'}:
+        raise ValueError('Starting subnet input requires an explicit deployed CIDR; it cannot be synthesized')
     if lowered.startswith('credential('):
         inner = lowered.split('(', 1)[1].rstrip(')')
         if 'password' in inner or 'pass' in inner:

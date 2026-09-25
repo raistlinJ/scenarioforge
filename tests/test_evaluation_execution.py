@@ -35,12 +35,12 @@ def build(tmp_path, monkeypatch):
                 output=tmp_path / 'package', suite_id='execute-fixture')
 
 
-def test_execution_build_defaults_to_host_scope_and_private_zip(build):
+def test_execution_build_has_no_policy_and_private_zip(build):
     result = build_execution_package(**build)
     assert result['readiness_passed'] is True
-    assert result['allow'] == ['10.77.0.10/32', '10.77.0.20/32']
+    assert 'allow' not in result and 'disallow' not in result
     with zipfile.ZipFile(result['archive']) as bundle:
-        assert len(bundle.namelist()) == 8
+        assert len(bundle.namelist()) == 7
         assert 'FLAG{' not in bundle.read('participant/tasks.json').decode()
         assert 'FLAG{' in bundle.read('evaluator/verifiers.json').decode()
     with pytest.raises(ValueError, match='already exists'):
@@ -62,15 +62,15 @@ def test_changed_xml_refused_before_checks(build):
     assert not build['output'].exists()
 
 
-def test_cli_post_execute_uses_explicit_scope_and_split(build, capsys):
+def test_cli_post_execute_uses_split_without_scope(build, capsys):
     args = SimpleNamespace(xml=str(build['xml_path']), scenario=build['scenario'], suite_id='cli-eval',
-        evaluation_output_dir=str(build['output']), eval_allow=['10.77.0.0/24'], eval_disallow=[],
+        evaluation_output_dir=str(build['output']),
         eval_split='validation', evaluation_tasks=None, readiness_report=None)
     assert cli._post_execution_evaluation(args, backend=build['backend'], core_cfg=build['core_cfg'], session_id=9)
     assert 'EVALUATION_PACKAGE_JSON:' in capsys.readouterr().out
     task = json.loads((build['output'] / 'participant/tasks.json').read_text())[0]
     assert task['split'] == 'validation'
-    assert json.loads((build['output'] / 'participant/network-policy.json').read_text())['allow'] == ['10.77.0.0/24']
+    assert not (build['output'] / 'participant/network-policy.json').exists()
 
 
 def test_background_artifact_is_idempotent_and_download_authorized(build, tmp_path, monkeypatch):
@@ -155,12 +155,11 @@ const fetch = async path => {
 def test_execute_eval_options_stay_on_coordinator(monkeypatch):
     monkeypatch.setattr('sys.argv', ['cli.py', 'execute', '--xml', 'local.xml',
         '--evaluation-export', '--evaluation-output-dir', '/private/output',
-        '--eval-allow', '10.77.0.0/24', '--eval-disallow=10.77.0.1/32',
         '--suite-id', 'example-suite', '--evaluation-tasks', '/private/tasks.json',
         '--eval-split', 'validation'])
     tokens = cli._build_remote_cli_tokens(remote_xml_path='/remote/scenario.xml',
         remote_preview_plan_path=None, remote_host='localhost', remote_port=50051)
     assert '/remote/scenario.xml' in tokens
     for private in ['--evaluation-export', '--evaluation-output-dir', '/private/output',
-                    '10.77.0.0/24', '--eval-disallow=10.77.0.1/32', 'example-suite', '/private/tasks.json', 'validation']:
+                    'example-suite', '/private/tasks.json', 'validation']:
         assert private not in tokens

@@ -15,12 +15,11 @@ Evaluation package (ZIP)**. The download waits for generation to finish. It is
 available to administrators and builders authorized for that scenario, and contains
 evaluator-only answers: do not distribute the complete ZIP to participants.
 
-The WebUI default creates a whole-scenario flag task. Allowed evaluation targets
-are the resolved attack-graph hosts, each expressed as a `/32` address. It does not
-authorize an entire subnet just because a host is present. Scenarios without a
-resolved Flow/flags or usable addresses cannot produce the default task; the Reports
-action shows a generation error. Older executions do not gain packages retroactively;
-execute again or use the standalone export below.
+The WebUI default creates a whole-scenario flag task. CAF owns execution scope:
+configure allow/disallow only in the CAF evaluation YAML. ScenarioForge exports
+objectives and topology, not execution permissions. Scenarios need resolved flags
+and addresses for the default task. Older executions require a new execution or
+the standalone export below.
 
 If checks fail or cannot run, a package may still be generated for inspection, but
 the download warns that readiness has not passed. CyberAgentFlow will reject it.
@@ -37,7 +36,7 @@ python -m scenarioforge.cli execute \
   --evaluation-export
 ```
 
-This runs checks and emits `EVALUATION_PACKAGE_JSON:` with the ZIP path, scope,
+This runs checks and emits `EVALUATION_PACKAGE_JSON:` with the ZIP path,
 package hash and readiness result. It works for local execution and execution
 delegated to a CORE VM; package generation runs on the coordinating machine. A
 failed readiness result or generation error gives the requested CLI workflow a
@@ -46,7 +45,6 @@ nonzero exit code, even when the scenario itself was deployed successfully.
 Optional settings:
 
 ```bash
---eval-allow 10.77.0.0/24 --eval-disallow 10.77.0.1/32 \
 --suite-id training-dev-v1 \
 --evaluation-output-dir /path/to/new-package-directory
 ```
@@ -57,21 +55,21 @@ standalone export only; execute-time generation always collects fresh evidence.
 Do not also run `--check-artifacts` expecting a second check: evaluation generation
 already performs the strict checks once.
 
-### What `--eval-allow` means
+### Execution scope belongs to CAF
 
-It is the **agent's permitted target scope** in the exported package and imported
-CyberAgentFlow configuration. It does not add routes, configure Kali interfaces,
-change firewall rules, or select which services ScenarioForge deploys.
+The export is version 2 and contains no network-policy file. The former
+`--eval-allow` and `--eval-disallow` options have been removed. Neither export nor
+CAF scope settings change what ScenarioForge deploys.
 
-- `--eval-allow 10.77.0.10/32`: permit that single host.
-- `--eval-allow 10.77.0.0/24`: permit that network.
-- Repeat the option for multiple addresses/networks; `--eval-disallow` excludes targets.
+CAF import preserves the runtime template's `execution.network_policy`, including
+all exclusions and multiple allowed subnets. It checks known objective addresses
+against that policy and refuses conflicts; it never broadens permissions or drops
+objectives. Custom tasks without source-node references cannot be checked this way.
+CAF can still read version 1 packages, but their embedded policy is not authoritative;
+their old prompt text remains unchanged. Re-export to remove those old scope statements.
 
-Standalone `evaluation-export` requires an explicit allow list. Execute-time
-generation defaults to exact resolved graph hosts if no list is given. All selected
-flag objectives must lie in the resulting allowed scope. To use a custom scope or
-authored tasks with a WebUI-created deployment, use standalone export or CLI options;
-the initial Reports action downloads the automatically generated default package.
+For an air-gapped participant VM, manually transfer the ZIP using the lab's approved
+mechanism, then unpack and import locally. No live CAF-to-ScenarioForge link is required.
 
 ## End-to-end workflow
 
@@ -89,17 +87,15 @@ python -m scenarioforge.cli check-artifacts \
 python -m scenarioforge.cli evaluation-export \
   --xml /path/to/deployed.xml --scenario Training \
   --suite-id training-dev-v1 --session-id 9 \
-  --eval-allow 10.77.0.0/24 \
   --readiness-report /path/to/readiness.log \
   --output-dir /path/to/training-dev-v1
 ```
 
-Addresses, session IDs and endpoints above are placeholders. The evaluation allow
-list is explicit participant authorization, not inferred from the hidden graph.
-Repeat `--eval-allow` or `--eval-disallow` for additional CIDRs/addresses.
+Addresses, session IDs and endpoints above are placeholders. Configure execution
+authorization in CAF, independently of the exported topology.
 
 The default is **one whole-scenario flag-collection task** using all graph nodes
-with resolved nonempty string flags. Each selected node must have an in-scope
+with resolved nonempty string flags. Each selected node must have a
 resolved IPv4 address. This avoids incorrectly treating dependent attack-chain
 nodes as independent tasks with missing prerequisite access. Node IDs and target
 addresses are public objectives; graph edges, credentials, resolved generator
@@ -144,7 +140,7 @@ venv/bin/python -m experiments run configs/experiments/training-dev-v1.yaml \
 ```
 
 Import preserves the template's model, budgets, conditions and repetitions, rebases
-file paths, replaces inline tasks with a suite reference, and adopts the exported
+file paths, replaces inline tasks with a suite reference, and preserves the template’s
 network scope. **Choose tools appropriate to the tasks:** the example template
 exposes only nmap and is suitable for the observational inventory example. It is
 not generally sufficient for flag-collection challenges. Review the generated YAML
@@ -162,9 +158,8 @@ The input is a nonempty JSON array. Every task has a unique `id`, `family`, opti
 2. `prompt` plus `verifier: {type, expected}`: an authored task with `json_equals`
    or `contains_all`. `contains_all` is a literal smoke check, not semantic scoring.
 
-Do not supply both `flag_nodes` and `verifier`. The exporter appends the common
-allowed/excluded target scope. Each selected flag node must have a flag and an
-in-scope address. Known resolved flag strings appearing in participant task text
+Do not supply both `flag_nodes` and `verifier`. The exporter does not append execution policy
+to prompts. Each selected flag node must have a flag and a resolved address. Known resolved flag strings appearing in participant task text
 cause export failure; this is an accidental-leak check, not comprehensive secret
 redaction. Audit any authored prompts and participant materials.
 
@@ -173,13 +168,12 @@ starting state operationally. Graph relationships are preserved privately for
 provenance, not automatically provisioned. Splits and families are author labels;
 the system cannot prove tasks were held out from artifact generation.
 
-## Package contract: `scenarioforge-evaluation`, version 1
+## Package contract: `scenarioforge-evaluation`, version 2
 
 ```text
 manifest.json
 participant/
   tasks.json                  # Prompts, IDs, families, splits; no answers
-  network-policy.json         # Explicit allowed/excluded IP networks
 evaluator/
   verifiers.json              # Expected outcomes, keyed by task ID
   task-metadata.json          # Graph source-node references, required checks
@@ -219,7 +213,7 @@ to execute drafts.
 Before a run and before each new attempt, CyberAgentFlow requires:
 
 - Valid manifest and file hashes; participant/evaluator task IDs align.
-- The exact exported network scope in execution configuration.
+- Known objective addresses permitted by the CAF execution policy (deny takes precedence).
 - A completed passing report tied to the same XML, scenario, CORE host/session.
 - Confirmed live-session identity at the time of the report.
 - No failed/warning/pending checks; each task-required check must pass, not skip.

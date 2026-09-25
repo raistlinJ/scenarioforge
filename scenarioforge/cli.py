@@ -4471,7 +4471,7 @@ _CHECK_ARTIFACTS_OPTIONS = {
 # Flags that take a value, so the value token has to be dropped as well.
 _CHECK_ARTIFACTS_VALUE_OPTIONS = {
     '--check-artifacts-delay',
-    '--evaluation-output-dir', '--eval-allow', '--eval-disallow',
+    '--evaluation-output-dir',
     '--evaluation-tasks', '--suite-id', '--readiness-report', '--eval-split',
 }
 
@@ -7548,8 +7548,7 @@ def _post_execution_evaluation(args, *, backend, core_cfg, session_id, stream=No
         definitions = json.loads(Path(args.evaluation_tasks).read_text()) if getattr(args, 'evaluation_tasks', None) else None
         result = build_execution_package(backend=backend, xml_path=args.xml, scenario=args.scenario,
             session_id=session_id, core_cfg=core_cfg, output=output, suite_id=suite_id,
-            allow=getattr(args, 'eval_allow', None) or None,
-            disallow=getattr(args, 'eval_disallow', None) or [], definitions=definitions,
+            definitions=definitions,
             split=getattr(args, 'eval_split', 'development'))
         print('EVALUATION_PACKAGE_JSON: ' + json.dumps(result), file=stream or sys.stdout, flush=True)
         return bool(result['readiness_passed'])
@@ -7564,8 +7563,6 @@ def _add_cli_evaluation_args(container: Any) -> None:
     container.add_argument('--suite-id', help='Stable evaluation suite identifier')
     container.add_argument('--evaluation-tasks', help='Reviewed JSON task definitions; default: one complete flag-collection task')
     container.add_argument('--readiness-report', help='JSON or captured check-artifacts stdout from this deployment')
-    container.add_argument('--eval-allow', action='append', default=[], help='Allowed evaluation targets (repeatable); required for standalone export, defaults to graph host addresses after execute')
-    container.add_argument('--eval-disallow', action='append', default=[], help='Participant excluded IP/CIDR (repeatable)')
     container.add_argument('--eval-split', choices=['development', 'validation', 'test'], default='development')
 
 
@@ -7586,7 +7583,7 @@ def _run_evaluation_export_phase(args: Any) -> int:
         definitions = json.loads(Path(args.evaluation_tasks).read_text()) if args.evaluation_tasks else None
         readiness = read_readiness(args.readiness_report) if args.readiness_report else None
         manifest = export_package(xml_path=xml_path, graph=graph, output=args.output_dir,
-                                  suite_id=args.suite_id, allow=args.eval_allow, disallow=args.eval_disallow,
+                                  suite_id=args.suite_id,
                                   definitions=definitions, split=args.eval_split,
                                   readiness=readiness, session_id=args.session_id)
         result = {'ok': True, 'phase': 'evaluation-export', 'suite_id': manifest['id'],

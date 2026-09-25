@@ -71,6 +71,7 @@ poll=0
 guest_marker_exists() {{ (( poll >= 4 )); }}
 guest_bootstrap_failure_text() {{ return 0; }}
 guest_bootstrap_percent() {{ echo 25; }}
+guest_command_output() {{ return 0; }}
 guest_last_log_line() {{
     # Guest agent initially unavailable, then Cloud-Init, then the role log.
     (( poll > 0 )) || return 0
@@ -92,6 +93,27 @@ sleep() {{ poll=$((poll + 1)); }}
         assert output.count(f'{role} guest: Setting up chromium ...') == 1
     assert 'heartbeat (elapsed ' in output
     assert 'DEBUG' not in output
+
+
+@pytest.mark.parametrize('agent_available', [False, True])
+def test_missing_guest_logs_report_diagnostics_once(agent_available):
+    result = subprocess.run(['bash', '-c', f'''
+source {shlex.quote(str(INSTALLER))}
+guest_last_log_line() {{ return 0; }}
+guest_command_output() {{ {'echo scenarioforge-agent-ready' if agent_available else 'return 0'}; }}
+report_guest_activity PARTICIPANT 9403 /var/log/scenarioforge-participant-bootstrap.log
+report_guest_activity PARTICIPANT 9403 /var/log/scenarioforge-participant-bootstrap.log
+'''], capture_output=True, text=True, timeout=10)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert output.count('PARTICIPANT guest:') == 1
+    assert 'cloud-init status --long' in output
+    if agent_available:
+        assert 'No bootstrap or Cloud-Init log available yet' in output
+        assert 'execution unavailable' not in output
+    else:
+        assert 'bootstrap progress is unknown' in output
+        assert 'Open VM 9403 console' in output
 
 
 def test_installer_preserves_required_network_separation_and_core_install_path() -> None:
@@ -803,13 +825,9 @@ write_cloud_init_files
     for role in ('core', 'app', 'participant'):
         interfaces = yaml.safe_load((tmp_path / f'{role}-network.yaml').read_text())['ethernets']
         for nic in interfaces.values():
-            if platform == 'proxmox':
-                assert nic['match']['name'] in ('ens18', 'ens19', 'ens20')
-                assert 'macaddress' not in nic['match']
-                assert 'set-name' not in nic
-            else:
-                assert 'macaddress' in nic['match']
-                assert 'set-name' in nic
+            assert 'macaddress' in nic['match']
+            assert 'name' not in nic['match']
+            assert nic['set-name'] in ('ens18', 'ens19', 'ens20')
         uplink = interfaces['bootstrap-uplink' if role == 'participant' else 'uplink']
         assert uplink['dhcp4'] is True
         assert 'addresses' not in uplink
