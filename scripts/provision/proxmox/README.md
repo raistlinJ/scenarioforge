@@ -726,12 +726,18 @@ Guest Agent, already installed by this provisioner, without a guest network link
 
 With orchestrator 0.6+ and evaluator 0.4+, PVE users select VM roles in the WebUI
 from the QEMU VMs they can audit on this host. Their run storage is private under
-`RUNS_ROOT/_users/<owner-hash>/`. The dedicated `caf-orchestrator` group enables
+`RUNS_ROOT/_users/<owner-hash>/`. The dedicated `caf-orchestration` group enables
 host-mediated guest control within each user's effective VM.Audit scope (including
 pool/group grants). Enrollment does not itself create VM ACLs. Use `user-run`,
 `user-resume` and `user-recover` with the same runs root and PVE web configuration
 to enforce user scope during execution; see the installed orchestrator README.
 The original CLI commands remain trusted host-administrator tools.
+
+SCE-web's **Enable orchestration access (dangerous)** grants both
+`caf-orchestration` and `caf-maintainers`, including application updates/rollback.
+For an existing orchestrator configured with the former `caf-orchestrator` group,
+re-enroll the intended users, change `auth.required_group` in its `web.yaml` to
+`caf-orchestration`, and restart. Existing config files are preserved during install.
 
 VM `--reinstall` leaves the host application alone; use `install-orchestrator` to
 refresh it separately. Lab `cleanup` preserves the host application and any saved
