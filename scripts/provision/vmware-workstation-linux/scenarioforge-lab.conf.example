@@ -98,6 +98,9 @@ manage_hitl_network=true
 cyber_agent_flow=false
 cyber_agent_flow_url=https://github.com/raistlinJ/cyber-agent-flow.git
 cyber_agent_flow_ref=main
+# The evaluator is always installed alongside CyberAgentFlow.
+cyber_agent_flow_eval_url=https://github.com/raistlinJ/cyber-agent-flow-eval.git
+cyber_agent_flow_eval_ref=main
 
 # --- LLM provider connection ---
 # Fixed IPv4 route destination. The URL can use this IP or a hostname that

@@ -36,6 +36,8 @@
   "cyber_agent_flow": false,
   "cyber_agent_flow_url": "https://github.com/raistlinJ/cyber-agent-flow.git",
   "cyber_agent_flow_ref": "main",
+  "cyber_agent_flow_eval_url": "https://github.com/raistlinJ/cyber-agent-flow-eval.git",
+  "cyber_agent_flow_eval_ref": "main",
   "llm_provider_address": "",
   "llm_provider_url": "",
   "llm_provider_type": "ollama_direct",

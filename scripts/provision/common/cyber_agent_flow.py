@@ -10,9 +10,19 @@ from urllib.parse import urlsplit
 
 DEFAULTS = dict(cyber_agent_flow=False,
     cyber_agent_flow_url='https://github.com/raistlinJ/cyber-agent-flow.git',
-    cyber_agent_flow_ref='main', llm_provider_address='', llm_provider_url='',
+    cyber_agent_flow_ref='main',
+    cyber_agent_flow_eval_url='https://github.com/raistlinJ/cyber-agent-flow-eval.git',
+    cyber_agent_flow_eval_ref='main', llm_provider_address='', llm_provider_url='',
     llm_provider_type='ollama_direct', llm_model='', llm_interface_cidr='',
     llm_gateway='', llm_vmnet='vmnet8', llm_bridge='')
+
+def validate_git_source(url, ref, label):
+    source = urlsplit(url)
+    if (source.scheme != 'https' or not source.hostname or source.username or source.password
+            or any(c.isspace() or ord(c) < 32 for c in url)):
+        raise ValueError(f'{label}_url must be an HTTPS Git URL without credentials or whitespace')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', ref):
+        raise ValueError(f'invalid {label}_ref')
 
 def validate(config):
     c = {**DEFAULTS, **config}
@@ -46,11 +56,8 @@ def validate(config):
         raise ValueError('llm_provider_url must be an http(s) URL without credentials')
     if c['llm_provider_type'] not in ('ollama_direct', 'litellm', 'openai', 'claude'):
         raise ValueError('unsupported llm_provider_type')
-    source = urlsplit(c['cyber_agent_flow_url'])
-    if source.scheme != 'https' or not source.hostname or source.username or source.password:
-        raise ValueError('cyber_agent_flow_url must be an HTTPS Git URL without credentials')
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', c['cyber_agent_flow_ref']):
-        raise ValueError('invalid cyber_agent_flow_ref')
+    for prefix in ('cyber_agent_flow', 'cyber_agent_flow_eval'):
+        validate_git_source(c[prefix + '_url'], c[prefix + '_ref'], prefix)
     if not re.fullmatch(r'vmnet\d+', c['llm_vmnet']):
         raise ValueError('invalid llm_vmnet')
     if c['llm_bridge'] and not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', c['llm_bridge']):
@@ -157,6 +164,26 @@ CAF_CONFIG
     chmod 0600 /opt/cyber-agent-flow/configs/cli.json
     touch /var/lib/scenarioforge/cyber-agent-flow-installed
 fi
+# The evaluator is required whenever CAF is installed, including bootstrap retries
+# where CAF was already marked installed by an older provisioner.
+set_bootstrap_status 92 'installing CyberAgentFlow evaluator'
+if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-eval-installed ]]; then
+    if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-eval-source-ready ]]; then
+        [[ ! -e /opt/cyber-agent-flow-eval ]] || fail_bootstrap '/opt/cyber-agent-flow-eval already exists; inspect the incomplete installation'
+        git clone -- {q(c['cyber_agent_flow_eval_url'])} /opt/cyber-agent-flow-eval
+        touch /var/lib/scenarioforge/cyber-agent-flow-eval-source-ready
+    fi
+    git -C /opt/cyber-agent-flow-eval fetch origin {q(c['cyber_agent_flow_eval_ref'])}
+    git -C /opt/cyber-agent-flow-eval checkout --detach FETCH_HEAD
+    python3 -m venv /opt/cyber-agent-flow-eval/.venv
+    /opt/cyber-agent-flow-eval/.venv/bin/python -m pip install -e /opt/cyber-agent-flow-eval
+    /opt/cyber-agent-flow-eval/.venv/bin/python -m pip check
+    chown -R participant:participant /opt/cyber-agent-flow-eval
+    /opt/cyber-agent-flow-eval/.venv/bin/cyber-agent-flow-eval --help >/dev/null
+    touch /var/lib/scenarioforge/cyber-agent-flow-eval-installed
+fi
+/opt/cyber-agent-flow-eval/.venv/bin/cyber-agent-flow-eval --help >/dev/null
+ln -sfn /opt/cyber-agent-flow-eval/.venv/bin/cyber-agent-flow-eval /usr/local/bin/cyber-agent-flow-eval
 # Verify existing installations too, before declaring the participant ready.
 if [[ -f /opt/cyber-agent-flow/install_claude.sh ]]; then
     sudo -H -u participant bash /opt/cyber-agent-flow/install_claude.sh --check \\

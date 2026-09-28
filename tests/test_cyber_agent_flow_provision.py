@@ -99,6 +99,7 @@ def test_injected_install_precedes_readiness(config, tmp_path):
     ('proxmox', 'apply_proxmox_config_value'),
 ])
 def test_shell_config_and_guest_generation(platform, callback, config, tmp_path):
+    config.update(cyber_agent_flow_eval_url='https://example.org/evaluator.git', cyber_agent_flow_eval_ref='test-ref')
     installer = ROOT / 'scripts/provision' / platform / 'install-scenarioforge-lab.sh'
     assignments = '\n'.join(f'{callback} {key} {shlex.quote(str(value).lower() if isinstance(value, bool) else value)}' for key, value in config.items())
     probe = f'''source {shlex.quote(str(installer))}
@@ -118,6 +119,8 @@ caf_generate network 00:50:56:01:02:03
     assert network['set-name'] == 'ens20'
     generated = (tmp_path / 'participant-bootstrap.sh').read_text()
     assert '/opt/cyber-agent-flow' in generated
+    assert 'git clone -- https://example.org/evaluator.git /opt/cyber-agent-flow-eval' in generated
+    assert 'git -C /opt/cyber-agent-flow-eval fetch origin test-ref' in generated
     subprocess.run(['bash', '-n', str(tmp_path / 'participant-bootstrap.sh')], check=True)
 
 
@@ -279,3 +282,30 @@ elif name == 'curl':
     commands = [json.loads(line) for line in log.read_text().splitlines()]
     assert not any(command[0] == 'curl' for command in commands)
     assert ['claude', ['--version'], 'participant'] in commands
+
+
+@pytest.mark.parametrize('key,value', [
+    ('cyber_agent_flow_eval_url', 'file:///tmp/eval'),
+    ('cyber_agent_flow_eval_url', 'https://user:secret@example.org/eval.git'),
+    ('cyber_agent_flow_eval_ref', '--evil'),
+])
+def test_invalid_evaluator_sources(config, key, value):
+    config[key] = value
+    with pytest.raises(ValueError):
+        caf.validate(config)
+
+
+def test_evaluator_installed_before_readiness_even_on_caf_retry(config, tmp_path):
+    config.update(cyber_agent_flow_eval_url='https://example.org/custom-eval.git',
+                  cyber_agent_flow_eval_ref='release/test')
+    script = caf.inject('#!/bin/bash\ntouch /var/lib/scenarioforge/participant-ready\n', config)
+    eval_start = script.index('if [[ ! -f /var/lib/scenarioforge/cyber-agent-flow-eval-installed')
+    caf_done = script.index('touch /var/lib/scenarioforge/cyber-agent-flow-installed\nfi')
+    assert caf_done < eval_start
+    assert 'git clone -- https://example.org/custom-eval.git /opt/cyber-agent-flow-eval' in script
+    assert 'git -C /opt/cyber-agent-flow-eval fetch origin release/test' in script
+    assert script.index('cyber-agent-flow-eval --help') < script.index('touch /var/lib/scenarioforge/cyber-agent-flow-eval-installed')
+    assert script.index('touch /var/lib/scenarioforge/cyber-agent-flow-eval-installed') < script.index('touch /var/lib/scenarioforge/participant-ready')
+    path = tmp_path / 'participant.sh'
+    path.write_text(script)
+    subprocess.run(['bash', '-n', str(path)], check=True)

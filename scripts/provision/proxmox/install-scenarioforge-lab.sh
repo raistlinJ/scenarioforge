@@ -6,7 +6,9 @@ set -Eeuo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/cyber-agent-flow.sh"
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/reinstall.sh"
 
-SCRIPT_VERSION="0.10.0"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/orchestrator.sh"
+
+SCRIPT_VERSION="0.11.0"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -249,6 +251,7 @@ load_config_from_args() {
                 found="${option#--config=}"
                 shift
                 ;;
+            --orchestrator-url|--orchestrator-ref|--cyber-agent-flow-url|--cyber-agent-flow-ref|--cyber-agent-flow-eval-url|--cyber-agent-flow-eval-ref|\
             --storage|--snippet-storage|--uplink-bridge|--management-bridge|--hitl-bridge|\
             --core-vmid|--app-vmid|--participant-vmid|--lab-dir|--management-vmnet|--hitl-vmnet|\
             --ssh-public-key|--core-password|--app-password|--participant-password|--web-admin-password|\
@@ -284,7 +287,13 @@ apply_proxmox_config_value() {
         hitl_bridge) assign_config_setting HITL_BRIDGE SF_HITL_BRIDGE "$value" ;;
         core_vmid) assign_config_setting CORE_VMID SF_CORE_VMID "$value" ;;
         app_vmid) assign_config_setting APP_VMID SF_APP_VMID "$value" ;;
-        cyber_agent_flow|cyber_agent_flow_url|cyber_agent_flow_ref|llm_provider_address|llm_provider_url|llm_provider_type|llm_model|llm_interface_cidr|llm_gateway|llm_vmnet|llm_bridge) apply_caf_config "$key" "$value" ;;
+        cyber_agent_flow|cyber_agent_flow_url|cyber_agent_flow_ref|cyber_agent_flow_eval_url|cyber_agent_flow_eval_ref|llm_provider_address|llm_provider_url|llm_provider_type|llm_model|llm_interface_cidr|llm_gateway|llm_vmnet|llm_bridge) apply_caf_config "$key" "$value" ;;
+        orchestrator)
+            parse_config_boolean "$key" "$value"
+            assign_config_setting ORCHESTRATOR SF_ORCHESTRATOR "$CONFIG_BOOLEAN_VALUE"
+            ;;
+        orchestrator_url) assign_config_setting ORCHESTRATOR_URL SF_ORCHESTRATOR_URL "$value" ;;
+        orchestrator_ref) assign_config_setting ORCHESTRATOR_REF SF_ORCHESTRATOR_REF "$value" ;;
         participant_os) assign_config_setting PARTICIPANT_OS SF_PARTICIPANT_OS "$value" ;;
         participant_vmid) assign_config_setting PARTICIPANT_VMID SF_PARTICIPANT_VMID "$value" ;;
         ssh_public_key) assign_config_setting SSH_PUBLIC_KEY_FILE SF_SSH_PUBLIC_KEY_FILE "$value" ;;
@@ -349,6 +358,7 @@ Usage:
   install-scenarioforge-lab.sh status [--watch] [--interval SECONDS]
   install-scenarioforge-lab.sh cleanup [--dry-run] [--force] [--yes]
   install-scenarioforge-lab.sh --cleanup [--dry-run] [--force] [--yes]
+  install-scenarioforge-lab.sh install-orchestrator [--config FILE] [--dry-run]
   install-scenarioforge-lab.sh --help
 
 Provision three cloud-image VMs on the current Proxmox VE node:
@@ -368,7 +378,8 @@ Important options:
   --hitl-bridge NAME           Isolated participant/HITL bridge (default: sfhitl0)
   --core-vmid ID               CORE VMID (default: 9401)
   --app-vmid ID                ScenarioForge VMID (default: 9402)
-  --cyber-agent-flow          install CyberAgentFlow on Kali (LLM settings required in config)
+  --cyber-agent-flow          Install CyberAgentFlow + evaluator on Kali (LLM config required)
+  --orchestrator              Install the orchestrator on this Proxmox host
   --participant-os OS          Participant OS: debian (default) or kali
   --participant-vmid ID        Participant VMID (default: 9403)
   --ssh-public-key FILE        Add one OpenSSH public key to all guest users
@@ -397,6 +408,12 @@ Network/address overrides:
   --participant-gateway IP    HITL router (default: first usable address except CORE HITL IP)
 
 Repository overrides:
+  --orchestrator-url URL       Default: https://github.com/raistlinJ/cyber-agent-flow-orchestrator.git
+  --orchestrator-ref REF       Default: main
+  --cyber-agent-flow-url URL   Default: https://github.com/raistlinJ/cyber-agent-flow.git
+  --cyber-agent-flow-ref REF   Default: main
+  --cyber-agent-flow-eval-url URL  Default: https://github.com/raistlinJ/cyber-agent-flow-eval.git
+  --cyber-agent-flow-eval-ref REF  Default: main
   --core-minimal-ref REF       Default: main
   --core-ref REF               Default: master
   --scenarioforge-ref REF      Default: main
@@ -431,6 +448,13 @@ parse_args() {
             --app-disk-gb) APP_DISK_GB="${2:?missing value for --app-disk-gb}"; REINSTALL_APP_DISK_GB="$APP_DISK_GB"; shift 2 ;;
             --participant-disk-gb) PARTICIPANT_DISK_GB="${2:?missing value for --participant-disk-gb}"; REINSTALL_PARTICIPANT_DISK_GB="$PARTICIPANT_DISK_GB"; shift 2 ;;
             --cyber-agent-flow) CYBER_AGENT_FLOW=1; shift ;;
+            --orchestrator) ORCHESTRATOR=1; shift ;;
+            --orchestrator-url) ORCHESTRATOR_URL="${2:?missing value for --orchestrator-url}"; shift 2 ;;
+            --orchestrator-ref) ORCHESTRATOR_REF="${2:?missing value for --orchestrator-ref}"; shift 2 ;;
+            --cyber-agent-flow-url) CYBER_AGENT_FLOW_URL="${2:?missing value for --cyber-agent-flow-url}"; shift 2 ;;
+            --cyber-agent-flow-ref) CYBER_AGENT_FLOW_REF="${2:?missing value for --cyber-agent-flow-ref}"; shift 2 ;;
+            --cyber-agent-flow-eval-url) CYBER_AGENT_FLOW_EVAL_URL="${2:?missing value for --cyber-agent-flow-eval-url}"; shift 2 ;;
+            --cyber-agent-flow-eval-ref) CYBER_AGENT_FLOW_EVAL_REF="${2:?missing value for --cyber-agent-flow-eval-ref}"; shift 2 ;;
             --participant-os) PARTICIPANT_OS="${2:?missing value for --participant-os}"; shift 2 ;;
             --participant-vmid) PARTICIPANT_VMID="${2:?missing value for --participant-vmid}"; shift 2 ;;
             --ssh-public-key) SSH_PUBLIC_KEY_FILE="${2:?missing value for --ssh-public-key}"; shift 2 ;;
@@ -463,7 +487,7 @@ parse_args() {
         esac
     done
 
-    [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" || "$COMMAND" == reinstall ]] || die "unknown command: $COMMAND"
+    [[ "$COMMAND" == "install" || "$COMMAND" == "status" || "$COMMAND" == "cleanup" || "$COMMAND" == reinstall || "$COMMAND" == install-orchestrator ]] || die "unknown command: $COMMAND"
     validate_reinstall_target
     [[ "$VERBOSE" == "0" || "$VERBOSE" == "1" ]] || die "SF_VERBOSE must be 0 or 1"
     [[ "$INSTALL_FLAG_GENERATORS" == "0" || "$INSTALL_FLAG_GENERATORS" == "1" ]] \
@@ -578,6 +602,8 @@ PY
 }
 
 validate_install_inputs() {
+    validate_orchestrator
+    preflight_orchestrator
     validate_caf
     if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
         [[ -n "$LLM_BRIDGE" ]] || LLM_BRIDGE="$UPLINK_BRIDGE"
@@ -699,6 +725,7 @@ confirm_install() {
     log "VM storage:         $VM_STORAGE"
     log "Cloud-Init snippets:$SNIPPET_STORAGE"
     log "Participant OS:     $PARTICIPANT_OS"
+    log "Optional software:  participant CAF+eval=$CYBER_AGENT_FLOW host orchestrator=$ORCHESTRATOR"
     log "VMIDs:              CORE=$CORE_VMID APP=$APP_VMID PARTICIPANT=$PARTICIPANT_VMID"
     log "Bridges:            uplink=$UPLINK_BRIDGE management=$MANAGEMENT_BRIDGE HITL=$HITL_BRIDGE"
     log "Addresses:          app=$APP_MANAGEMENT_CIDR core=$CORE_MANAGEMENT_CIDR participant=$PARTICIPANT_CIDR"
@@ -2107,6 +2134,7 @@ write_state() {
         shell_assignment PARTICIPANT_NAME "$PARTICIPANT_NAME"
         shell_assignment PARTICIPANT_OS "$PARTICIPANT_OS"
         save_caf_state
+        save_orchestrator_state
         shell_assignment INSTALL_COMPLETE "${INSTALL_COMPLETE:-0}"
         shell_assignment PARTICIPANT_BOOTSTRAP_REQUIRED "$PARTICIPANT_BOOTSTRAP_REQUIRED"
         shell_assignment PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED "$PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED"
@@ -2971,6 +2999,8 @@ perform_install() {
     CREATED_HITL_BRIDGE=pending
     write_state
 
+    install_orchestrator
+
     progress 7 "Creating or validating the isolated management and HITL bridges"
     ensure_isolated_bridge "$MANAGEMENT_BRIDGE" "ScenarioForge isolated CORE management"
     ensure_isolated_bridge "$HITL_BRIDGE" "ScenarioForge isolated participant HITL"
@@ -3072,6 +3102,7 @@ main() {
         cleanup) perform_cleanup ;;
         reinstall) perform_reinstall ;;
         install) perform_install ;;
+        install-orchestrator) ORCHESTRATOR=1; install_orchestrator ;;
     esac
 }
 

@@ -77,6 +77,13 @@ their old prompt text remains unchanged. Re-export to remove those old scope sta
 
 For an air-gapped participant VM, manually transfer the ZIP using the lab's approved
 mechanism, then unpack and import locally. No live CAF-to-ScenarioForge link is required.
+Alternatively, the separate `cyber-agent-flow-eval` project can run on the Proxmox
+host and use QEMU Guest Agent to fetch the ZIP from app-vm, stage participant inputs
+in participant-vm, and collect results without guest IPs or an app-to-participant
+network link. Private verifier data stays on the host. See its
+[Proxmox coordinator guide](https://github.com/raistlinJ/cyber-agent-flow-eval/blob/main/docs/proxmox.md).
+This uses the guest-agent support already installed by ScenarioForge's Proxmox
+provisioner; it does not change the evaluation-export format.
 
 ## End-to-end workflow
 
@@ -329,8 +336,15 @@ import. If evidence expires, collect new checks and export a new package and out
 run; changing evidence deliberately changes experiment identity. Do not edit the
 frozen package in place to make an old report appear fresh.
 
-There is no environment deployment/reset adapter in this change. Begin with
-observational tasks on a reserved lab. Flag tasks that mutate state need a validated
+ScenarioForge exports do not themselves reset evaluation targets. The separate
+[cyber-agent-flow-orchestrator](../../cyber-agent-flow-orchestrator/README.md)
+can now invoke the existing ScenarioForge `execute --evaluation-export` CLI from
+the Proxmox host, select a saved XML/scenario, fetch the resulting ZIP through the
+QEMU guest agent, prepare artifacts, and invoke `cyber-agent-flow-eval`. Reusing an
+existing ZIP is also supported. No ScenarioForge allow/disallow policy is added;
+network scope remains in the CAF evaluator configuration. Workflow commands are
+operator-configured; per-attempt reset/readiness scripts remain evaluator hooks.
+Begin with observational tasks on a reserved lab. Flag tasks that mutate state need a validated
 restoration procedure before repeated baseline/artifact comparisons are interpretable.
 Restoration, executable/container snapshots, and held-out evaluator isolation remain
 explicit prerequisites for stronger claims.

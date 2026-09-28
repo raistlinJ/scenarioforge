@@ -524,6 +524,28 @@ and `cyber_agent_flow_ref` to select a repository/ref or commit. Uncommitted loc
 changes are not copied. The guest needs access to that repository during bootstrap;
 private-repository host credentials are not copied into Kali.
 
+Enabling CyberAgentFlow also installs **cyber-agent-flow-eval** in
+`/opt/cyber-agent-flow-eval`, with its own `.venv` and a
+`cyber-agent-flow-eval` command on the participant's PATH. Its default source is
+`https://github.com/raistlinJ/cyber-agent-flow-eval.git` at `main`; override
+`cyber_agent_flow_eval_url` and `cyber_agent_flow_eval_ref` in the installer config.
+Evaluator installation and its CLI smoke check must succeed before the participant
+is marked ready. Existing CAF installation markers do not skip evaluator setup
+when the bootstrap is retried. No experiment is started automatically.
+
+For a local participant evaluation, select the installed engine in experiment YAML:
+
+```yaml
+engine:
+  path: /opt/cyber-agent-flow
+  python: /opt/cyber-agent-flow/venv/bin/python
+```
+
+Run `cyber-agent-flow-eval --help` for the installed version's commands. See
+`/opt/cyber-agent-flow-eval/README.md` and its `examples/` for complete experiment
+configs. Rebuilding a participant from saved installer settings preserves the
+selected evaluator URL/ref.
+
 Configure these values before enabling the option:
 
 | Setting | Meaning |

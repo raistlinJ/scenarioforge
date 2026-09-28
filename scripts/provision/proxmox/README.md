@@ -627,6 +627,117 @@ If a tracked bridge cannot be removed, cleanup retains installer state and
 credentials so you can resolve its remaining dependencies and retry. A bridge
 already removed manually does not need to be recreated for cleanup.
 
+## Optional orchestrator on the Proxmox host
+
+Set `orchestrator=true` in `scenarioforge-lab.conf`, or pass `--orchestrator`
+when creating a lab. This installs **cyber-agent-flow-orchestrator on the host**;
+`cyber_agent_flow=true` / `--cyber-agent-flow` independently installs CAF and its
+evaluator **in the Kali participant**. Enabling the orchestrator alone does not
+select Kali or install CAF in a guest.
+
+```bash
+# New lab: first fill in the LLM provider fields in your config.
+bash scripts/provision/proxmox/install-scenarioforge-lab.sh install \
+  --config scenarioforge-lab.conf --cyber-agent-flow --orchestrator
+
+# Existing lab, or retry just a failed host application install:
+bash scripts/provision/proxmox/install-scenarioforge-lab.sh install-orchestrator \
+  --config scenarioforge-lab.conf
+
+# Preview host package/checkout/environment commands without changing anything:
+bash scripts/provision/proxmox/install-scenarioforge-lab.sh install-orchestrator \
+  --config scenarioforge-lab.conf --dry-run
+```
+
+Run these as root on the Proxmox node. `install-orchestrator` installs only the host
+application, regardless of `orchestrator=false` in the config; it leaves VM and lab
+state untouched and can also be used before a lab is provisioned. Repeating it
+fetches the configured refs and refreshes the application environment. Stop any
+running orchestrator first when updating it.
+
+| Config key | CLI override | Default |
+| --- | --- | --- |
+| `orchestrator` | `--orchestrator` | `false` |
+| `orchestrator_url` | `--orchestrator-url URL` | `https://github.com/raistlinJ/cyber-agent-flow-orchestrator.git` |
+| `orchestrator_ref` | `--orchestrator-ref REF` | `main` |
+| `cyber_agent_flow_url` | `--cyber-agent-flow-url URL` | `https://github.com/raistlinJ/cyber-agent-flow.git` |
+| `cyber_agent_flow_ref` | `--cyber-agent-flow-ref REF` | `main` |
+| `cyber_agent_flow_eval_url` | `--cyber-agent-flow-eval-url URL` | `https://github.com/raistlinJ/cyber-agent-flow-eval.git` |
+| `cyber_agent_flow_eval_ref` | `--cyber-agent-flow-eval-ref REF` | `main` |
+
+Every setting also accepts its uppercase `SF_` environment variable, for example
+`SF_ORCHESTRATOR=1` or `SF_CYBER_AGENT_FLOW_EVAL_URL=https://example.org/eval.git`.
+Precedence is CLI > environment > config > default. URLs must use HTTPS without
+embedded credentials. The evaluator source settings apply to both the host
+orchestrator dependency and the participant evaluator. Pin compatible commit refs
+for repeatable source versions. Only code pushed to the selected repositories is
+installed; local/uncommitted sibling-project changes are not copied.
+
+Host layout:
+
+```text
+/opt/scenarioforge-orchestrator/
+  cyber-agent-flow-orchestrator/       # source, README, examples, .venv/
+  cyber-agent-flow-eval/               # sibling dependency source
+/usr/local/bin/cyber-agent-flow-orchestrator
+/usr/local/bin/cyber-agent-flow-eval
+/certs/cert.pem                        # WebUI certificate / replacement full chain
+/certs/key.pem                         # matching private key (0600)
+```
+
+Setup installs host `git`, CA certificates and Python venv support through apt,
+then installs `uv` inside the orchestrator environment and uses it to install both
+local Python projects together. It requires host Python 3.10+ and Internet access
+to the selected Git repositories and package indexes. Runtime dependencies are
+resolved from those projects' metadata; the installer does not apply their uv
+lockfile. Dependency and CLI smoke checks run before publishing the commands.
+Unmanaged installation directories, conflicting commands, changed repository URLs
+in an existing checkout, and tracked source edits are refused rather than overwritten.
+
+After installation:
+
+```bash
+cyber-agent-flow-orchestrator --help
+cyber-agent-flow-eval --help
+```
+
+Use the installed orchestrator `README.md` and `examples/` to configure your
+workflow, VM roles/IDs and run storage. Installation does not start experiments,
+start a WebUI service or assign PVE users/groups. On first install it creates a
+365-day self-signed WebUI certificate at `/certs/cert.pem` with its private key at
+`/certs/key.pem` (mode `0600`). The certificate covers localhost, loopback IPv4/IPv6,
+and the host short name/FQDN. `examples/web.pve.yaml` reads these absolute paths,
+including when copied to another working directory. Configure the PVE endpoint
+and group membership before serving the WebUI.
+
+Existing certificate/key pairs are preserved on install, update and cleanup. If
+only one file exists, installation stops and asks you to restore the pair. To use
+a CA-signed certificate later, replace `/certs/cert.pem` with the PEM certificate
+chain (server certificate first, followed by intermediates) and `/certs/key.pem`
+with the matching unencrypted PEM private key. Keep the key owner-readable only
+(`chmod 600 /certs/key.pem`) and restart the WebUI to reload both files. No YAML
+path change is needed. For direct LAN access, also set `listen` and `public_url`
+to your intended address and ensure the certificate covers that hostname.
+Self-signed certificates require explicit browser trust; renewal is not automatic.
+
+The host process still needs permission to run `qm`/guest-agent operations; PVE WebUI login does not
+supply those host privileges. Guest command execution and file transfer use QEMU
+Guest Agent, already installed by this provisioner, without a guest network link.
+
+With orchestrator 0.6+ and evaluator 0.4+, PVE users select VM roles in the WebUI
+from the QEMU VMs they can audit on this host. Their run storage is private under
+`RUNS_ROOT/_users/<owner-hash>/`. The dedicated `caf-orchestrator` group enables
+host-mediated guest control within each user's effective VM.Audit scope (including
+pool/group grants). Enrollment does not itself create VM ACLs. Use `user-run`,
+`user-resume` and `user-recover` with the same runs root and PVE web configuration
+to enforce user scope during execution; see the installed orchestrator README.
+The original CLI commands remain trusted host-administrator tools.
+
+VM `--reinstall` leaves the host application alone; use `install-orchestrator` to
+refresh it separately. Lab `cleanup` preserves the host application and any saved
+workflows/results. The ordinary lab state records the selected host source settings
+and evaluator settings; a standalone host install does not rewrite saved VM settings.
+
 ## Optional CyberAgentFlow on Kali
 
 Set `cyber_agent_flow=true` in the grouped example config section (Windows JSON
@@ -639,6 +750,28 @@ of the sibling `../cyber-agent-flow` checkout. Override `cyber_agent_flow_url`
 and `cyber_agent_flow_ref` to select a repository/ref or commit. Uncommitted local
 changes are not copied. The guest needs access to that repository during bootstrap;
 private-repository host credentials are not copied into Kali.
+
+Enabling CyberAgentFlow also installs **cyber-agent-flow-eval** in
+`/opt/cyber-agent-flow-eval`, with its own `.venv` and a
+`cyber-agent-flow-eval` command on the participant's PATH. Its default source is
+`https://github.com/raistlinJ/cyber-agent-flow-eval.git` at `main`; override
+`cyber_agent_flow_eval_url` and `cyber_agent_flow_eval_ref` in the installer config.
+Evaluator installation and its CLI smoke check must succeed before the participant
+is marked ready. Existing CAF installation markers do not skip evaluator setup
+when the bootstrap is retried. No experiment is started automatically.
+
+For a local participant evaluation, select the installed engine in experiment YAML:
+
+```yaml
+engine:
+  path: /opt/cyber-agent-flow
+  python: /opt/cyber-agent-flow/venv/bin/python
+```
+
+Run `cyber-agent-flow-eval --help` for the installed version's commands. See
+`/opt/cyber-agent-flow-eval/README.md` and its `examples/` for complete experiment
+configs. Rebuilding a participant from saved installer settings preserves the
+selected evaluator URL/ref.
 
 Configure these values before enabling the option:
 
@@ -892,3 +1025,26 @@ reported instead of repeatedly rebooting or marking CORE ready.
 This applies to new installs and CORE reinstalls, including the shared Linux
 guest bootstrap used by VMware. Existing guests are not changed by updating the
 host scripts. Reinstalling CORE replaces its guest disk.
+
+### Reuse this provision config in the orchestrator
+
+With an orchestrator version supporting `--provision-config`, start it using the
+same Proxmox config file:
+
+```bash
+cyber-agent-flow-orchestrator --provision-config /root/scenarioforge-lab.conf
+```
+
+From an orchestrator checkout installed with `uv sync`, use
+`uv run cyber-agent-flow-orchestrator --provision-config /root/scenarioforge-lab.conf`.
+It imports the three VM IDs and nonempty `llm_provider_type`, `llm_provider_url`,
+and `llm_model` into a separate editable profile. Existing certificate pairs and
+configuration files are preserved. Imported roles are initialized only for eligible
+VMs in the logged-in user's PVE scope; existing saved roles take precedence.
+
+The importer reads file values only, so reflect any provisioning CLI or `SF_*`
+overrides in that file first. It ignores passwords and does not derive evaluation
+allow/deny scope from interface subnets. Scenario selection, export paths, tasks,
+tool catalogs and trial budgets still belong to the orchestrator experiment
+configuration. See the orchestrator's `docs/provision-config.md` for profile
+precedence and `import-provision FILE --output DIR` for a named editable profile.
