@@ -60,9 +60,12 @@ def _tasks(graph, scenario_id, definitions, split):
         raise ValueError('Task definitions must be a nonempty JSON list')
     participant, verifiers, metadata = [], {}, {}
     for item in definitions:
-        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires'}
-        if not isinstance(item, dict) or set(item) - allowed:
-            raise ValueError('Unknown task definition fields')
+        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints'}
+        if not isinstance(item, dict):
+            raise ValueError('Task definition must be an object')
+        unknown = set(item) - allowed
+        if unknown:
+            raise ValueError(f'Unknown task definition fields: {sorted(unknown)}')
         task_id = item.get('id')
         identity(task_id)
         if task_id in verifiers:
@@ -128,6 +131,11 @@ def _tasks(graph, scenario_id, definitions, split):
                             'scenario_id': scenario_id, 'prompt': prompt})
         verifiers[task_id] = verifier
         metadata[task_id] = {'source_nodes': sorted(refs or []), 'required_checks': sorted(set(checks))}
+        hints = item.get('progressive_hints', [])
+        if not isinstance(hints, list) or len(hints) > 16 or any(not isinstance(h, str) or not h.strip() or len(h) > 1500 for h in hints):
+            raise ValueError('progressive_hints must be up to 16 nonempty strings, each at most 1500 characters')
+        if hints:
+            metadata[task_id]['progressive_hints'] = hints
         if discovery:
             metadata[task_id].update(discovery=True, **knowledge)
             if refs is not None:

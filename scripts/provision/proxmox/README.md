@@ -1054,3 +1054,65 @@ allow/deny scope from interface subnets. Scenario selection, export paths, tasks
 tool catalogs and trial budgets still belong to the orchestrator experiment
 configuration. See the orchestrator's `docs/provision-config.md` for profile
 precedence and `import-provision FILE --output DIR` for a named editable profile.
+
+### CORE runtime checkout for remote execution
+
+The CORE guest installs ScenarioForge at `/opt/scenarioforge-services`; the APP
+guest installs it at `/opt/scenarioforge`. Provisioning sets
+`CORE_REMOTE_STATIC_REPO=/opt/scenarioforge-services` in the APP guest's
+`.scenarioforge.env`. The CORE checkout is owned and updated by `corevm` so
+ScenarioForge can synchronize its runtime subset using that SSH account.
+
+Older installations may report `RemoteRepoMissingError: Remote repo not found at
+/tmp/scenarioforge`. Repair both settings from the Proxmox host through QEMU
+Guest Agent; a VM rebuild is unnecessary. Replace the two VM IDs below with the
+lab's APP and CORE IDs (these are VMs, so use `qm`, not `pct`):
+
+```bash
+APP_VMID=YOUR_APP_VMID
+CORE_VMID=YOUR_CORE_VMID
+
+qm guest exec "$CORE_VMID" -- /bin/sh -c 'test ! -L /opt/scenarioforge-services && test -f /opt/scenarioforge-services/scenarioforge/__init__.py && chown -R corevm:corevm /opt/scenarioforge-services'
+
+qm guest exec "$APP_VMID" -- /bin/sh -c 'test -f /opt/scenarioforge/.scenarioforge.env && sed -i "/^CORE_REMOTE_STATIC_REPO=/d" /opt/scenarioforge/.scenarioforge.env && printf "%s\n" "CORE_REMOTE_STATIC_REPO=/opt/scenarioforge-services" >> /opt/scenarioforge/.scenarioforge.env && systemctl restart scenarioforge-web'
+```
+
+Check that both guest operations return exit code zero, then retry the experiment.
+The repair uses QGA; ScenarioForge's execution path still delegates to CORE over
+SSH. `CORE_REMOTE_BASE_DIR` is a separate temporary workspace setting and need
+not change.
+
+
+## Cloning isolated labs
+
+Proxmox guest network snippets now match interface **names**, not MAC addresses.
+Proxmox may regenerate clone MACs without changing the guest static addresses.
+Keep NIC slots, NIC models, guest naming mode and OS unchanged when cloning:
+
+| VM | net0 | net1 | net2 |
+| --- | --- | --- | --- |
+| CORE (Debian) | ens18: management | ens19: HITL | ens20: uplink |
+| APP (Debian) | ens18: uplink | ens19: management | — |
+| Participant (Debian) | ens18: HITL | ens19: bootstrap uplink | ens20: optional LLM |
+| Participant (Kali) | eth0: HITL | eth1: bootstrap uplink | eth2: optional LLM |
+
+For clone 1, attach CORE net1 and participant net0 to `sfhitl1`; for clone 2,
+attach both to `sfhitl2`, and so on. The bridge name belongs to Proxmox, not guest
+Netplan, so it need not be changed inside the guest. Each lab may reuse the HITL
+addresses on its isolated bridge. APP and CORE must also share that lab's own
+management bridge when management addresses are reused.
+
+These changes affect newly generated snippets. Existing templates retain their
+old `/etc/netplan/50-cloud-init.yaml` until migrated. Before cloning an existing
+template, replace each role's `match.macaddress` with the corresponding
+`match.name` above and remove `set-name`; keep addresses and routes intact.
+Inspect **all** `/etc/netplan/*.yaml`, including temporary repair overrides, for
+MAC matching. Back up the files outside `/etc/netplan` first. Validate with
+`netplan generate`, then apply from the VM console or QEMU guest agent and confirm
+`ip address show` and `ip route`. Existing Cloud-Init network snippets referenced
+by `qm config` must also use name matching, or regeneration can restore the old
+MAC bindings.
+
+This solves cloned NIC addressing, not scenario reachability by itself. The
+running scenario still needs its HITL attachment/gateway; scenario-specific routes
+must use that gateway if another interface supplies a preferred default route.

@@ -203,7 +203,7 @@ if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then
     getent ahostsv4 "$provider_host" | awk '{{print $1}}' | sort -u | grep -Fxq -- {q(str(c['llm_provider_address']))} \
         || fail_bootstrap 'LLM provider URL hostname does not resolve to llm_provider_address'
 fi
-ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev ens20( |$)' || fail_bootstrap 'LLM provider traffic is not routed through ens20'
+ip -4 route get {q(c['llm_provider_address'])} | grep -Eq 'dev {c.get('llm_interface_name', 'ens20')}( |$)' || fail_bootstrap 'LLM provider traffic is not routed through {c.get('llm_interface_name', 'ens20')}'
 /usr/local/sbin/update-llm-destination --sync-policy {q(c['llm_provider_address'])} || fail_bootstrap 'Could not exclude the LLM endpoint and route gateway from CyberAgentFlow targets'
 cat > /usr/local/bin/cyber-agent-flow <<'CAF_LAUNCH'
 #!/bin/bash
@@ -267,8 +267,11 @@ if __name__ == '__main__':
     parser.add_argument('action', choices=['validate', 'inject', 'network'])
     parser.add_argument('value', nargs='?')
     parser.add_argument('--match-name', help='Match a stable Proxmox interface name instead of a MAC')
+    parser.add_argument('--interface-name', choices=['ens20', 'eth2'], help='Guest LLM NIC name used for bootstrap route validation')
     args = parser.parse_args()
     c = from_environment()
+    if args.interface_name:
+        c['llm_interface_name'] = args.interface_name
     if args.action == 'inject' and c['cyber_agent_flow']:
         path = Path(args.value)
         path.write_text(inject(path.read_text(), c))

@@ -7894,11 +7894,10 @@ def _prepare_remote_cli_context(
 
         _log_sync_progress(force=True)
 
-        repo_base_name = posixpath.basename(str(repo_dir or '').rstrip('/')) or 'scenarioforge'
-        repo_parent = posixpath.dirname(str(repo_dir or '').rstrip('/')) or '/'
+        # Only the checkout needs to be writable; its parent may be root-owned /opt.
         archive_fd = None
         archive_path = None
-        remote_archive = _remote_path_join(repo_parent, f'.coretg-runtime-subset-{uuid.uuid4().hex}.tar.gz')
+        remote_archive = _remote_path_join(repo_dir, f'.coretg-runtime-subset-{uuid.uuid4().hex}.tar.gz')
         archive_size = 0
         archive_logged_bucket = -1
 
@@ -7929,7 +7928,7 @@ def _prepare_remote_cli_context(
             with tarfile.open(archive_path, 'w:gz') as tar:
                 for local_path, _remote_path, rel_file, _file_size in upload_entries:
                     try:
-                        tar.add(local_path, arcname=posixpath.join(repo_base_name, rel_file))
+                        tar.add(local_path, arcname=rel_file)
                     except Exception:
                         continue
             try:
@@ -7943,7 +7942,7 @@ def _prepare_remote_cli_context(
             except Exception:
                 pass
 
-            _remote_mkdirs(client, repo_parent)
+            _remote_mkdirs(client, repo_dir)
             sftp.put(
                 archive_path,
                 remote_archive,
@@ -7952,8 +7951,8 @@ def _prepare_remote_cli_context(
             _log_archive_progress(archive_size, archive_size, force=True)
 
             extract_script = (
-                f"set -euo pipefail; mkdir -p {shlex.quote(repo_parent)}; "
-                f"tar -xzf {shlex.quote(remote_archive)} -C {shlex.quote(repo_parent)}; "
+                f"set -euo pipefail; mkdir -p {shlex.quote(repo_dir)}; "
+                f"tar -xzf {shlex.quote(remote_archive)} -C {shlex.quote(repo_dir)}; "
                 f"rm -f {shlex.quote(remote_archive)}"
             )
             _exec_ssh_command(client, f"bash -lc {shlex.quote(extract_script)}", timeout=None, check=True)

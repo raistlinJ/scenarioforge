@@ -1199,12 +1199,19 @@ install -m 0644 /etc/docker/daemon.json.new /etc/docker/daemon.json
 rm -f /etc/docker/daemon.json.new
 
 set_bootstrap_status 75 'installing ScenarioForge custom CORE services'
+# This checkout is also the CLI runtime synchronized by the APP VM over SSH.
+# Keep it writable by that account, including when upgrading older root-owned installs.
+if [[ -L /opt/scenarioforge-services ]]; then
+    fail_bootstrap 'Refusing a symlink at /opt/scenarioforge-services'
+fi
+install -d -o corevm -g corevm -m 0755 /opt/scenarioforge-services
+chown -R corevm:corevm /opt/scenarioforge-services
 if [[ ! -d /opt/scenarioforge-services/.git ]]; then
-    git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge-services
+    runuser -u corevm -- git clone --branch "$SCENARIOFORGE_REF" "$SCENARIOFORGE_URL" /opt/scenarioforge-services
 else
-    git -C /opt/scenarioforge-services fetch origin "$SCENARIOFORGE_REF"
-    git -C /opt/scenarioforge-services checkout "$SCENARIOFORGE_REF"
-    git -C /opt/scenarioforge-services pull --ff-only origin "$SCENARIOFORGE_REF"
+    runuser -u corevm -- git -C /opt/scenarioforge-services fetch origin "$SCENARIOFORGE_REF"
+    runuser -u corevm -- git -C /opt/scenarioforge-services checkout "$SCENARIOFORGE_REF"
+    runuser -u corevm -- git -C /opt/scenarioforge-services pull --ff-only origin "$SCENARIOFORGE_REF"
 fi
 install -d -m 0755 /opt/core/custom_services
 install -m 0644 /opt/scenarioforge-services/on_core_machine/custom_services/*.py /opt/core/custom_services/
@@ -1596,6 +1603,7 @@ CORE_PORT=50051
 CORE_SSH_HOST=$CORE_MANAGEMENT_IP
 CORE_SSH_PORT=22
 CORE_SSH_USERNAME=corevm
+CORE_REMOTE_STATIC_REPO=/opt/scenarioforge-services
 CORE_SSH_PASSWORD=$CORE_PASSWORD
 CORETG_WEBUI_MODE=vm
 CORETG_VM_MODE_HITL_ENABLED=true
@@ -1859,10 +1867,18 @@ PARTICIPANT_SCRIPT
         "$WORK_DIR/participant-bootstrap.sh"
 }
 
-# Images may boot with ethN names, so match the provisioned MAC and explicitly
-# rename each NIC before configuring its addresses and routes.
+# Match guest interface names, never a template MAC that Proxmox regenerates on clone.
+# Keep the VM NIC slots and guest naming mode unchanged when cloning.
 network_interface_match() {
-    printf "  %s:\n    match: {macaddress: '%s'}\n    set-name: %s\n" "$3" "$1" "$2"
+    printf "  %s:\n    match: {name: '%s'}\n" "$3" "$2"
+}
+
+participant_interface_name() {
+    if [[ "$PARTICIPANT_OS" == kali ]]; then
+        printf 'eth%s' "$1"
+    else
+        printf 'ens%s' "$((18 + $1))"
+    fi
 }
 
 write_cloud_init_files() {
@@ -2011,6 +2027,10 @@ runcmd:
 final_message: Participant XFCE VM is ready
 EOF
 
+    write_guest_network_files
+}
+
+write_guest_network_files() {
     cat > "$WORK_DIR/core-network.yaml" <<EOF
 version: 2
 ethernets:
@@ -2041,7 +2061,7 @@ EOF
     cat > "$WORK_DIR/participant-network.yaml" <<EOF
 version: 2
 ethernets:
-$(network_interface_match "$PARTICIPANT_NET0_MAC" ens18 participant)
+$(network_interface_match "$PARTICIPANT_NET0_MAC" "$(participant_interface_name 0)" participant)
     addresses: [$PARTICIPANT_CIDR]
     # Prefer temporary NAT during bootstrap; use the CORE HITL router after detach.
     routes:
@@ -2051,7 +2071,7 @@ $(network_interface_match "$PARTICIPANT_NET0_MAC" ens18 participant)
     dhcp4: false
     dhcp6: false
     accept-ra: false
-$(network_interface_match "$PARTICIPANT_NET1_MAC" ens19 bootstrap-uplink)
+$(network_interface_match "$PARTICIPANT_NET1_MAC" "$(participant_interface_name 1)" bootstrap-uplink)
     dhcp4: true
     dhcp-identifier: mac
     dhcp6: false
@@ -3024,9 +3044,9 @@ perform_install() {
 
     progress 28 "Generating guest bootstrap scripts and Cloud-Init data"
     write_guest_bootstraps
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh" --interface-name "$(participant_interface_name 2)"; fi
     write_cloud_init_files
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name "$(participant_interface_name 2)" >> "$WORK_DIR/participant-network.yaml"; fi
     install_snippets
 
     progress 38 "Creating the CORE, ScenarioForge, and participant VMs"

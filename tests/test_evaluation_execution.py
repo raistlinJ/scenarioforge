@@ -163,3 +163,20 @@ def test_execute_eval_options_stay_on_coordinator(monkeypatch):
     for private in ['--evaluation-export', '--evaluation-output-dir', '/private/output',
                     'example-suite', '/private/tasks.json', 'validation']:
         assert private not in tokens
+
+
+def test_cli_streams_readiness_summary_even_when_export_fails(build, monkeypatch):
+    import io
+    import scenarioforge.evaluation.execution as execution
+    def fail_export(**kwargs):
+        raise ValueError('Invalid export definition')
+    monkeypatch.setattr(execution, 'export_package', fail_export)
+    stream = io.StringIO()
+    args = SimpleNamespace(xml=str(build['xml_path']), scenario=build['scenario'], suite_id='cli-failure',
+        evaluation_output_dir=str(build['output']), eval_split='validation', evaluation_tasks=None, readiness_report=None)
+    assert not cli._post_execution_evaluation(args, backend=build['backend'], core_cfg=build['core_cfg'],
+                                               session_id=9, stream=stream)
+    text = stream.getvalue()
+    assert cli.CHECK_ARTIFACTS_MARKER in text
+    assert '[evaluation-export] Failed (ValueError)' in text
+    assert 'EVALUATION_PACKAGE_JSON:' not in text

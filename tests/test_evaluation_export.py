@@ -245,3 +245,23 @@ def test_network_clue_template_matches_manifest_and_output_schema(tmp_path):
     outputs = module.generate({'seed': 'test', 'secret': 'test', 'internal_subnet': '10.78.0.0/24'}, tmp_path)
     jsonschema.validate(outputs, json.loads((root / 'schemas/generators/flag_generator_outputs.schema.json').read_text()))
     assert set(outputs['outputs']) == set(manifest['artifacts']['produces'])
+
+
+def test_progressive_hints_export_only_to_private_metadata(inputs):
+    hint = 'Facilitator excerpt: inspect the next page link.'
+    inputs['definitions'] = [dict(id='guided', family='http', prompt='Explore the public entry page.',
+        verifier=dict(type='contains_all', expected=['FLAG{private-entry}']),
+        required_checks=['ports'], progressive_hints=[hint])]
+    export_package(**inputs)
+    root = inputs['output']
+    assert hint not in (root / 'participant/tasks.json').read_text()
+    assert json.loads((root / 'evaluator/task-metadata.json').read_text())['guided']['progressive_hints'] == [hint]
+
+
+@pytest.mark.parametrize('hints', ['text', [''], ['x' * 1501], [False]])
+def test_invalid_progressive_hints_are_rejected(inputs, hints):
+    inputs['definitions'] = [dict(id='guided', family='http', prompt='Explore the entry page.',
+        verifier=dict(type='contains_all', expected=['FLAG{private-entry}']),
+        required_checks=['ports'], progressive_hints=hints)]
+    with pytest.raises(ValueError, match='progressive_hints'):
+        export_package(**inputs)

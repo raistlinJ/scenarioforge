@@ -371,7 +371,8 @@ def test_prepare_remote_cli_context_uploads_env_file_assets(tmp_path, monkeypatc
     assert fake_sftp.uploaded_bytes[remote_env_path].decode('utf-8') == 'DB_PASSWORD=secret\n'
 
 
-def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeypatch):
+@pytest.mark.parametrize('remote_repo', ['/remote/repo', '/opt/scenarioforge-services'])
+def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeypatch, remote_repo):
     repo_root = tmp_path / 'repo'
     (repo_root / 'scenarioforge' / 'builders').mkdir(parents=True)
     (repo_root / 'scenarioforge' / 'utils').mkdir(parents=True)
@@ -387,7 +388,6 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
     xml_path = tmp_path / 'ephemeral.xml'
     xml_path.write_text('<Scenarios />\n', encoding='utf-8')
 
-    remote_repo = '/remote/repo'
     fake_sftp = _FakeSFTP(
         {
             remote_repo,
@@ -395,6 +395,12 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
             f'{remote_repo}/scenarioforge/__init__.py',
         }
     )
+    original_put = fake_sftp.put
+    def writable_checkout_only(local, remote, **kwargs):
+        if remote.endswith('.tar.gz') and not remote.startswith(remote_repo + '/'):
+            raise PermissionError('Repository parent is not writable')
+        return original_put(local, remote, **kwargs)
+    fake_sftp.put = writable_checkout_only
     client = _FakeSSHClient(fake_sftp)
 
     monkeypatch.setattr(backend, '_remote_base_dir', lambda _sftp: '/remote/base')
@@ -415,16 +421,20 @@ def test_prepare_remote_cli_context_syncs_core_runtime_package(tmp_path, monkeyp
 
     archive_uploads = [remote for _local, remote in fake_sftp.put_calls if remote.endswith('.tar.gz')]
     assert archive_uploads
+    assert all(path.startswith(remote_repo + '/.coretg-runtime-subset-') for path in archive_uploads)
     archive_payload = fake_sftp.uploaded_bytes[archive_uploads[-1]]
     with tarfile.open(fileobj=io.BytesIO(archive_payload), mode='r:gz') as tar:
         archive_names = set(tar.getnames())
 
-    assert 'repo/scenarioforge/cli.py' in archive_names
-    assert 'repo/scenarioforge/builders/topology.py' in archive_names
-    assert 'repo/scenarioforge/utils/services.py' in archive_names
-    assert 'repo/scenarioforge/utils/vuln_process.py' in archive_names
-    assert 'repo/scripts/run_flag_generator.py' in archive_names
-    assert any('tar -xzf' in command for command in client.commands)
+    assert 'scenarioforge/cli.py' in archive_names
+    assert 'scenarioforge/builders/topology.py' in archive_names
+    assert 'scenarioforge/utils/services.py' in archive_names
+    assert 'scenarioforge/utils/vuln_process.py' in archive_names
+    assert 'scripts/run_flag_generator.py' in archive_names
+    import shlex
+    extraction = next(command for command in client.commands if 'tar -xzf' in command)
+    assert '-C ' + remote_repo + ';' in shlex.split(extraction)[-1]
+    assert all(not name.startswith('/') and '..' not in name.split('/') for name in archive_names)
 
     log_text = log_handle.getvalue()
     assert '[remote] runtime subset sync plan: files=' in log_text

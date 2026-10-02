@@ -11,7 +11,7 @@ from .export import export_package, sha256
 
 
 def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg,
-                            output, suite_id, definitions=None, expected_xml_sha256=None, split="development"):
+                            output, suite_id, definitions=None, expected_xml_sha256=None, split="development", progress_stream=None):
 
     from scenarioforge import cli
 
@@ -30,7 +30,13 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
                                           flag_assignments=state.get('flag_assignments', []), starting_facts=starting_facts)
     readiness = {'status': 'unverified', 'checks': []}
     if session_id is not None:
-        stream = io.StringIO()
+        class CheckOutput(io.StringIO):
+            def write(self, text):
+                if progress_stream is not None:
+                    progress_stream.write(text)
+                    progress_stream.flush()
+                return super().write(text)
+        stream = CheckOutput()
         try:
             cli._run_cli_artifact_checks(backend=backend,
                 args=SimpleNamespace(xml=str(xml_path), scenario=scenario), core_cfg=core_cfg,

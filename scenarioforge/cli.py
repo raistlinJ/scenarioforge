@@ -7549,11 +7549,13 @@ def _post_execution_evaluation(args, *, backend, core_cfg, session_id, stream=No
         result = build_execution_package(backend=backend, xml_path=args.xml, scenario=args.scenario,
             session_id=session_id, core_cfg=core_cfg, output=output, suite_id=suite_id,
             definitions=definitions,
-            split=getattr(args, 'eval_split', 'development'))
+            split=getattr(args, 'eval_split', 'development'), progress_stream=stream or sys.stdout)
         print('EVALUATION_PACKAGE_JSON: ' + json.dumps(result), file=stream or sys.stdout, flush=True)
         return bool(result['readiness_passed'])
     except Exception as exc:
         logging.error('Evaluation package generation failed: %s', exc)
+        print(f'[evaluation-export] Failed ({type(exc).__name__}); see ScenarioForge latest.errors for details.',
+              file=stream or sys.stdout, flush=True)
         return False
 
 
