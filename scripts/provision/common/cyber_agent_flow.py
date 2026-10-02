@@ -93,7 +93,7 @@ def inject(script, config):
     q = shlex.quote
     automatic_setup = ''
     if not c['llm_interface_cidr']:
-        route_config = json.dumps(dict(provider=c['llm_provider_address'], protected=[
+        route_config = json.dumps(dict(provider=c['llm_provider_address'], interface=c.get('llm_interface_name', 'ens20'), protected=[
             c.get('participant_cidr', '10.254.200.10/24'), c.get('core_management_cidr', '172.31.250.3/24')]))
         route_script = Path(__file__).with_name('llm_dhcp_route.py').read_text()
         automatic_setup = f'''
@@ -128,7 +128,11 @@ for attempt in $(seq 1 30); do
     if systemctl start scenarioforge-llm-route.service; then llm_route_ready=1; break; fi
     sleep 2
 done
-[[ "$llm_route_ready" == 1 ]] || fail_bootstrap 'LLM DHCP lease/route unavailable; check DHCP on the selected vmnet/bridge or provide both static overrides'
+if [[ "$llm_route_ready" != 1 ]]; then
+    ip -brief address show dev {c.get('llm_interface_name', 'ens20')} || true
+    journalctl -u scenarioforge-llm-route.service -n 30 --no-pager || true
+    fail_bootstrap 'LLM DHCP lease/route unavailable on {c.get('llm_interface_name', 'ens20')}; inspect the route-service errors above and DHCP on the selected vmnet/bridge'
+fi
 '''
     addition = f'''
 set_bootstrap_status 90 'installing CyberAgentFlow'

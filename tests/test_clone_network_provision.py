@@ -38,3 +38,34 @@ def test_proxmox_optional_llm_nic_uses_name_and_bootstrap_validates_same_name():
     source=SCRIPT.read_text()
     assert 'caf_generate network "$PARTICIPANT_NET2_MAC" --match-name "$(participant_interface_name 2)"' in source
     assert 'caf_generate inject "$WORK_DIR/participant-bootstrap.sh" --interface-name "$(participant_interface_name 2)"' in source
+
+
+@pytest.mark.parametrize('platform', ['vmware-fusion-mac', 'vmware-workstation-linux'])
+@pytest.mark.parametrize('guest_os', ['debian', 'kali'])
+def test_vmware_networks_bind_adapters_and_rename_for_shared_bootstraps(tmp_path, platform, guest_os):
+    script = ROOT/'scripts/provision'/platform/'install-scenarioforge-lab.sh'
+    result = subprocess.run(['bash', '-c', '''source "$1"
+WORK_DIR="$2"
+PARTICIPANT_OS="$3"
+PARTICIPANT_GATEWAY=10.254.200.1
+CORE_NET0_MAC=00:50:56:00:00:01
+CORE_NET1_MAC=00:50:56:00:00:02
+CORE_NET2_MAC=00:50:56:00:00:03
+APP_NET0_MAC=00:50:56:00:01:01
+APP_NET1_MAC=00:50:56:00:01:02
+PARTICIPANT_NET0_MAC=00:50:56:00:02:01
+PARTICIPANT_NET1_MAC=00:50:56:00:02:02
+write_guest_network_files
+participant_interface_name 2
+''', 'check', str(script), str(tmp_path), guest_os], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == 'ens20'
+    participant = yaml.safe_load((tmp_path/'participant-network.yaml').read_text())['ethernets']
+    assert participant['participant']['match'] == {'macaddress':'00:50:56:00:02:01'}
+    assert participant['participant']['set-name'] == 'ens18'
+    assert participant['bootstrap-uplink']['set-name'] == 'ens19'
+    assert participant['participant']['addresses'] == ['10.254.200.10/24']
+    assert participant['participant']['routes'][0]['via'] == '10.254.200.1'
+    core = yaml.safe_load((tmp_path/'core-network.yaml').read_text())['ethernets']
+    assert core['hitl']['match'] == {'macaddress':'00:50:56:00:00:02'}
+    assert core['hitl']['set-name'] == 'ens19'

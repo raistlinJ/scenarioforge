@@ -309,3 +309,17 @@ def test_evaluator_installed_before_readiness_even_on_caf_retry(config, tmp_path
     path = tmp_path / 'participant.sh'
     path.write_text(script)
     subprocess.run(['bash', '-n', str(path)], check=True)
+
+
+@pytest.mark.parametrize('name', ['ens20', 'eth2'])
+def test_dhcp_route_and_generated_config_use_selected_interface(config,name):
+    spec=importlib.util.spec_from_file_location('llm_route_named',COMMON.with_name('llm_dhcp_route.py'))
+    route=importlib.util.module_from_spec(spec);spec.loader.exec_module(route)
+    lease=dict(ADDRESS='192.168.20.100',NETMASK='255.255.255.0',ROUTER='192.168.20.2')
+    assert route.route_arguments(dict(provider='203.0.113.20',protected=[],interface=name),lease)[-4:]==['dev',name,'src','192.168.20.100']
+    config.update(llm_interface_cidr='',llm_gateway='',llm_interface_name=name)
+    script=caf.inject('#!/bin/bash\ntouch /var/lib/scenarioforge/participant-ready\n',config)
+    config_text=script.split("<<'CAF_ROUTE_CONFIG'\n",1)[1].split('\nCAF_ROUTE_CONFIG',1)[0]
+    assert json.loads(config_text)['interface']==name
+    assert 'journalctl -u scenarioforge-llm-route.service -n 30 --no-pager' in script
+    with pytest.raises(ValueError):route.interface_name(dict(interface='../ens20'))

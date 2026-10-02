@@ -40,6 +40,63 @@ The shared APP guest bootstrap installs Node.js and verifies `node --version`
 for CLI HTML and Markdown guide export. For existing APP guests, run
 `sudo apt update && sudo apt install -y nodejs`, then verify `node --version`.
 
+## CyberAgentFlow demo readiness
+
+Enable `cyber_agent_flow=true` in your config to install the agent and evaluator.
+The default config leaves them disabled. Set `llm_provider_type`, `llm_model`,
+`llm_provider_address`, and `llm_provider_url` for the provider you intend to use;
+otherwise the provider defaults to `ollama_direct`. API credentials must be
+configured in the participant before running a hosted provider. The dedicated
+LLM NIC remains connected after the temporary bootstrap uplink is removed.
+
+The provisioner installs CAF at `/opt/cyber-agent-flow` and the evaluator at
+`/opt/cyber-agent-flow-eval`, including their Python environments. CORE has a
+`corevm`-writable checkout at `/opt/scenarioforge-services`; the APP environment
+uses that same path for remote runtime synchronization. The participant keeps
+its static HITL address and routes scenario traffic through the configured
+HITL router. Deploying a scenario must create that router before the target is
+reachable; a static participant address alone does not establish the path.
+
+Fusion explicitly renames the participant interfaces to `ens18` (HITL),
+`ens19` (temporary bootstrap), and `ens20` (LLM), including on Kali. This avoids
+inheriting the Proxmox clone-specific interface-name matching rules.
+
+The orchestrator and evaluator now support `backend.type: fusion` through
+VMware Tools (`open-vm-tools`), which this provisioner installs in all three
+guests. This uses Fusion's `vmrun` guest commands and file transfers, rather
+than Proxmox's QEMU guest agent. Start the three VMs before running experiments.
+Guest operations use the saved guest login and sudo password; they do not
+require SSH access from the Mac to the isolated participant network.
+
+After provisioning, install/update the sibling orchestrator and evaluator
+checkouts on your Mac, then run from the orchestrator checkout:
+
+```bash
+uv sync
+.venv/bin/cyber-agent-flow-orchestrator import-fusion --output fusion-local
+.venv/bin/cyber-agent-flow-orchestrator create-user \
+  --file fusion-local/users.json --username operator
+.venv/bin/cyber-agent-flow-orchestrator serve fusion-local/workflow.yaml \
+  --web-config fusion-local/web.yaml --runs-root fusion-local/runs
+```
+
+Open `https://localhost:8443` and sign in with the local operator account.
+The import uses the default provisioner state directory; pass
+`--state-dir /path/to/state` if you used a custom one. The output must be a new
+directory, so existing configuration is never overwritten. It includes private
+Fusion VM inventory, runtime and WebUI settings, and host-user lock paths.
+Guest credentials remain in the owner-only inventory file and are not copied
+into run bundles or returned by VM selection APIs. Fusion's `vmrun` requires
+the guest password in its process arguments; command errors redact it.
+
+VM IDs in this inventory are stable local identifiers (9401 CORE, 9402 APP,
+9403 participant), not Proxmox IDs. Both bundled scenario demos use the same
+preparation, deployment, readiness, worker and result-collection workflow.
+Application source updates through Proxmox maintenance groups remain disabled;
+local operator model configuration is supported. The browser creates a
+self-signed local certificate on first startup. Configure API credentials in
+CAF before running a hosted provider.
+
 ## Choose the participant operating system
 
 Choose **Debian 12** (the default) for a minimal XFCE desktop, or **Kali Linux**

@@ -14,6 +14,17 @@ PROXMOX_INSTALLER="$SCRIPT_DIR/../proxmox/install-scenarioforge-lab.sh"
 # shellcheck source=scripts/provision/proxmox/install-scenarioforge-lab.sh
 source "$PROXMOX_INSTALLER"
 
+# VMware PCI slots and Kali naming differ from Proxmox. Bind the generated
+# adapter MACs, then give every guest the names used by the shared bootstraps.
+# Fusion sources this wrapper and needs the same naming contract.
+network_interface_match() {
+    printf "  %s:\n    match: {macaddress: '%s'}\n    set-name: %s\n" "$3" "$1" "$2"
+}
+
+participant_interface_name() {
+    printf 'ens%s' "$((18 + $1))"
+}
+
 VMWARE_DESKTOP_LAUNCHER_SOURCE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/desktop-launcher.py"
 
 SCRIPT_VERSION="0.6.0"
