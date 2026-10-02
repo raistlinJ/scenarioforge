@@ -5946,6 +5946,13 @@ def _maybe_delegate_cli_to_remote(args: Any, *, backend: Any, scenario_name: str
             'CORETG_FLOW_ARTIFACTS_MODE=copy',
             'CORETG_CLI_REMOTE_DELEGATED=1',
         ]
+        # The participant gateway must be identical during APP planning and
+        # delegated CORE execution; these are non-secret network settings.
+        for key in ('CORETG_HITL_GATEWAY', 'CORETG_HITL_CORE_IFX_IPV4',
+                    'CORETG_VM_MODE_HITL_CORE_IFX_NAME'):
+            value = str(os.environ.get(key) or '').strip()
+            if value:
+                flow_env_parts.append(f"{key}={shlex.quote(value)}")
         if remote_ctx.get('base_dir'):
             flow_env_parts.append(f"CORE_REMOTE_BASE_DIR={shlex.quote(str(remote_ctx.get('base_dir')))}")
 

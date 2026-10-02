@@ -110,7 +110,7 @@ llm_bridge=
 # Do not use documentation addresses for a real installation.
 
 # --- Optional host orchestrator (Proxmox only) ---
-# Installs CLI/WebUI and creates a self-signed cert/key in /certs if absent.
+# Installs CLI/WebUI and creates a self-signed cert/key in /opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs if absent.
 # Existing certs are preserved; configure PVE login before serving.
 # Independent of cyber_agent_flow: also usable with existing participant VMs.
 orchestrator=false

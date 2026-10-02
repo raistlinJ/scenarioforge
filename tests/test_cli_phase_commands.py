@@ -2438,6 +2438,9 @@ def test_cli_resolve_core_context_uses_saved_xml_core_and_cli_overrides(tmp_path
 
 
 def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('CORETG_HITL_GATEWAY', '10.254.200.1')
+    monkeypatch.setenv('CORETG_HITL_CORE_IFX_IPV4', '10.254.200.3/24')
+    monkeypatch.setenv('CORETG_VM_MODE_HITL_CORE_IFX_NAME', 'ens19')
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario One"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
     fake_client = _FakeSshClient(exit_code=0)
@@ -2553,6 +2556,9 @@ def test_cli_execute_delegates_to_remote_cli_for_saved_remote_core_config(tmp_pa
     assert custom_service_installs == [(fake_client, 'pw')]
     assert fake_client.command is not None
     assert 'CORETG_CLI_REMOTE_DELEGATED=1' in fake_client.command
+    assert 'CORETG_HITL_GATEWAY=10.254.200.1' in fake_client.command
+    assert 'CORETG_HITL_CORE_IFX_IPV4=10.254.200.3/24' in fake_client.command
+    assert 'CORETG_VM_MODE_HITL_CORE_IFX_NAME=ens19' in fake_client.command
     assert 'scenarioforge.cli execute --xml /tmp/remote/scenario.xml' in fake_client.command
     assert '--host 127.0.0.1' in fake_client.command
     assert '--port 50051' in fake_client.command

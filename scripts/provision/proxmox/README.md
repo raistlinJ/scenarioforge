@@ -681,8 +681,8 @@ Host layout:
   cyber-agent-flow-eval/               # sibling dependency source
 /usr/local/bin/cyber-agent-flow-orchestrator
 /usr/local/bin/cyber-agent-flow-eval
-/certs/cert.pem                        # WebUI certificate / replacement full chain
-/certs/key.pem                         # matching private key (0600)
+/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/cert.pem                        # WebUI certificate / replacement full chain
+/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/key.pem                         # matching private key (0600)
 ```
 
 Setup installs host `git`, CA certificates and Python venv support through apt,
@@ -704,18 +704,18 @@ cyber-agent-flow-eval --help
 Use the installed orchestrator `README.md` and `examples/` to configure your
 workflow, VM roles/IDs and run storage. Installation does not start experiments,
 start a WebUI service or assign PVE users/groups. On first install it creates a
-365-day self-signed WebUI certificate at `/certs/cert.pem` with its private key at
-`/certs/key.pem` (mode `0600`). The certificate covers localhost, loopback IPv4/IPv6,
+365-day self-signed WebUI certificate at `/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/cert.pem` with its private key at
+`/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/key.pem` (mode `0600`). The certificate covers localhost, loopback IPv4/IPv6,
 and the host short name/FQDN. `examples/web.pve.yaml` reads these absolute paths,
 including when copied to another working directory. Configure the PVE endpoint
 and group membership before serving the WebUI.
 
 Existing certificate/key pairs are preserved on install, update and cleanup. If
 only one file exists, installation stops and asks you to restore the pair. To use
-a CA-signed certificate later, replace `/certs/cert.pem` with the PEM certificate
-chain (server certificate first, followed by intermediates) and `/certs/key.pem`
+a CA-signed certificate later, replace `/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/cert.pem` with the PEM certificate
+chain (server certificate first, followed by intermediates) and `/opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/key.pem`
 with the matching unencrypted PEM private key. Keep the key owner-readable only
-(`chmod 600 /certs/key.pem`) and restart the WebUI to reload both files. No YAML
+(`chmod 600 /opt/scenarioforge-orchestrator/cyber-agent-flow-orchestrator/certs/key.pem`) and restart the WebUI to reload both files. No YAML
 path change is needed. For direct LAN access, also set `listen` and `public_url`
 to your intended address and ensure the certificate covers that hostname.
 Self-signed certificates require explicit browser trust; renewal is not automatic.

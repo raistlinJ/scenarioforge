@@ -84,7 +84,9 @@ Open `https://localhost:8443` and sign in with the local operator account.
 The import uses the default provisioner state directory; pass
 `--state-dir /path/to/state` if you used a custom one. The output must be a new
 directory, so existing configuration is never overwritten. It includes private
-Fusion VM inventory, runtime and WebUI settings, and host-user lock paths.
+Fusion VM inventory, runtime and WebUI settings, and host-user lock paths. Certificates use the
+`certs` directory beside the imported profile directory (the orchestrator checkout
+when using the commands above).
 Guest credentials remain in the owner-only inventory file and are not copied
 into run bundles or returned by VM selection APIs. Fusion's `vmrun` requires
 the guest password in its process arguments; command errors redact it.
@@ -711,3 +713,12 @@ to the latest branch.
 
 See the [cross-platform command reference](../../../README.md#reinstall-one-vm-or-the-whole-lab)
 for equivalent commands on other hosts.
+
+The participant's **Update LLM destination** shortcut shares its route utility
+with Orchestrator model saves. The utility also accepts a noninteractive call:
+`sudo /usr/local/sbin/update-llm-destination --url http://HOST:PORT/v1 --json`.
+It resolves one IPv4 destination, preserves the configured dedicated LLM
+interface/gateway and custom network policy, and rolls back route changes if
+application fails. Changing just the endpoint port still uses the same host
+route. A TCP connectivity warning in Orchestrator does not undo a successful
+route/configuration save.

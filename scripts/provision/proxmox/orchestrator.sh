@@ -3,7 +3,7 @@ ORCHESTRATOR="${SF_ORCHESTRATOR:-0}"
 ORCHESTRATOR_URL="${SF_ORCHESTRATOR_URL:-https://github.com/raistlinJ/cyber-agent-flow-orchestrator.git}"
 ORCHESTRATOR_REF="${SF_ORCHESTRATOR_REF:-main}"
 ORCHESTRATOR_DIR=/opt/scenarioforge-orchestrator
-ORCHESTRATOR_CERT_DIR=/certs
+ORCHESTRATOR_CERT_DIR="$ORCHESTRATOR_DIR/cyber-agent-flow-orchestrator/certs"
 
 preflight_orchestrator_certificate() {
     local cert="$ORCHESTRATOR_CERT_DIR/cert.pem" key="$ORCHESTRATOR_CERT_DIR/key.pem"
