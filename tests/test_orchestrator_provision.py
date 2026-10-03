@@ -69,6 +69,7 @@ install_orchestrator
     assert 'uv pip install --python' in output
     assert '--editable' in output
     assert 'uv pip check' in output
+    assert '-m cyber_agent_flow_orchestrator.compatibility' in output
     assert 'cyber-agent-flow-orchestrator --help' in output
     assert 'create-cert --hostname localhost' in output
     assert not (tmp_path / 'certs').exists()
@@ -176,3 +177,19 @@ install_orchestrator_certificate cert_cli
 ''')
     assert result.returncode == 23
     assert not (tmp_path / 'cert.pem').exists()
+
+
+def test_incompatible_evaluator_stops_install_before_publishing_commands(tmp_path):
+    result=probe(f'''ORCHESTRATOR=1
+ORCHESTRATOR_DIR={shlex.quote(str(tmp_path/'host'))}
+run() {{
+    printf 'CALL %s\n' "$*"
+    if [[ "$*" == *' -m cyber_agent_flow_orchestrator.compatibility' ]]; then return 27; fi
+    return 0
+}}
+install_orchestrator
+''')
+    assert result.returncode==27,result.stderr
+    assert '-m cyber_agent_flow_orchestrator.compatibility' in result.stdout
+    assert 'CALL ln ' not in result.stdout and 'create-cert' not in result.stdout
+    assert not (tmp_path/'host').exists()

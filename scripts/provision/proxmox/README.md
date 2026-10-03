@@ -18,17 +18,18 @@ Management uses a separate bridge and explicit guest CIDRs; it does not derive
 addresses from the Proxmox host uplink. Both guest management CIDRs must share a
 subnet. This server installer does not create desktop shortcuts on your workstation.
 
-Proxmox network configuration matches each provisioned NIC's MAC address and
-explicitly assigns its interface name (`ens18`, `ens19`, `ens20`). Some guest
-images initially use `eth0`, `eth1`, and `eth2`; name-only matching against
-`ens18`/`ens19` leaves those guests without networking. The optional LLM NIC
-also uses MAC matching and its explicit guest interface name.
+Proxmox network snippets match stable guest interface names, so a clone can
+receive new MAC addresses while retaining its static addresses. CORE and APP
+use `ens18`/`ens19`/`ens20`; Kali participants use `eth0`/`eth1`/`eth2`, and
+Debian participants use `ens18`/`ens19`/`ens20`. The optional LLM NIC follows
+the participant OS naming scheme too. Preserve NIC slots, models and guest
+naming mode when cloning; see [Cloning isolated labs](#cloning-isolated-labs).
 
 APP and CORE uplinks on `uplink_bridge` (default `vmbr0`) and the participant's
 temporary bootstrap uplink use DHCP with a MAC-based client identifier.
-Clones assigned new MAC addresses need corresponding updates to their custom
-network snippets and saved guest network configuration. Separate cloned labs
-must use separate management and HITL bridges/VLANs when reusing static IPs.
+New MACs obtain separate DHCP leases. Each cloned lab must use its own
+management and HITL bridges/VLANs when reusing static IPs. Old templates with
+MAC-bound Netplan/snippets need the migration described below before cloning.
 
 This correction applies to new provisioning and reinstalls; updating the host
 script does not repair an existing guest. Do not reinstall merely to update a
@@ -739,6 +740,14 @@ For an existing orchestrator configured with the former `caf-orchestrator` group
 re-enroll the intended users, change `auth.required_group` in its `web.yaml` to
 `caf-orchestration`, and restart. Existing config files are preserved during install.
 
+Host installation checks both editable packages and the evaluator's actual
+guest-helper capabilities before publishing CLI commands. The evaluator helper
+is sent from the orchestrator host on each operation; updating host cleanup code
+does not require reprovisioning the VMs. Update the orchestrator and evaluator
+checkouts together, run their environment sync/install step, then restart the
+WebUI. The recent scope defaults, report downloads and charts work with Proxmox
+too; PVE login, VM ACLs and maintenance group checks still apply.
+
 VM `--reinstall` leaves the host application alone; use `install-orchestrator` to
 refresh it separately. Lab `cleanup` preserves the host application and any saved
 workflows/results. The ordinary lab state records the selected host source settings
@@ -793,15 +802,16 @@ Configure these values before enabling the option:
 | `llm_bridge` | Proxmox: existing egress bridge; empty uses `uplink_bridge` |
 
 Use the gateway/subnet actually configured on your chosen vmnet/bridge. The LLM
-network must differ from HITL and management. A third Kali NIC is matched by MAC
-and named `ens20`; cloud-init persists its static address and a provider-specific
+network must differ from HITL and management. The third Kali NIC is matched by
+name as `eth2` (`ens20` for Debian); cloud-init persists its address and a provider-specific
 `/32` route via the gateway (direct link route for a provider in the same subnet).
 Automatic mode uses DHCP for its address and gateway, ignoring general DHCP routes
 and DNS settings. Neither mode enables IPv6 autoconfiguration or a default route.
 The ordinary bootstrap
-NIC `ens19` is still removed after provisioning; the new LLM NIC remains. Guest
-readiness checks `ip -4 route get ADDRESS` and refuses to mark setup complete if
-that route does not use `ens20`. This checks routing, not provider availability or
+NIC (`eth1` on Kali, `ens19` on Debian) is still removed after provisioning;
+the dedicated LLM NIC remains in its original slot. Guest readiness checks
+`ip -4 route get ADDRESS` and refuses to mark setup complete if that route does
+not use the configured LLM interface (`eth2` on Kali, `ens20` on Debian). This checks routing, not provider availability or
 authentication. The dedicated NIC is not a firewall: other addresses on its local
 subnet remain reachable, and guests with sudo can change routing.
 

@@ -102,6 +102,9 @@ install_orchestrator() {
     run "$env/bin/uv" pip install --python "$env/bin/python" \
         --editable "$ORCHESTRATOR_DIR/cyber-agent-flow-eval" --editable "$project"
     run "$env/bin/uv" pip check --python "$env/bin/python"
+    # --help exits before importing the evaluator. Check the actual host/helper
+    # APIs too, including preflight and VM locks, before publishing commands.
+    run "$env/bin/python" -m cyber_agent_flow_orchestrator.compatibility
     run "$env/bin/cyber-agent-flow-orchestrator" --help
     run "$env/bin/cyber-agent-flow-eval" --help
     install_orchestrator_certificate "$env/bin/cyber-agent-flow-orchestrator"

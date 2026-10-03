@@ -828,10 +828,22 @@ write_cloud_init_files
 
     for role in ('core', 'app', 'participant'):
         interfaces = yaml.safe_load((tmp_path / f'{role}-network.yaml').read_text())['ethernets']
-        for nic in interfaces.values():
-            assert 'macaddress' in nic['match']
-            assert 'name' not in nic['match']
-            assert nic['set-name'] in ('ens18', 'ens19', 'ens20')
+        if platform == 'proxmox':
+            participant_names = ('eth0', 'eth1') if participant_os == 'kali' else ('ens18', 'ens19')
+            expected_names = {
+                'core': {'management': 'ens18', 'hitl': 'ens19', 'uplink': 'ens20'},
+                'app': {'uplink': 'ens18', 'management': 'ens19'},
+                'participant': dict(zip(('participant', 'bootstrap-uplink'), participant_names)),
+            }[role]
+            assert set(interfaces) == set(expected_names)
+            for key, nic in interfaces.items():
+                assert nic['match'] == {'name': expected_names[key]}
+                assert 'set-name' not in nic
+        else:
+            for nic in interfaces.values():
+                assert 'macaddress' in nic['match']
+                assert 'name' not in nic['match']
+                assert nic['set-name'] in ('ens18', 'ens19', 'ens20')
         uplink = interfaces['bootstrap-uplink' if role == 'participant' else 'uplink']
         assert uplink['dhcp4'] is True
         assert 'addresses' not in uplink
