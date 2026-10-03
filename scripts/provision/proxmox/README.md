@@ -1206,3 +1206,22 @@ adapters, conflicting roles, multiple LLM definitions and static LLM setups are
 rejected before changes. A DHCP failure retains the corrected configuration and
 backup for diagnosis. This does not update the original template or host-side
 Cloud-Init snippets; rebuild future templates using the corrected provisioner.
+
+
+For a confirmed **legacy two-NIC CAF clone** (net0 = HITL, net1 = external
+DHCP uplink, no net2), explicitly reuse net1 instead:
+
+```bash
+LLM_MAC=$(qm config "$PARTICIPANT_VMID" | sed -n 's/^net1: [^=]*=\([^,]*\).*/\1/p')
+qm guest exec "$PARTICIPANT_VMID" --timeout 180 --pass-stdin 1 -- \
+  /usr/bin/python3 - --llm-mac "$LLM_MAC" --reuse-bootstrap-uplink \
+  < scripts/provision/common/repair_llm_interface.py
+```
+
+This opt-in removes only a matching DHCP `bootstrap-uplink` definition, assigns
+that adapter to the existing `llm` definition, and removes external IPv4 defaults
+on the selected LLM adapter after verifying its provider host route. HITL stays
+on its existing NIC and default gateway. The utility rejects HITL or other roles
+even with this flag. This repairs an old clone; newly provisioned CAF templates
+still use net0 for HITL, disconnected net1 for bootstrap and net2 for LLM. Keep all
+three slots when cloning those templates.
