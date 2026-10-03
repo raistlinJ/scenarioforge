@@ -133,3 +133,17 @@ write_guest_network_files
     assert '__PARTICIPANT_' not in script
     assert 'unmanaged-devices=*' not in script
     subprocess.run(['bash','-n',str(tmp_path/'participant-bootstrap.sh')],check=True)
+
+
+
+@pytest.mark.parametrize('platform', ['proxmox', 'vmware-workstation-linux', 'vmware-fusion-mac'])
+def test_provisioned_remote_upload_workspace_is_owned_by_ssh_user(tmp_path, platform):
+    installer = ROOT/'scripts/provision'/platform/'install-scenarioforge-lab.sh'
+    result = subprocess.run(['bash', '-c', 'source "$1"; WORK_DIR="$2"; write_guest_bootstraps', 'test', str(installer), str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    core = (tmp_path/'core-bootstrap.sh').read_text()
+    app = (tmp_path/'app-bootstrap.sh').read_text()
+    assert 'install -d -o corevm -g corevm -m 0750' in core
+    assert '/home/corevm/.local/share/scenarioforge/runs' in core
+    assert 'CORE_REMOTE_BASE_DIR=/home/corevm/.local/share/scenarioforge' in app
+    assert 'CORE_REMOTE_STATIC_REPO=/opt/scenarioforge-services' in app

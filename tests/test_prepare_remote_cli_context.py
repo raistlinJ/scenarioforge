@@ -1243,3 +1243,61 @@ def test_remote_flow_regenerate_can_defer_postcheck_to_revalidate(tmp_path, monk
     )
 
     assert 'flow.artifacts.regenerate complete count=1' in log_handle.getvalue()
+
+
+
+@pytest.mark.parametrize('base_dir,repair_ok', [('/tmp/scenarioforge', True), ('/tmp/scenarioforge', False), ('/srv/scenarioforge', False)])
+def test_remote_run_permissions_are_checked_before_upload(tmp_path, monkeypatch, base_dir, repair_ok):
+    xml = tmp_path/'scenario.xml'
+    xml.write_text('<Scenarios/>')
+    repo = '/opt/scenarioforge-services'
+    sftp = _FakeSFTP({repo, repo+'/scenarioforge', repo+'/scenarioforge/__init__.py'})
+    client = _FakeSSHClient(sftp)
+    repaired = False
+    probes, sudo_calls = [], []
+    original_exec = backend._exec_ssh_command
+    def execute(client, command, **kwargs):
+        if command.startswith('if test -L '):
+            return 0, 'not-symlink', ''
+        if command.startswith('sh -lc '):
+            script = shlex.split(command)[2]
+            if '.coretg_repo_write_probe' in script:
+                probes.append(script)
+                if 'repo='+base_dir+'/runs;' in script and not repaired:
+                    return 1, '', 'mkdir: Permission denied'
+                return 0, '', ''
+        return original_exec(client, command, **kwargs)
+    def sudo(client, command, **kwargs):
+        nonlocal repaired
+        sudo_calls.append(command)
+        repaired = repair_ok
+        return (0, '', '') if repair_ok else (1, '', 'sudo repair denied')
+    monkeypatch.setattr(backend, '_exec_ssh_command', execute)
+    monkeypatch.setattr(backend, '_exec_ssh_sudo_command', sudo)
+    monkeypatch.setattr(backend, '_remote_base_dir', lambda _: base_dir)
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda _: repo)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: str(tmp_path/'empty-repo'))
+    monkeypatch.setattr(backend, '_ensure_remote_traffic_agent', lambda **kwargs: None)
+    monkeypatch.setattr(backend, '_upload_flow_artifacts_for_plan_to_remote', lambda **kwargs: None)
+    log = io.StringIO()
+    kwargs = dict(client=client, run_id='cli-demo', xml_path=str(xml), preview_plan_path=None,
+                  log_handle=log, core_cfg={'ssh_username':'corevm','ssh_password':'secret'})
+    if repair_ok:
+        context = backend._prepare_remote_cli_context(**kwargs)
+        assert context['run_dir'] == base_dir+'/runs/cli-demo'
+        assert (str(xml), base_dir+'/runs/cli-demo/scenario.xml') in sftp.put_calls
+        assert 'run workspace ownership repaired' in log.getvalue()
+    else:
+        with pytest.raises(RuntimeError, match='CORE_REMOTE_BASE_DIR'):
+            backend._prepare_remote_cli_context(**kwargs)
+        assert sftp.put_calls == []
+    assert probes and len(sudo_calls) == int(base_dir.startswith('/tmp/'))
+    assert 'checking run workspace permissions' in log.getvalue()
+
+
+def test_remote_mkdir_failure_is_not_ignored():
+    class DeniedClient(_FakeSSHClient):
+        def _respond(self, command):
+            return b'', b'mkdir: Permission denied', 1
+    with pytest.raises(RuntimeError, match='Permission denied'):
+        backend._remote_mkdirs(DeniedClient(_FakeSFTP(set())), '/tmp/scenarioforge/runs/demo')

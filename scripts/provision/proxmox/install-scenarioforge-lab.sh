@@ -1198,6 +1198,12 @@ fi
 install -m 0644 /etc/docker/daemon.json.new /etc/docker/daemon.json
 rm -f /etc/docker/daemon.json.new
 
+set_bootstrap_status 72 'preparing CORE run upload workspace'
+# Keep SSH uploads separate from root-created /tmp staging directories.
+install -d -o corevm -g corevm -m 0750 \
+    /home/corevm/.local /home/corevm/.local/share \
+    /home/corevm/.local/share/scenarioforge /home/corevm/.local/share/scenarioforge/runs
+
 set_bootstrap_status 75 'installing ScenarioForge custom CORE services'
 # This checkout is also the CLI runtime synchronized by the APP VM over SSH.
 # Keep it writable by that account, including when upgrading older root-owned installs.
@@ -1604,6 +1610,7 @@ CORE_SSH_HOST=$CORE_MANAGEMENT_IP
 CORE_SSH_PORT=22
 CORE_SSH_USERNAME=corevm
 CORE_REMOTE_STATIC_REPO=/opt/scenarioforge-services
+CORE_REMOTE_BASE_DIR=/home/corevm/.local/share/scenarioforge
 CORE_SSH_PASSWORD=$CORE_PASSWORD
 CORETG_WEBUI_MODE=vm
 CORETG_VM_MODE_HITL_ENABLED=true

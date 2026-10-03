@@ -1109,8 +1109,8 @@ qm guest exec "$APP_VMID" -- /bin/sh -c 'test -f /opt/scenarioforge/.scenariofor
 
 Check that both guest operations return exit code zero, then retry the experiment.
 The repair uses QGA; ScenarioForge's execution path still delegates to CORE over
-SSH. `CORE_REMOTE_BASE_DIR` is a separate temporary workspace setting and need
-not change.
+SSH. `CORE_REMOTE_BASE_DIR` is a separate run workspace setting; changing the
+checkout path does not repair its permissions.
 
 
 ## Cloning isolated labs
@@ -1225,3 +1225,43 @@ on its existing NIC and default gateway. The utility rejects HITL or other roles
 even with this flag. This repairs an old clone; newly provisioned CAF templates
 still use net0 for HITL, disconnected net1 for bootstrap and net2 for LLM. Keep all
 three slots when cloning those templates.
+
+
+### CORE run upload workspace permissions
+
+Fresh Proxmox and VMware labs now use
+`CORE_REMOTE_BASE_DIR=/home/corevm/.local/share/scenarioforge` in the APP env.
+CORE bootstrap creates that workspace and its `runs` directory owned by the
+configured bootstrap SSH account, `corevm`. The runtime checkout remains
+`/opt/scenarioforge-services`. This avoids sharing run uploads with root-created
+temporary staging directories.
+
+Older APP configurations still default to `/tmp/scenarioforge`. Remote CLI
+preparation checks the base, `runs` and individual run directory before any
+upload. Root-owned directories under that conventional temporary workspace can
+be repaired using the configured SSH/sudo credentials, and repair progress is
+logged. Custom workspace paths are checked but never automatically chowned.
+Failed directory creation now stops immediately rather than falling through to
+a misleading missing-file SFTP error.
+
+To unblock an older lab without rebuilding CORE, run on Proxmox (substitute its
+current CORE VM ID):
+
+```bash
+qm guest exec CORE_VMID -- /bin/sh -c '
+set -eu
+test ! -L /tmp/scenarioforge
+test ! -L /tmp/scenarioforge/runs
+mkdir -p /tmp/scenarioforge/runs
+chown corevm:corevm /tmp/scenarioforge /tmp/scenarioforge/runs
+chmod u+rwx /tmp/scenarioforge /tmp/scenarioforge/runs
+probe=$(runuser -u corevm -- mktemp -d /tmp/scenarioforge/runs/.write-test.XXXXXX)
+runuser -u corevm -- rmdir "$probe"
+echo "CORE run upload workspace verified writable"
+'
+```
+
+The command changes only the two workspace directories; it does not recursively
+change existing run artifacts. Retry the experiment after the write probe passes.
+Deploy the updated ScenarioForge backend to APP for the automatic preflight;
+pulling the provisioner on the Proxmox host alone does not update the running APP.

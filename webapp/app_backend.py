@@ -2509,6 +2509,8 @@ def _ensure_remote_repo_workspace(
     core_cfg: Dict[str, Any],
     *,
     log_handle: Any | None = None,
+    workspace_label: str = 'repository',
+    setting_name: str = 'CORE_REMOTE_STATIC_REPO',
 ) -> None:
     """Ensure the SSH user can create and replace the remote repo workspace.
 
@@ -2570,7 +2572,7 @@ def _ensure_remote_repo_workspace(
         try:
             if log_handle:
                 log_handle.write(
-                    f'[remote] repository workspace is not writable; repairing ownership of {repo}…\n'
+                    f'[remote] {workspace_label} workspace is not writable; repairing ownership of {repo}…\n'
                 )
                 log_handle.flush()
             user_q = shlex.quote(ssh_user)
@@ -2589,7 +2591,7 @@ def _ensure_remote_repo_workspace(
                 rc, out, err = _probe()
                 if rc == 0:
                     if log_handle:
-                        log_handle.write(f'[remote] repository workspace ownership repaired: {repo}\n')
+                        log_handle.write(f'[remote] {workspace_label} workspace ownership repaired: {repo}\n')
                         log_handle.flush()
                     return
             repair_error = (repair_err or repair_out or '').strip()
@@ -2599,10 +2601,10 @@ def _ensure_remote_repo_workspace(
     detail = (err or out or repair_error or 'write probe failed').strip()
     hint = (
         f' Remote path {repo} is not writable by SSH user {ssh_user or "(unknown)"}. '
-        'Choose a user-writable CORE_REMOTE_STATIC_REPO path (for example ~/scenarioforge) '
+        f'Choose a user-writable {setting_name} path (for example ~/scenarioforge) '
         'or repair ownership on the CORE VM.'
     )
-    raise RuntimeError(f'Remote repository workspace is not writable: {detail[:500]}.{hint}')
+    raise RuntimeError(f'Remote {workspace_label} workspace is not writable: {detail[:500]}.{hint}')
 
 
 def _remote_path_join(*parts: str) -> str:
@@ -2663,7 +2665,7 @@ def _compose_env_file_relpaths(local_compose_path: str) -> list[str]:
 
 def _remote_mkdirs(client: Any, path: str) -> None:
     quoted = shlex.quote(path)
-    _exec_ssh_command(client, f"mkdir -p {quoted}")
+    _exec_ssh_command(client, f"mkdir -p {quoted}", check=True)
 
 
 def _log_warning(logger: Any, message: str, *args: Any) -> None:
@@ -7982,7 +7984,20 @@ def _prepare_remote_cli_context(
     sftp = client.open_sftp()
     try:
         base_dir = _remote_base_dir(sftp)
-        run_dir = _remote_path_join(base_dir, REMOTE_RUNS_SUBDIR, run_id)
+        runs_dir = _remote_path_join(base_dir, REMOTE_RUNS_SUBDIR)
+        run_dir = _remote_path_join(runs_dir, run_id)
+        try:
+            log_handle.write(f"[remote] checking run workspace permissions: {run_dir}\n")
+            log_handle.flush()
+        except Exception:
+            pass
+        # The checkout and run staging have separate ownership. A writable base
+        # alone does not guarantee an older root-owned runs/ directory is usable.
+        for workspace in (base_dir, runs_dir, run_dir):
+            _ensure_remote_repo_workspace(
+                client, workspace, core_cfg or {}, log_handle=log_handle,
+                workspace_label='run', setting_name='CORE_REMOTE_BASE_DIR',
+            )
         _remote_mkdirs(client, run_dir)
         repo_dir = _remote_static_repo_dir(sftp)
         try:
