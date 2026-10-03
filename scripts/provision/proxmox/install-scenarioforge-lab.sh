@@ -2225,7 +2225,7 @@ verify_participant_caf_contract() {
     local expected source output
     expected="$(python3 -c 'import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$(dirname "$CAF_HELPER")/update-llm-destination.py")"
     source="$(cat "$(dirname "$CAF_HELPER")/verify_caf_participant.py")"
-    output="$(qm guest exec "$PARTICIPANT_VMID" -- /usr/bin/python3 -c "$source" /usr/local/sbin/update-llm-destination /opt/cyber-agent-flow/configs/cli.json "$expected" 2>/dev/null)" || {
+    output="$(qm guest exec "$PARTICIPANT_VMID" -- /usr/bin/python3 -c "$source" /usr/local/sbin/update-llm-destination /opt/cyber-agent-flow/configs/cli.json "$expected" --expected-interface "$(participant_interface_name 2)" 2>/dev/null)" || {
         warn 'Unable to verify participant CAF helper/model contract through the guest agent'
         return 1
     }
@@ -2403,15 +2403,20 @@ detach_participant_bootstrap_uplink() {
         write_state
         return
     fi
-    log "Removing the participant VM's temporary package-download uplink"
-    run qm set "$PARTICIPANT_VMID" --delete net1
-    if qm config "$PARTICIPANT_VMID" 2>/dev/null | grep -q '^net1:'; then
-        die "participant temporary uplink net1 is still attached; remove it with: qm set $PARTICIPANT_VMID --delete net1"
-    fi
+    # Kali uses ethN names. Deleting net1 can renumber net2 after reboot;
+    # preserve the PCI/NIC slot but physically disconnect its uplink.
+    local uplink
+    uplink="$(qm config "$PARTICIPANT_VMID" | sed -n 's/^net1: //p')"
+    uplink="$(printf '%s' "$uplink" | sed -E 's/,link_down=[01]//g')"
+    [[ -n "$uplink" ]] || die 'Cannot identify participant bootstrap NIC'
+    run qm set "$PARTICIPANT_VMID" --net1 "$uplink,link_down=1"
+    qm config "$PARTICIPANT_VMID" | grep -Eq '^net1: .*link_down=1(,|$)' \
+        || die 'Participant bootstrap NIC could not be disconnected'
     PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
     write_state
-    log "Rebooting participant into its graphical login after removing the temporary uplink"
+    log 'Participant bootstrap uplink disconnected; net1 slot retained to keep interface names stable on clones'
     run qm reboot "$PARTICIPANT_VMID" --timeout 120
+
 }
 
 wait_for_provisioning() {

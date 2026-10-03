@@ -1146,3 +1146,14 @@ MAC bindings.
 This solves cloned NIC addressing, not scenario reachability by itself. The
 running scenario still needs its HITL attachment/gateway; scenario-specific routes
 must use that gateway if another interface supplies a preferred default route.
+
+
+Every participant retains its NIC slots when provisioning finishes: `net0` is
+HITL and `net1` is the disconnected bootstrap uplink (`link_down=1`).
+When CAF is enabled, `net2` is dedicated LLM egress. Do not delete the disconnected
+adapter when converting to a template or cloning; deleting it can renumber Kali
+interfaces. Clone each adapter into the corresponding bridge for that lab (for
+example `sfhitl2` for clone 2), preserving NIC slots and device types. Proxmox
+readiness verifies the LLM Netplan match uses the interface name rather than a
+template MAC, that the interface exists, and that the DHCP route service agrees.
+This does not migrate existing templates with old MAC-based definitions.

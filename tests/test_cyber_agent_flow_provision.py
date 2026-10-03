@@ -361,3 +361,24 @@ def test_participant_contract_rejects_stale_helper_and_empty_model(tmp_path):
     config.write_text(json.dumps(dict(data, model='')))
     with pytest.raises(ValueError, match='model name'):
         verifier.verify(helper, config, digest)
+
+
+@pytest.mark.parametrize('failure', ['none', 'mac', 'missing', 'route'])
+def test_proxmox_network_contract_checks_clone_safe_definition(tmp_path, monkeypatch, failure):
+    import hashlib
+    spec=importlib.util.spec_from_file_location('verify_network',COMMON.with_name('verify_caf_participant.py'))
+    verifier=importlib.util.module_from_spec(spec);spec.loader.exec_module(verifier)
+    helper=tmp_path/'helper.py';helper.write_bytes(COMMON.with_name('update-llm-destination.py').read_bytes())
+    config=tmp_path/'cli.json';config.write_text(json.dumps(dict(provider='openai',url='http://203.0.113.20:11434/v1',model='test')))
+    netplan=tmp_path/'etc/netplan';netplan.mkdir(parents=True)
+    match={'macaddress':'old-template-mac'} if failure=='mac' else {'name':'eth2'}
+    (netplan/'50.yaml').write_text(json.dumps({'network':{'ethernets':{'llm':{'match':match,'dhcp4':True}}}}))
+    (tmp_path/'etc/scenarioforge-llm-route.json').write_text(json.dumps({'interface':'ens20' if failure=='route' else 'eth2'}))
+    interface=tmp_path/'sys/class/net/eth2';interface.mkdir(parents=True)
+    if failure!='missing': (interface/'ifindex').write_text('4')
+    monkeypatch.setattr(verifier,'Path',lambda value:tmp_path/str(value).lstrip('/') if str(value).startswith(('/etc/','/sys/')) else Path(value))
+    digest=hashlib.sha256(helper.read_bytes()).hexdigest()
+    if failure=='none':
+        assert verifier.verify(helper,config,digest,'eth2')['status']=='verified'
+    else:
+        with pytest.raises(ValueError): verifier.verify(helper,config,digest,'eth2')

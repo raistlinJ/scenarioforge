@@ -140,7 +140,7 @@ def test_installer_preserves_required_network_separation_and_core_install_path()
     assert source.count("qemu-guest-agent, spice-vdagent") == 3
     assert source.count("[systemctl, start, spice-vdagentd.socket, spice-vdagentd.service]") == 3
     assert "/var/lib/scenarioforge/participant-ready" in source
-    assert 'qm set "$PARTICIPANT_VMID" --delete net1' in source
+    assert 'qm set "$PARTICIPANT_VMID" --net1 "$uplink,link_down=1"' in source
     assert "report_guest_activity CORE" in source
     assert "report_guest_activity PARTICIPANT" in source
     assert "on_unexpected_error" in source

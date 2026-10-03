@@ -69,3 +69,38 @@ participant_interface_name 2
     core = yaml.safe_load((tmp_path/'core-network.yaml').read_text())['ethernets']
     assert core['hitl']['match'] == {'macaddress':'00:50:56:00:00:02'}
     assert core['hitl']['set-name'] == 'ens19'
+
+
+@pytest.mark.parametrize('caf', ['0', '1'])
+def test_bootstrap_detach_preserves_nic_slots_with_or_without_caf(tmp_path, caf):
+    config=tmp_path/'qm-config'
+    config.write_text('net0: virtio=BC:24:11:00:00:01,bridge=sfhitl1\nnet1: virtio=BC:24:11:00:00:02,bridge=vmbr0\nnet2: virtio=BC:24:11:00:00:03,bridge=vmbr0\n')
+    calls=tmp_path/'calls'
+    script = r'''source "$1"
+CYBER_AGENT_FLOW="$2"
+PARTICIPANT_VMID=123
+config="$3"
+calls="$4"
+qm() {
+    if [[ "$1" == config ]]; then cat "$config"; return; fi
+    printf '%s\n' "$*" >> "$calls"
+    if [[ "$1" == set ]]; then
+        if [[ "$3" == --delete ]]; then
+            sed -i.bak '/^net1:/d' "$config"
+        else
+            sed -i.bak '/^net1:/d' "$config"
+            printf 'net1: %s\n' "$4" >> "$config"
+        fi
+    fi
+}
+run() { "$@"; }
+write_state() { :; }
+detach_participant_bootstrap_uplink
+'''
+    result=subprocess.run(['bash','-c',script,'test',str(SCRIPT),caf,str(config),str(calls)],capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    actual=config.read_text()
+    assert 'net2: virtio=BC:24:11:00:00:03' in actual
+    assert 'net1: virtio=BC:24:11:00:00:02,bridge=vmbr0,link_down=1' in actual
+    assert '--delete' not in calls.read_text()
+    assert 'reboot 123' in calls.read_text()
