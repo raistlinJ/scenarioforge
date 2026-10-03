@@ -1179,3 +1179,30 @@ helper, model and network contract before disconnecting the bootstrap uplink or
 reporting completion. Update the provisioner checkout before reinstalling;
 existing clones retain their old guest configuration until repaired or replaced
 from a corrected template.
+
+### Repair an existing CAF clone with a missing LLM interface
+
+If Apply settings fails because `/sys/class/net/ens20/ifindex` is missing,
+updating the provisioner does not migrate that clone. For a Proxmox participant
+with the standard three-adapter CAF layout (`net2` is dedicated LLM egress), run
+the following from the current ScenarioForge checkout on the Proxmox host:
+
+```bash
+git pull
+PARTICIPANT_VMID=625100 # replace with the current participant clone
+LLM_MAC=$(qm config "$PARTICIPANT_VMID" | sed -n 's/^net2: [^=]*=\([^,]*\).*/\1/p')
+qm guest exec "$PARTICIPANT_VMID" --timeout 180 --pass-stdin 1 -- \
+  /usr/bin/python3 - --llm-mac "$LLM_MAC" \
+  < scripts/provision/common/repair_llm_interface.py
+```
+
+The MAC identifies the explicitly selected *current* adapter only for this
+migration; the saved Netplan configuration matches its guest interface name.
+The utility backs up affected files under `/root/scenarioforge-llm-repair-*`,
+updates the LLM Netplan and DHCP route-service bindings together, gives networkd
+ownership of the defined lab NICs, and verifies the provider route. It leaves
+CAF prompts/model settings and the other Netplan definitions unchanged. Unknown
+adapters, conflicting roles, multiple LLM definitions and static LLM setups are
+rejected before changes. A DHCP failure retains the corrected configuration and
+backup for diagnosis. This does not update the original template or host-side
+Cloud-Init snippets; rebuild future templates using the corrected provisioner.
