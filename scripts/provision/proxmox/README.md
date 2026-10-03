@@ -1157,3 +1157,15 @@ example `sfhitl2` for clone 2), preserving NIC slots and device types. Proxmox
 readiness verifies the LLM Netplan match uses the interface name rather than a
 template MAC, that the interface exists, and that the DHCP route service agrees.
 This does not migrate existing templates with old MAC-based definitions.
+
+
+Participant lab NICs use an explicit `networkd` Netplan renderer. Before installing
+XFCE/Kali tools, the shared bootstrap writes
+`/etc/NetworkManager/conf.d/90-scenarioforge-netplan.conf` to mark only the lab
+NIC names unmanaged by NetworkManager (Proxmox Kali: `eth0`, `eth1`, `eth2`;
+VMware: `ens18`, `ens19`, `ens20`). This applies with or without CAF and prevents
+automatic wired profiles from adding a second DHCP/default route. NetworkManager
+remains available for other devices. CAF readiness also rejects a default route
+on the dedicated LLM NIC; its provider-specific host route must coexist with the
+participant HITL default. Existing templates need the same ownership policy
+applied inside the guest; pulling the repository alone does not change them.

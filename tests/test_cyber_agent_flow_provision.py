@@ -363,7 +363,7 @@ def test_participant_contract_rejects_stale_helper_and_empty_model(tmp_path):
         verifier.verify(helper, config, digest)
 
 
-@pytest.mark.parametrize('failure', ['none', 'mac', 'missing', 'route'])
+@pytest.mark.parametrize('failure', ['none', 'mac', 'missing', 'route', 'default'])
 def test_proxmox_network_contract_checks_clone_safe_definition(tmp_path, monkeypatch, failure):
     import hashlib
     spec=importlib.util.spec_from_file_location('verify_network',COMMON.with_name('verify_caf_participant.py'))
@@ -377,6 +377,12 @@ def test_proxmox_network_contract_checks_clone_safe_definition(tmp_path, monkeyp
     interface=tmp_path/'sys/class/net/eth2';interface.mkdir(parents=True)
     if failure!='missing': (interface/'ifindex').write_text('4')
     monkeypatch.setattr(verifier,'Path',lambda value:tmp_path/str(value).lstrip('/') if str(value).startswith(('/etc/','/sys/')) else Path(value))
+    original_run=verifier.subprocess.run
+    def run(argv,**kwargs):
+        if argv[0]=='ip':
+            return subprocess.CompletedProcess(argv,0,json.dumps([{'dev':'eth2'}] if failure=='default' else []),'')
+        return original_run(argv,**kwargs)
+    monkeypatch.setattr(verifier.subprocess,'run',run)
     digest=hashlib.sha256(helper.read_bytes()).hexdigest()
     if failure=='none':
         assert verifier.verify(helper,config,digest,'eth2')['status']=='verified'

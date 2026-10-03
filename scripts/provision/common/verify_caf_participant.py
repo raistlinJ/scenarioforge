@@ -43,6 +43,10 @@ def verify(helper, config, expected_hash, expected_interface=None):
             raise ValueError('Proxmox LLM Netplan definition must match the guest interface name, never a template MAC')
         if not (Path('/sys/class/net') / expected_interface / 'ifindex').is_file():
             raise ValueError('Dedicated LLM NIC is missing: ' + expected_interface + '; retain the original NIC slots when cloning')
+        defaults = subprocess.run(['ip', '-j', '-4', 'route', 'show', 'default'],
+                                  capture_output=True, text=True, check=True, timeout=5)
+        if any(route.get('dev') == expected_interface for route in json.loads(defaults.stdout)):
+            raise ValueError('Dedicated LLM NIC has a default route; check competing NetworkManager profiles. Only provider host routes are allowed')
         if definitions[0].get('dhcp4'):
             route = json.loads(Path('/etc/scenarioforge-llm-route.json').read_text())
             if route.get('interface') != expected_interface:

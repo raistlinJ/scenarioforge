@@ -104,3 +104,32 @@ detach_participant_bootstrap_uplink
     assert 'net1: virtio=BC:24:11:00:00:02,bridge=vmbr0,link_down=1' in actual
     assert '--delete' not in calls.read_text()
     assert 'reboot 123' in calls.read_text()
+
+
+@pytest.mark.parametrize('platform,names', [
+    ('proxmox',['eth0','eth1','eth2']),
+    ('vmware-workstation-linux',['ens18','ens19','ens20']),
+    ('vmware-fusion-mac',['ens18','ens19','ens20']),
+])
+def test_participant_nics_have_one_network_owner_before_desktop_install(tmp_path, platform, names):
+    installer=ROOT/'scripts/provision'/platform/'install-scenarioforge-lab.sh'
+    probe=r'''source "$1"
+WORK_DIR="$2"
+PARTICIPANT_OS=kali
+PARTICIPANT_GATEWAY=10.254.200.1
+for name in CORE_NET0_MAC CORE_NET1_MAC CORE_NET2_MAC APP_NET0_MAC APP_NET1_MAC PARTICIPANT_NET0_MAC PARTICIPANT_NET1_MAC; do printf -v "$name" '%s' '02:00:00:00:00:01'; done
+write_guest_bootstraps
+write_guest_network_files
+'''
+    result=subprocess.run(['bash','-c',probe,'test',str(installer),str(tmp_path)],capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
+    network=yaml.safe_load((tmp_path/'participant-network.yaml').read_text())
+    assert network['renderer']=='networkd'
+    script=(tmp_path/'participant-bootstrap.sh').read_text()
+    assert 'match-device='+';'.join('interface-name:'+name for name in names) in script
+    assert 'managed=0' in script
+    assert 'for iface in '+' '.join(names)+'; do' in script
+    assert script.index('90-scenarioforge-netplan.conf') < script.index('apt-get update')
+    assert '__PARTICIPANT_' not in script
+    assert 'unmanaged-devices=*' not in script
+    subprocess.run(['bash','-n',str(tmp_path/'participant-bootstrap.sh')],check=True)

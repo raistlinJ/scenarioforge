@@ -1133,7 +1133,7 @@ write_guest_bootstraps
     )
     assert result.returncode == 0, result.stderr
     source = (tmp_path / "participant-bootstrap.sh").read_text()
-    block = source.split("source /etc/os-release\n", 1)[1].split(
+    block = source.split("set_bootstrap_status 10 'updating participant package metadata'\n", 1)[1].split(
         "set_bootstrap_status 85", 1
     )[0]
     result = subprocess.run(

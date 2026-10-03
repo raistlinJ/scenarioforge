@@ -1780,6 +1780,27 @@ trap 'on_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 source /etc/os-release
+# Cloud-Init/Netplan owns the lab NICs. Kali XFCE installs NetworkManager,
+# which would otherwise autoconnect them and add a second DHCP/default route.
+# Write this before desktop installation and match names, never clone MACs.
+set_bootstrap_status 5 'assigning participant NICs to Netplan/networkd'
+install -d -m 0755 /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/90-scenarioforge-netplan.conf <<'NETWORK_OWNER'
+[device-scenarioforge-netplan]
+match-device=__PARTICIPANT_NM_MATCHES__
+managed=0
+NETWORK_OWNER
+systemctl enable --now systemd-networkd
+if systemctl is-active --quiet NetworkManager; then
+    nmcli general reload
+    for iface in __PARTICIPANT_NETWORK_NAMES__; do
+        if ip link show dev "$iface" >/dev/null 2>&1; then
+            nmcli device set "$iface" managed no
+        fi
+    done
+fi
+netplan generate
+netplan apply
 set_bootstrap_status 10 'updating participant package metadata'
 apt-get update
 if [[ "$ID" == kali ]]; then
@@ -1863,6 +1884,13 @@ touch /var/lib/scenarioforge/participant-ready
 set_bootstrap_status 100 'ready'
 echo 'Participant XFCE provisioning complete.'
 PARTICIPANT_SCRIPT
+    local participant_names participant_matches
+    participant_names="$(participant_interface_name 0) $(participant_interface_name 1) $(participant_interface_name 2)"
+    participant_matches="interface-name:$(participant_interface_name 0);interface-name:$(participant_interface_name 1);interface-name:$(participant_interface_name 2)"
+    sed -e "s/__PARTICIPANT_NM_MATCHES__/$participant_matches/g" \
+        -e "s/__PARTICIPANT_NETWORK_NAMES__/$participant_names/g" \
+        "$WORK_DIR/participant-bootstrap.sh" > "$WORK_DIR/participant-bootstrap.sh.new"
+    mv "$WORK_DIR/participant-bootstrap.sh.new" "$WORK_DIR/participant-bootstrap.sh"
     chmod 0755 "$WORK_DIR/core-bootstrap.sh" "$WORK_DIR/app-bootstrap.sh" \
         "$WORK_DIR/participant-bootstrap.sh"
 }
@@ -2060,6 +2088,7 @@ EOF
 
     cat > "$WORK_DIR/participant-network.yaml" <<EOF
 version: 2
+renderer: networkd
 ethernets:
 $(network_interface_match "$PARTICIPANT_NET0_MAC" "$(participant_interface_name 0)" participant)
     addresses: [$PARTICIPANT_CIDR]
