@@ -16,7 +16,7 @@ spec.loader.exec_module(caf)
 
 @pytest.fixture
 def config():
-    return dict(cyber_agent_flow=True, participant_os='kali',
+    return dict(cyber_agent_flow=True, participant_os='kali', llm_model='lab-model',
                 llm_provider_address='203.0.113.20', llm_provider_url='http://203.0.113.20:11434',
                 llm_interface_cidr='192.168.80.10/24', llm_gateway='192.168.80.2')
 
@@ -131,6 +131,7 @@ PARTICIPANT_OS=debian
 PARTICIPANT_DISK_GB=20
 CORE_MANAGEMENT_CIDR=172.31.250.3/24
 CYBER_AGENT_FLOW=1
+LLM_MODEL=lab-model
 LLM_PROVIDER_ADDRESS=203.0.113.20
 LLM_PROVIDER_URL=https://provider.example:10101/v1
 LLM_INTERFACE_CIDR=192.168.80.10/24
@@ -323,3 +324,40 @@ def test_dhcp_route_and_generated_config_use_selected_interface(config,name):
     assert json.loads(config_text)['interface']==name
     assert 'journalctl -u scenarioforge-llm-route.service -n 30 --no-pager' in script
     with pytest.raises(ValueError):route.interface_name(dict(interface='../ens20'))
+
+
+@pytest.mark.parametrize('model', ['', '   ', None, 'bad\nmodel', 'x' * 2049])
+def test_enabled_caf_requires_valid_model(config, model):
+    config['llm_model'] = model
+    with pytest.raises(ValueError):
+        caf.validate(config)
+
+
+def test_guest_contract_precedes_ready_marker(config):
+    import hashlib
+    helper = COMMON.with_name('update-llm-destination.py').read_bytes()
+    marker = 'touch /var/lib/scenarioforge/participant-ready'
+    script = caf.inject('#!/bin/bash\n' + marker + '\n', config)
+    assert hashlib.sha256(helper).hexdigest() in script
+    assert script.index('CAF_VERIFY_PARTICIPANT') < script.index(marker)
+
+
+def test_participant_contract_rejects_stale_helper_and_empty_model(tmp_path):
+    import hashlib
+    spec = importlib.util.spec_from_file_location('verify_caf', COMMON.with_name('verify_caf_participant.py'))
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    helper = tmp_path / 'helper.py'
+    helper.write_bytes(COMMON.with_name('update-llm-destination.py').read_bytes())
+    digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+    config = tmp_path / 'cli.json'
+    data = dict(provider='openai', url='http://provider.example:11434/v1', model='lab-model', api_key='do-not-export')
+    config.write_text(json.dumps(data))
+    result = verifier.verify(helper, config, digest)
+    assert result['status'] == 'verified'
+    assert 'do-not-export' not in json.dumps(result)
+    with pytest.raises(ValueError, match='differs'):
+        verifier.verify(helper, config, '0' * 64)
+    config.write_text(json.dumps(dict(data, model='')))
+    with pytest.raises(ValueError, match='model name'):
+        verifier.verify(helper, config, digest)

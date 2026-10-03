@@ -1214,3 +1214,18 @@ perform_cleanup
     assert "installer state and credentials were retained" in result.stderr
     assert "must-not-remove" not in result.stderr
     assert state.read_text() == "recovery state"
+
+
+@pytest.mark.parametrize('exitcode,expected', [(0, 0), (1, 1)])
+def test_final_caf_guest_verification_rejects_failed_contract(exitcode, expected):
+    source = INSTALLER.read_text()
+    function = source.split('verify_participant_caf_contract() {', 1)[1].split('\n}', 1)[0]
+    script = (
+        'CYBER_AGENT_FLOW=1; DRY_RUN=0; PARTICIPANT_VMID=123\n'
+        f'CAF_HELPER={shlex.quote(str(ROOT / "scripts/provision/common/cyber_agent_flow.py"))}\n'
+        "qm() { echo '{\"exitcode\":" + str(exitcode) + "}'; }\n"
+        'warn() { :; }; log() { :; }\n'
+        'verify_participant_caf_contract() {' + function + '\n}\n'
+        'verify_participant_caf_contract\n'
+    )
+    assert subprocess.run(['bash', '-c', script]).returncode == expected

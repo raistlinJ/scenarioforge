@@ -795,11 +795,31 @@ Configure these values before enabling the option:
 | `llm_provider_address` | Fixed IPv4 address of the external LLM provider |
 | `llm_provider_url` | Full HTTP(S) endpoint, using the IP or a hostname that resolves to it |
 | `llm_provider_type` | `ollama_direct`, `litellm`, `openai`, or `claude` |
-| `llm_model` | Model name used by CyberAgentFlow |
+| `llm_model` | Required nonempty model ID when CyberAgentFlow is enabled |
 | `llm_interface_cidr` | Advanced static override; omit with gateway for automatic DHCP |
 | `llm_gateway` | Advanced static router override; supply only together with interface CIDR |
 | `llm_vmnet` | VMware: existing egress vmnet, default `vmnet8` |
 | `llm_bridge` | Proxmox: existing egress bridge; empty uses `uplink_bridge` |
+
+Proxmox and VMware Fusion use the same shared CAF generator and routing helper.
+Both verify the installed helper checksum, `--url`/`--cli-config`/`--json`
+support and a complete model configuration before setting participant readiness.
+Proxmox also verifies the running guest through QGA before declaring installation
+complete or detaching its temporary uplink. An old ready marker alone cannot
+satisfy that final check. These checks do not contact the LLM or run a model trial.
+Use the model ID advertised by your server, for example:
+
+```yaml
+llm_provider_type: openai
+llm_provider_url: http://129.108.156.63:11434/v1
+llm_model: unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+```
+
+Updating the repository does not rerun Cloud-Init inside an already provisioned
+VM. Existing guests can use the updated orchestrator's Apply settings operation
+to back up and upgrade an older helper; a fresh/reinstalled participant receives
+the helper embedded in the current generator. Reinstall is not required solely
+to repair the helper on an existing guest.
 
 Use the gateway/subnet actually configured on your chosen vmnet/bridge. The LLM
 network must differ from HITL and management. The third Kali NIC is matched by

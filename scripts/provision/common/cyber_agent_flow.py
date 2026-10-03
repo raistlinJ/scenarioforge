@@ -1,5 +1,6 @@
 """Shared opt-in Kali CyberAgentFlow provisioning and dedicated LLM routing."""
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -56,6 +57,9 @@ def validate(config):
         raise ValueError('llm_provider_url must be an http(s) URL without credentials')
     if c['llm_provider_type'] not in ('ollama_direct', 'litellm', 'openai', 'claude'):
         raise ValueError('unsupported llm_provider_type')
+    if not isinstance(c['llm_model'], str) or not c['llm_model'].strip() or len(c['llm_model'])>2048 or any(ord(char)<32 for char in c['llm_model']):
+        raise ValueError('Set llm_model to a nonempty model ID when cyber_agent_flow is enabled')
+    c['llm_model']=c['llm_model'].strip()
     for prefix in ('cyber_agent_flow', 'cyber_agent_flow_eval'):
         validate_git_source(c[prefix + '_url'], c[prefix + '_ref'], prefix)
     if not re.fullmatch(r'vmnet\d+', c['llm_vmnet']):
@@ -91,6 +95,9 @@ def inject(script, config):
                api_key_env='MCP_API_KEY', ssl_verify=True, server_command='venv/bin/python mcp_kali.py',
                tools_config='kali_tools.json')
     q = shlex.quote
+    route_helper=Path(__file__).with_name('update-llm-destination.py').read_text()
+    route_digest=hashlib.sha256(route_helper.encode()).hexdigest()
+    verify_source=Path(__file__).with_name('verify_caf_participant.py').read_text()
     automatic_setup = ''
     if not c['llm_interface_cidr']:
         route_config = json.dumps(dict(provider=c['llm_provider_address'], interface=c.get('llm_interface_name', 'ens20'), protected=[
@@ -198,9 +205,12 @@ fi
 /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
     || fail_bootstrap 'CyberAgentFlow dependency verification failed; inspect the Python error above'
 cat > /usr/local/sbin/update-llm-destination <<'CAF_UPDATE_SCRIPT'
-{Path(__file__).with_name('update-llm-destination.py').read_text()}
+{route_helper.rstrip(chr(10))}
 CAF_UPDATE_SCRIPT
 chmod 0755 /usr/local/sbin/update-llm-destination
+python3 - /usr/local/sbin/update-llm-destination /opt/cyber-agent-flow/configs/cli.json {route_digest} <<'CAF_VERIFY_PARTICIPANT' || fail_bootstrap 'CAF routing helper/model configuration does not meet the orchestrator contract'
+{verify_source}
+CAF_VERIFY_PARTICIPANT
 {automatic_setup}
 provider_host={q(urlsplit(c['llm_provider_url']).hostname or '')}
 if [[ "$provider_host" != {q(str(c['llm_provider_address']))} ]]; then

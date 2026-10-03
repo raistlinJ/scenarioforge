@@ -2220,6 +2220,22 @@ if payload.get("exitcode") == 0:
 ' <<<"$output" 2>/dev/null || true
 }
 
+verify_participant_caf_contract() {
+    [[ "$CYBER_AGENT_FLOW" == 1 && "$DRY_RUN" == 0 ]] || return 0
+    local expected source output
+    expected="$(python3 -c 'import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$(dirname "$CAF_HELPER")/update-llm-destination.py")"
+    source="$(cat "$(dirname "$CAF_HELPER")/verify_caf_participant.py")"
+    output="$(qm guest exec "$PARTICIPANT_VMID" -- /usr/bin/python3 -c "$source" /usr/local/sbin/update-llm-destination /opt/cyber-agent-flow/configs/cli.json "$expected" 2>/dev/null)" || {
+        warn 'Unable to verify participant CAF helper/model contract through the guest agent'
+        return 1
+    }
+    if ! python3 -c 'import json,sys; result=json.load(sys.stdin); raise SystemExit(0 if result.get("exitcode")==0 else 1)' <<<"$output"; then
+        warn 'Participant CAF helper/model verification failed; installation is not complete. Inspect the participant bootstrap log and the installed routing helper.'
+        return 1
+    fi
+    log 'Participant CAF routing helper and model configuration verified against this provisioner'
+}
+
 guest_last_log_line() {
     guest_command_output "$1" tail -n 1 "$2"
 }
@@ -3077,6 +3093,7 @@ perform_install() {
             warn "Guest logs: /var/log/scenarioforge-{core,app,participant}-bootstrap.log"
             exit 2
         fi
+        verify_participant_caf_contract || die 'Participant CAF contract verification failed; temporary uplink retained for diagnosis'
         detach_participant_bootstrap_uplink
         mark_install_complete
     else
@@ -3088,6 +3105,7 @@ perform_install() {
             warn "Guest log: /var/log/scenarioforge-participant-bootstrap.log"
             exit 2
         fi
+        verify_participant_caf_contract || die 'Participant CAF contract verification failed; temporary uplink retained for diagnosis'
         detach_participant_bootstrap_uplink
         record_install_phase "CORE and ScenarioForge provisioning continue in the background (--no-wait)"
     fi
