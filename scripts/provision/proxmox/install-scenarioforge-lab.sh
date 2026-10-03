@@ -2107,6 +2107,14 @@ $(network_interface_match "$PARTICIPANT_NET1_MAC" "$(participant_interface_name 
 EOF
 }
 
+# Share guest generation between fresh install and reinstall to keep NIC naming consistent.
+write_proxmox_cloud_init_files() {
+    write_guest_bootstraps
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh" --interface-name "$(participant_interface_name 2)"; fi
+    write_cloud_init_files
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name "$(participant_interface_name 2)" >> "$WORK_DIR/participant-network.yaml"; fi
+}
+
 install_snippets() {
     local file destination
     for file in core-user.yaml core-network.yaml app-user.yaml app-network.yaml participant-user.yaml participant-network.yaml; do
@@ -3093,10 +3101,7 @@ perform_install() {
     prepare_participant_image
 
     progress 28 "Generating guest bootstrap scripts and Cloud-Init data"
-    write_guest_bootstraps
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh" --interface-name "$(participant_interface_name 2)"; fi
-    write_cloud_init_files
-    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" --match-name "$(participant_interface_name 2)" >> "$WORK_DIR/participant-network.yaml"; fi
+    write_proxmox_cloud_init_files
     install_snippets
 
     progress 38 "Creating the CORE, ScenarioForge, and participant VMs"

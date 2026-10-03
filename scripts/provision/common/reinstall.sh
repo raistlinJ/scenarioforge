@@ -226,10 +226,7 @@ PY
     if [[ "${VMRUN_TYPE:-}" ]]; then
         write_vmware_cloud_init_files
     else
-        write_guest_bootstraps
-        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate inject "$WORK_DIR/participant-bootstrap.sh"; fi
-        write_cloud_init_files
-        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then caf_generate network "$PARTICIPANT_NET2_MAC" >> "$WORK_DIR/participant-network.yaml"; fi
+        write_proxmox_cloud_init_files
     fi
     # All selected VMs, credentials, cached images and provisioning inputs have
     # passed preflight before the first guest is stopped or removed.
@@ -311,7 +308,12 @@ PY
     for role in "${selected_roles[@]}"; do
         reinstall_wait_for_guest "$role"
         if [[ "$role" == participant ]]; then
-            if [[ "${VMRUN_TYPE:-}" ]]; then detach_participant_uplink; else detach_participant_bootstrap_uplink; fi
+            if [[ "${VMRUN_TYPE:-}" ]]; then
+                detach_participant_uplink
+            else
+                verify_participant_caf_contract || die 'Participant CAF contract verification failed; temporary uplink retained for diagnosis'
+                detach_participant_bootstrap_uplink
+            fi
         fi
     done
     INSTALL_COMPLETE="$old_complete"

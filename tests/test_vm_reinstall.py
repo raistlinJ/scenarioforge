@@ -20,6 +20,11 @@ def assert_current_bootstrap(user_data, role):
     source = (COMMON.parent / 'proxmox/install-scenarioforge-lab.sh').read_text()
     delimiter = role.upper() + '_SCRIPT'
     expected = source.split(f"<<'{delimiter}'\n", 1)[1].split(f'\n{delimiter}\n', 1)[0] + '\n'
+    if role == 'participant':
+        # Shared bootstrap resolves network ownership placeholders per hypervisor.
+        expected = expected.replace('__PARTICIPANT_NM_MATCHES__',
+            'interface-name:ens18;interface-name:ens19;interface-name:ens20')
+        expected = expected.replace('__PARTICIPANT_NETWORK_NAMES__', 'ens18 ens19 ens20')
     payload = yaml.safe_load(user_data)
     entry = next(item for item in payload['write_files']
                  if item['path'] == f'/usr/local/sbin/scenarioforge-{role}-bootstrap')
@@ -579,3 +584,77 @@ perform_reinstall
         assert shutdown_vmids == stop_vmids == []
     if mode in ('preview', 'bad_cache', 'unowned'):
         assert not any(call.startswith('qm ') or call == 'state' for call in calls)
+
+
+
+@pytest.mark.parametrize('contract_ok', [True, False])
+def test_proxmox_caf_reinstall_uses_eth2_and_verifies_before_detach(tmp_path, contract_ok):
+    # Run reinstall with real guest generators and fake hypervisor operations.
+    installer = ROOT / 'scripts/provision/proxmox/install-scenarioforge-lab.sh'
+    (tmp_path / 'snippets').mkdir()
+    credentials = tmp_path / 'credentials'
+    credentials.write_text('CORE_VM_PASSWORD=core\nAPP_VM_PASSWORD=app\nPARTICIPANT_VM_PASSWORD=participant\nSCENARIOFORGE_ADMIN_PASSWORD=admin\n')
+    credentials.chmod(0o600)
+    (tmp_path / 'state').touch()
+    events = tmp_path / 'events'
+    script = r'''source "$1"
+STATE_FILE="$2/state"
+CREDENTIALS_FILE="$2/credentials"
+test_root="$2"
+REINSTALL_TARGET=participant
+DRY_RUN=0
+ASSUME_YES=1
+INSTALL_COMPLETE=1
+PARTICIPANT_OS=kali
+CYBER_AGENT_FLOW=1
+LLM_PROVIDER_ADDRESS=192.0.2.5
+LLM_PROVIDER_URL=http://192.0.2.5:11434/v1
+LLM_PROVIDER_TYPE=openai
+LLM_MODEL=test-model
+LLM_BRIDGE=vmbr0
+LLM_INTERFACE_CIDR=''
+LLM_GATEWAY=''
+PARTICIPANT_VMID=9403
+event() { printf '%s\n' "$*" >> "$test_root/events"; }
+load_cleanup_scope() { :; }
+storage_config() { printf '{"path":"%s"}' "$test_root"; }
+vm_owned_by_installer() { return 0; }
+qm() {
+    case "$1" in
+        config) printf 'memory: 4096\ncores: 2\nscsi0: local:disk,size=40G\nnet0: virtio=02:00:00:00:00:10,bridge=sfhitl1\nnet1: virtio=02:00:00:00:00:11,bridge=vmbr0,link_down=1\nnet2: virtio=02:00:00:00:00:12,bridge=vmbr0\n' ;;
+        status) echo 'status: stopped' ;;
+        guest)
+            event verify
+            [[ "$*" == *'--expected-interface eth2'* ]] || return 99
+            if [[ "$contract_ok" == 1 ]]; then echo '{"exitcode":0}'; else echo '{"exitcode":1}'; fi ;;
+        *) event "qm $*" ;;
+    esac
+}
+download_verified_image() { :; }
+prepare_participant_image() { PARTICIPANT_IMAGE=/fake/kali.img; }
+write_state() { :; }
+reinstall_wait_for_guest() { event "wait $1"; }
+detach_participant_bootstrap_uplink() { event detach; }
+'''
+    script += '\ncontract_ok="$3"\nperform_reinstall\n'
+    result = subprocess.run(['bash', '-c', script, 'test', str(installer), str(tmp_path), str(int(contract_ok))], capture_output=True, text=True)
+    assert (result.returncode == 0) == contract_ok, result.stdout + result.stderr
+    calls = events.read_text().splitlines()
+    assert 'verify' in calls
+    assert ('detach' in calls) == contract_ok
+    if contract_ok:
+        assert calls.index('wait participant') < calls.index('verify') < calls.index('detach')
+    else:
+        assert 'contract verification failed' in result.stderr
+        assert 'Reinstall complete' not in result.stdout
+    network = yaml.safe_load((tmp_path / 'snippets/scenarioforge-participant-network.yaml').read_text())
+    llm = network['ethernets']['llm']
+    assert llm['match'] == {'name': 'eth2'}
+    assert 'set-name' not in llm
+    assert llm['dhcp4-overrides']['use-routes'] is False
+    user = yaml.safe_load((tmp_path / 'snippets/scenarioforge-participant-user.yaml').read_text())
+    bootstrap = base64.b64decode(next(item['content'] for item in user['write_files'] if item['path'].endswith('participant-bootstrap'))).decode()
+    route = json.loads(bootstrap.split("<<'CAF_ROUTE_CONFIG'\n", 1)[1].split('\nCAF_ROUTE_CONFIG', 1)[0])
+    assert route['interface'] == 'eth2'
+    assert 'match-device=interface-name:eth0;interface-name:eth1;interface-name:eth2' in bootstrap
+    assert 'set-name' not in (tmp_path / 'snippets/scenarioforge-participant-network.yaml').read_text()

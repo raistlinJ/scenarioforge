@@ -1169,3 +1169,13 @@ remains available for other devices. CAF readiness also rejects a default route
 on the dedicated LLM NIC; its provider-specific host route must coexist with the
 participant HITL default. Existing templates need the same ownership policy
 applied inside the guest; pulling the repository alone does not change them.
+
+
+Fresh install and `--reinstall participant` share the same Proxmox guest
+configuration generator. For a Kali participant with CAF, both write the LLM
+Netplan definition with `match.name: eth2` (no MAC binding or `set-name`) and
+configure the DHCP route service for `eth2`. Reinstall also verifies the CAF
+helper, model and network contract before disconnecting the bootstrap uplink or
+reporting completion. Update the provisioner checkout before reinstalling;
+existing clones retain their old guest configuration until repaired or replaced
+from a corrected template.
