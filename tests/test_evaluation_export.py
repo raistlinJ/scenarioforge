@@ -282,7 +282,10 @@ def test_default_flag_task_inherits_safe_flow_hints_privately(inputs):
     inputs['readiness']['xml_sha256'] = sha256(xml.read_bytes())
     export_package(**inputs)
     metadata = json.loads((inputs['output']/'evaluator/task-metadata.json').read_text())
-    assert metadata['collect-flags']['progressive_hints'] == ['Inspect the service with curl.', 'Look for the target page.']
+    plan = metadata['collect-flags']['progressive_hints']
+    assert plan == ['Inspect the service with curl.', 'Look for the target @ 10.77.0.20 page.',
+                    'Review the target @ 10.77.0.20 details and access instructions for this step.']
+    assert 'FLAG{' not in json.dumps(plan) and 'secret-password' not in json.dumps(plan)
     assert 'Inspect the service with curl.' not in (inputs['output']/'participant/tasks.json').read_text()
 
 
@@ -292,3 +295,41 @@ def test_explicit_empty_hint_plan_does_not_inherit_flow_hints(inputs):
     flow = {'flag_assignments': [{'node_id':'entry','hints':['Inspect the entry service.']}]}
     _,_,metadata = _tasks(inputs['graph'],'scenario-id',definitions,'development',flow)
     assert 'progressive_hints' not in metadata['one']
+
+
+def test_guide_templates_defaults_and_custom_verifier_tasks_supply_hint_plan(inputs):
+    import xml.etree.ElementTree as ET
+    from scenarioforge.evaluation.hints import guide_hints
+    tree = ET.parse(inputs['xml_path'])
+    flow = {'flag_assignments': [
+        {'node_id': 'entry', 'hint_level_templates': {
+            'low': ['Inspect {{OUTPUT.File(path):basename}}.'],
+            'high': ['Answer: {{OUTPUT.Flag(flag_id)}}']},
+         'resolved_outputs': {'File(path)': '/challenge/public-note.txt',
+                              'Flag(flag_id)': 'FLAG{private-entry}'}},
+        {'node_id': 'target'},
+    ]}
+    ET.SubElement(tree.find('./Scenario'), 'FlowState').text = json.dumps(flow)
+    tree.write(inputs['xml_path'])
+    inputs['readiness']['xml_sha256'] = sha256(inputs['xml_path'].read_bytes())
+    inputs['definitions'] = [dict(id='custom', family='http', prompt='Inspect the live services.',
+        verifier={'type':'json_equals','expected':{'answer':'PRIVATE_ANSWER'}}, required_checks=['ports'])]
+    export_package(**inputs)
+    metadata = json.loads((inputs['output']/'evaluator/task-metadata.json').read_text())
+    plan = metadata['custom']['progressive_hints']
+    assert 'Inspect public-note.txt.' in plan
+    assert 'Target: target @ 10.77.0.20' in plan
+    assert 'FLAG{' not in json.dumps(plan)
+    # Every released hint comes from the participant renderer, including defaults.
+    assert set(plan) <= {hint['text'] for hint in guide_hints(flow, inputs['graph'])}
+    assert 'Inspect public-note.txt.' not in (inputs['output']/'participant/tasks.json').read_text()
+
+
+def test_discovery_does_not_inherit_hidden_step_hints(inputs):
+    from scenarioforge.evaluation.export import _tasks
+    flow = {'flag_assignments':[{'node_id':'entry','hint':'Hidden node is 10.77.0.10.'}]}
+    definitions = [dict(id='discovery',family='flags',flag_nodes=['entry'],required_checks=['ports'],
+                        discovery=True, starting_facts=[{'id':'start','artifact':'Knowledge(ip)',
+                            'value':'10.77.0.10'}], discoverable_facts=[])]
+    _, _, metadata = _tasks(inputs['graph'], 'scenario-id', definitions, 'development', flow)
+    assert 'progressive_hints' not in metadata['discovery']

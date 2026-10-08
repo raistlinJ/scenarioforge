@@ -1,6 +1,7 @@
 """Build an evaluation package from a saved graph, reviewed tasks and readiness.
 
-No model calls, scenario execution, or guide/answer inference happens here.
+No model calls or scenario execution happen here. Assistance is resolved by the
+participant guide renderer; solutions remain private.
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
     if not isinstance(definitions, list) or not definitions:
         raise ValueError('Task definitions must be a nonempty JSON list')
     participant, verifiers, metadata = [], {}, {}
+    rendered_hints = None
     for item in definitions:
         allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints'}
         if not isinstance(item, dict):
@@ -132,9 +134,14 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
         verifiers[task_id] = verifier
         metadata[task_id] = {'source_nodes': sorted(refs or []), 'required_checks': sorted(set(checks))}
         hints = item.get('progressive_hints', [])
-        if 'progressive_hints' not in item and refs:
-            from .hints import hints_for_nodes
-            hints = hints_for_nodes(flow or {}, refs, verifier, knowledge.get('discoverable_facts', []))
+        if 'progressive_hints' not in item and not discovery:
+            from .hints import guide_hints, hints_for_nodes
+            if rendered_hints is None:
+                rendered_hints = guide_hints(flow or {}, graph)
+            hints = hints_for_nodes(flow or {}, refs, verifier,
+                                    rendered=rendered_hints, graph=graph)
+        # Discovery participant guides omit the challenge walkthrough; their
+        # assistance comes from declared discoverable facts, not hidden steps.
         if not isinstance(hints, list) or len(hints) > 16 or any(not isinstance(h, str) or not h.strip() or len(h) > 1500 for h in hints):
             raise ValueError('progressive_hints must be up to 16 nonempty strings, each at most 1500 characters')
         if hints:
@@ -169,7 +176,7 @@ def export_package(*, xml_path, graph, output, suite_id,
     if not isinstance(scenario_name, str) or not scenario_name:
         raise ValueError('Attack graph requires a scenario name')
     scenario_id = 'sf-' + sha256(encoded({'xml_sha256': xml_hash, 'scenario': scenario_name, 'graph': graph}))[:24]
-    # Saved Flow hints are authored scenario data, not facilitator answers.
+    # Use selected Flow data with the participant guide renderer.
     # Read only the selected scenario's FlowState and keep assistance private.
     import xml.etree.ElementTree as ET
     flow = {}

@@ -121,3 +121,21 @@ def test_guides_preview_failure_leaves_no_exports(tmp_path, monkeypatch, capsys,
     assert cli._run_guides_phase(args) == 1
     assert json.loads(capsys.readouterr().err)['ok'] is False
     assert not (tmp_path / 'guides').exists()
+
+
+def test_hint_collector_uses_rendered_participant_groups_only():
+    from scenarioforge.utils.guide_export import participant_hint_plan
+    nodes, assignments = sample_challenges()
+    preview = {'chain': nodes, 'flag_assignments': assignments,
+               'vuln_readme_entries': [{'step':1, 'hint_levels': {'low':['Inspect {{NODE_IP}}.']},
+                   'templateVars': {'NODE_IP':'10.20.0.11'}, 'content':'FACILITATOR_ONLY_REFERENCE'}]}
+    plan = participant_hint_plan('Training', preview)
+    guide = render_guides('Training', preview, ['participant'])['participant']['markdown']
+    assert plan and all(hint['text'] in guide for hint in plan)
+    assert [hint['level'] for hint in plan if hint['node_id']=='1'] == ['low','medium','high','low']
+    texts = [hint['text'] for hint in plan]
+    assert 'Inspect 10.20.0.11.' in texts
+    assert 'Look for another reachable host.' in texts  # own-step pivot hints
+    assert 'The event account is analyst.' not in texts  # Helpful Fact, not a hint
+    assert not any('FACILITATOR' in text for text in texts)
+    assert participant_hint_plan('Training', dict(preview, discovery=True)) == []

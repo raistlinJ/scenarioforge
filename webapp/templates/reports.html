@@ -1565,7 +1565,7 @@ function startingFactsGuideLines(facts, assignments, discovery) {
   return lines;
 }
 
-function vulnerabilityGuidanceMarkdown(entries) {
+function vulnerabilityGuidanceMarkdown(entries, onHints) {
   const lines = [];
   (entries || []).forEach(entry => {
     const render = value => String(value).replace(/\{\{([A-Z_]+)\}\}/g, (token, name) =>
@@ -1574,8 +1574,10 @@ function vulnerabilityGuidanceMarkdown(entries) {
     ['low', 'medium', 'high'].forEach(level => {
       const hints = Array.isArray(levels[level]) ? levels[level] : [];
       if (hints.length) {
+        const values = hints.map(render);
+        if (onHints) onHints({title: `Hint ${level}`, values});
         lines.push('### Vulnerability hints: ' + level, '');
-        hints.forEach(hint => lines.push('- ' + render(hint)));
+        values.forEach(hint => lines.push('- ' + hint));
         lines.push('');
       }
     });
@@ -1591,6 +1593,14 @@ function vulnerabilityGuidanceMarkdown(entries) {
 function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   const opts = (options && typeof options === 'object') ? options : {};
   const facilitatorMode = !!opts.facilitator;
+  // The evaluator consumes the same rendered participant hints as the guide.
+  // Helpful Facts are supplied up front; facilitator content is never collected.
+  const collectHints = (nodeId, group, values) => {
+    if (facilitatorMode || !Array.isArray(opts.hintCollector) || !/^Hint /i.test(group.title)) return;
+    values.forEach((text) => opts.hintCollector.push({
+      node_id: nodeId, level: group.title.slice(5).toLowerCase(), text,
+    }));
+  };
   const startingPreview = opts.preview || {};
   const discovery = !!(opts.discovery || startingPreview.discovery);
   const startingLines = startingFactsGuideLines(opts.startingFacts || startingPreview.starting_facts, assignments, discovery);
@@ -2020,6 +2030,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
         // participant is scanning anyway earns a medium nudge, a bare SSH box
         // the most explicit tier, since nothing about it says "this is the door".
         reportPivotHintGroups(d).forEach((group) => {
+          collectHints(nodeId, group, group.values);
           lines.push('<details>');
           lines.push(`<summary>${group.title}</summary>`);
           lines.push('');
@@ -2297,6 +2308,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
           .map((value) => formatGuideHintLine(resolveReportGuideTemplateText(value, assignment, guideContext)))
           .filter(Boolean);
         if (!values.length) return;
+        collectHints(nodeId, group, values);
         lines.push(group.title === 'Helpful Fact' ? '<details open>' : '<details>');
         lines.push(`<summary>${group.title}</summary>`);
         lines.push('');
@@ -2308,7 +2320,8 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     }
 
     const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
-    lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes));
+    lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes,
+      (group) => collectHints(nodeId, group, group.values)));
     if (facilitatorMode && stepVulnReadmes.some(entry => entry.content)) {
       lines.push('### Publicly available documentation');
       lines.push('');

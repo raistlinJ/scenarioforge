@@ -10,6 +10,15 @@ import subprocess
 
 
 def render_guides(scenario: str, preview: dict, audiences: list[str]) -> dict:
+    return _run_renderer(scenario, preview, audiences)
+
+
+def participant_hint_plan(scenario: str, preview: dict) -> list[dict]:
+    """Collect resolved hint groups from the participant guide, without HTML scraping."""
+    return _run_renderer(scenario, preview, ['participant'], hints_only=True)
+
+
+def _run_renderer(scenario, preview, audiences, *, hints_only=False):
     node = shutil.which('node')
     if not node:
         raise RuntimeError('Guide export requires Node.js (node on PATH).')
@@ -24,21 +33,23 @@ def render_guides(scenario: str, preview: dict, audiences: list[str]) -> dict:
     script = 'const window = {};\n' + '\n'.join(regions) + '''
 const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const result = {};
+const hintCollector = [];
 for (const audience of input.audiences) {
   guideHtmlBlockRegistry.clear();
   const markdown = buildReportGuideMarkdown(input.scenario, input.preview.chain,
     input.preview.flag_assignments || [], {
       facilitator: audience === 'facilitator',
+      hintCollector,
       participantNetworkSetup: input.preview.participant_network_setup,
       preview: input.preview,
       vulnReadmeEntries: input.preview.vuln_readme_entries || [],
     });
-  result[audience] = {markdown, html: markdownToHtmlDocument(input.scenario, markdown)};
+  if (!input.hints_only) result[audience] = {markdown, html: markdownToHtmlDocument(input.scenario, markdown)};
 }
-process.stdout.write(JSON.stringify(result));
+process.stdout.write(JSON.stringify(input.hints_only ? hintCollector : result));
 '''
     run = subprocess.run([node, '-e', script], input=json.dumps({
-        'scenario': scenario, 'preview': preview, 'audiences': audiences,
+        'scenario': scenario, 'preview': preview, 'audiences': audiences, 'hints_only': hints_only,
     }), text=True, capture_output=True, timeout=60)
     if run.returncode:
         raise RuntimeError(f'Guide renderer failed: {run.stderr.strip()}')

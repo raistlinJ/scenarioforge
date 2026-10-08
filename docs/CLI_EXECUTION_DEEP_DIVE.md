@@ -730,3 +730,26 @@ dependencies, and Node.js (`node` on PATH), because it runs the Reports page's
 shared JavaScript guide renderer. It uses the saved flow preview, including
 resolved hints, pivots, and participant network setup. It does not download the
 catalog README appendices that the browser adds to facilitator exports.
+
+
+### Progressive assistance in evaluation packages
+
+When a task does not declare `progressive_hints`, evaluation export collects the
+selected scenario's resolved **participant guide** hint groups using the same
+renderer as `guides`. This includes template expansion, default hint levels and
+own-step pivot hints, in chain order and the order shown within each guide step.
+Tasks with `flag_nodes` use hints for those steps; custom verifier tasks use the
+scenario's hint groups. Node addresses and outputs come from the frozen attack
+graph, so assistance matches the exported scenario.
+
+The resulting plan is stored only in `evaluator/task-metadata.json`, and the
+orchestrator's progressive-hints toggle controls whether it is released during
+a trial. Facilitator sections, resolved answers, secret outputs and unresolved
+templates are excluded. Helpful Facts remain starting information. Discovery
+participant guides omit the walkthrough, so discovery assistance uses the task's
+explicit `discoverable_facts` or authored hints instead.
+
+An explicit `progressive_hints` list overrides guide-derived hints; an explicit
+empty list opts out. Plans are limited to 16 hints of at most 1,500 characters.
+Guide-derived export requires Node.js, already installed by the APP provisioners, to run the
+shared guide renderer.
