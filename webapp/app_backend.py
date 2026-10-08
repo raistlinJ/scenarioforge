@@ -5063,6 +5063,8 @@ def _push_repo_to_remote(
     client = _open_ssh_client(cfg)
     sftp = None
     archive_path = None
+    remote_archive = None
+    archive_delegated = False
     try:
         sftp = client.open_sftp()
         # Avoid indefinite blocking SFTP ops when the transport wedges.
@@ -5272,7 +5274,18 @@ def _push_repo_to_remote(
             archive_size = 0
         log.info('[remote-sync] archive ready: %s (size=%s bytes, took=%.2fs)', archive_path, archive_size, (t1 - t0))
         _update_repo_push_progress(progress_id, status='packaging', stage='packaging', percent=8.0, detail='Repository archive ready.')
-        remote_archive = _remote_path_join(remote_parent, f"{uuid.uuid4().hex}.tar.gz")
+        # The provisioned repo is writable by the SSH account, but its parent
+        # (/opt) deliberately is not. Stage outside the repo, which is cleared
+        # during extraction. mktemp also gives the snapshot private permissions.
+        _rc, archive_out, _err = _exec_ssh_command(
+            client, 'mktemp /tmp/.scenarioforge-repo-XXXXXXXX.tar.gz',
+            timeout=15.0, check=True,
+        )
+        allocated_archive = archive_out.strip()
+        if not allocated_archive.startswith('/tmp/.scenarioforge-repo-') or '\n' in allocated_archive:
+            raise RuntimeError('Unable to allocate a temporary repository snapshot on CORE')
+        remote_archive = allocated_archive
+        upload_dir = posixpath.dirname(remote_archive)
         try:
             if log_handle:
                 log_handle.write(f"[remote] Repo upload: uploading snapshot to {remote_archive}\n")
@@ -5311,11 +5324,11 @@ def _push_repo_to_remote(
         # SSH_FX_FAILURE, which paramiko surfaces as OSError('Failure') -- a
         # message that says nothing. A full filesystem is by far the most common
         # cause, so check for it before spending the upload and again on failure.
-        free_bytes = _remote_free_bytes(client, remote_parent, logger=log)
+        free_bytes = _remote_free_bytes(client, upload_dir, logger=log)
         if free_bytes is not None and archive_size and free_bytes < archive_size:
             raise RuntimeError(
                 f'Not enough free space on the CORE host to upload the repository snapshot: '
-                f'{remote_parent} has {free_bytes // (1024 * 1024)} MB free but the archive is '
+                f'{upload_dir} has {free_bytes // (1024 * 1024)} MB free but the archive is '
                 f'{archive_size // (1024 * 1024)} MB. Free space on the CORE VM and re-run Execute.'
             )
         try:
@@ -5329,21 +5342,21 @@ def _push_repo_to_remote(
                 _exec_ssh_command(client, f"rm -f {shlex.quote(remote_archive)}", timeout=30.0)
             except Exception:
                 pass
-            free_after = _remote_free_bytes(client, remote_parent, logger=log)
+            free_after = _remote_free_bytes(client, upload_dir, logger=log)
             if free_after is not None and archive_size and free_after < archive_size:
                 raise RuntimeError(
                     f'Repository snapshot upload to {remote_archive} failed ({detail}) because the '
-                    f'CORE host is out of space: {remote_parent} has {free_after // (1024 * 1024)} MB '
+                    f'CORE host is out of space: {upload_dir} has {free_after // (1024 * 1024)} MB '
                     f'free for a {archive_size // (1024 * 1024)} MB archive. Free space on the CORE '
                     'VM and re-run Execute.'
                 ) from exc
             hint = ''
             if free_after is not None:
-                hint = f' ({remote_parent} has {free_after // (1024 * 1024)} MB free)'
+                hint = f' ({upload_dir} has {free_after // (1024 * 1024)} MB free)'
             raise RuntimeError(
                 f'Repository snapshot upload to {remote_archive} failed: {detail}{hint}. '
                 'SFTP reports server-side write errors generically; check free space, '
-                f'permissions and any quota on {remote_parent} on the CORE VM.'
+                f'permissions and any quota on {upload_dir} on the CORE VM.'
             ) from exc
         log.info('[remote-sync] upload complete')
         _update_repo_push_progress(progress_id, status='uploading', stage='uploaded', percent=40.0, detail='Upload complete; preparing remote finalize…')
@@ -5369,6 +5382,7 @@ def _push_repo_to_remote(
                 remote_hash_value=remote_hash_value,
                 logger=log,
             )
+            archive_delegated = True
             return {'repo_path': remote_repo, 'progress_id': progress_id, 'finalizing': True}
         extract_script = (
             f"set -euo pipefail; mkdir -p {shlex.quote(remote_parent)}; "
@@ -5409,6 +5423,11 @@ def _push_repo_to_remote(
         _update_repo_push_progress(progress_id, status='complete', stage='complete', percent=100.0, detail='Repository ready on remote host.')
         return {'repo_path': remote_repo, 'progress_id': progress_id}
     finally:
+        if remote_archive and not archive_delegated:
+            try:
+                _exec_ssh_command(client, f"rm -f {shlex.quote(remote_archive)}", timeout=30.0)
+            except Exception:
+                pass
         try:
             if archive_path and os.path.exists(archive_path):
                 os.remove(archive_path)

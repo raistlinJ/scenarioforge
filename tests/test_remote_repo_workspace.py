@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 from webapp import app_backend as backend
 
@@ -140,3 +141,64 @@ def test_async_repo_finalize_records_hash_after_extract(monkeypatch):
 
     assert any('tar -xzf' in command for command in commands)
     assert hashes == [('/tmp/scenarioforge', 'abc123')]
+
+
+def test_snapshot_upload_does_not_require_writable_opt(monkeypatch, tmp_path):
+    import shutil
+    import subprocess
+    import tarfile
+
+    repo = tmp_path / 'opt' / 'scenarioforge-services'
+    repo.mkdir(parents=True)
+    (repo / 'old-file').write_text('obsolete')
+    source = tmp_path / 'new-file'
+    source.write_text('current')
+    archive = tmp_path / 'snapshot.tar.gz'
+    with tarfile.open(archive, 'w:gz') as bundle:
+        bundle.add(source, arcname='scenarioforge-services/new-file')
+    uploaded = []
+    commands = []
+    free_paths = []
+
+    class SFTP:
+        def put(self, local, remote, **kwargs):
+            # /opt itself is not writable; only its existing checkout is.
+            assert remote.startswith('/tmp/.scenarioforge-repo-')
+            uploaded.append(remote)
+            shutil.copyfile(local, remote)
+
+        def close(self):
+            pass
+
+    class Client:
+        def open_sftp(self):
+            return SFTP()
+
+        def close(self):
+            pass
+
+    def execute(_client, command, **kwargs):
+        commands.append(command)
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if kwargs.get('check'):
+            assert result.returncode == 0, result.stderr
+        return result.returncode, result.stdout, result.stderr
+
+    monkeypatch.setattr(backend, '_require_core_ssh_credentials', lambda cfg: cfg)
+    monkeypatch.setattr(backend, '_get_repo_root', lambda: tmp_path)
+    monkeypatch.setattr(backend, '_open_ssh_client', lambda cfg: Client())
+    monkeypatch.setattr(backend, '_remote_static_repo_dir', lambda sftp: str(repo))
+    monkeypatch.setattr(backend, '_ensure_remote_repo_workspace', lambda *a, **kw: None)
+    monkeypatch.setattr(backend, '_prune_remote_installed_generator_packs', lambda *a, **kw: None)
+    monkeypatch.setattr(backend, '_repo_skip_if_unchanged_enabled', lambda: False)
+    monkeypatch.setattr(backend, '_normalize_repo_push_method', lambda cfg: 'tar')
+    monkeypatch.setattr(backend, '_create_local_repo_archive', lambda *a, **kw: str(archive))
+    monkeypatch.setattr(backend, '_remote_free_bytes', lambda client, path, **kw: free_paths.append(path) or 10**9)
+    monkeypatch.setattr(backend, '_exec_ssh_command', execute)
+
+    result = backend._push_repo_to_remote({}, allowed_outputs_override=['outputs'])
+    assert result['repo_path'] == str(repo)
+    assert (repo / 'new-file').read_text() == 'current'
+    assert not (repo / 'old-file').exists()
+    assert uploaded and not Path(uploaded[0]).exists()
+    assert free_paths == ['/tmp']
