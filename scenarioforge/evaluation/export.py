@@ -46,7 +46,7 @@ def read_readiness(path):
     return value
 
 
-def _tasks(graph, scenario_id, definitions, split):
+def _tasks(graph, scenario_id, definitions, split, flow=None):
     nodes = {str(n['id']): n for n in graph['nodes']}
     flags = {key: n['generator']['flag_value'] for key, n in nodes.items()
              if isinstance(n.get('generator'), dict) and isinstance(n['generator'].get('flag_value'), str)
@@ -132,6 +132,9 @@ def _tasks(graph, scenario_id, definitions, split):
         verifiers[task_id] = verifier
         metadata[task_id] = {'source_nodes': sorted(refs or []), 'required_checks': sorted(set(checks))}
         hints = item.get('progressive_hints', [])
+        if 'progressive_hints' not in item and refs:
+            from .hints import hints_for_nodes
+            hints = hints_for_nodes(flow or {}, refs, verifier, knowledge.get('discoverable_facts', []))
         if not isinstance(hints, list) or len(hints) > 16 or any(not isinstance(h, str) or not h.strip() or len(h) > 1500 for h in hints):
             raise ValueError('progressive_hints must be up to 16 nonempty strings, each at most 1500 characters')
         if hints:
@@ -166,7 +169,22 @@ def export_package(*, xml_path, graph, output, suite_id,
     if not isinstance(scenario_name, str) or not scenario_name:
         raise ValueError('Attack graph requires a scenario name')
     scenario_id = 'sf-' + sha256(encoded({'xml_sha256': xml_hash, 'scenario': scenario_name, 'graph': graph}))[:24]
-    tasks, verifiers, metadata = _tasks(graph, scenario_id, definitions, split)
+    # Saved Flow hints are authored scenario data, not facilitator answers.
+    # Read only the selected scenario's FlowState and keep assistance private.
+    import xml.etree.ElementTree as ET
+    flow = {}
+    try:
+        root = ET.fromstring(xml)
+        scenarios = [root] if root.tag == 'Scenario' else root.findall('Scenario')
+        selected = next((node for node in scenarios if node.get('name') == scenario_name), None)
+        if selected is not None:
+            for node in selected.iter('FlowState'):
+                candidate = json.loads(node.text or '{}')
+                if isinstance(candidate, dict):
+                    flow = candidate
+    except (ET.ParseError, ValueError):
+        pass
+    tasks, verifiers, metadata = _tasks(graph, scenario_id, definitions, split, flow)
     readiness = dict(readiness) if readiness is not None else {'status': 'unverified', 'checks': []}
     if readiness.get('xml_sha256') and readiness['xml_sha256'] != xml_hash:
         raise ValueError('Readiness XML hash does not match frozen scenario XML')

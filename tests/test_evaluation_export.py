@@ -265,3 +265,30 @@ def test_invalid_progressive_hints_are_rejected(inputs, hints):
         required_checks=['ports'], progressive_hints=hints)]
     with pytest.raises(ValueError, match='progressive_hints'):
         export_package(**inputs)
+
+
+def test_default_flag_task_inherits_safe_flow_hints_privately(inputs):
+    import xml.etree.ElementTree as ET
+    xml = inputs['xml_path']
+    tree = ET.parse(xml)
+    flow = {'flag_assignments': [
+        {'node_id': 'entry', 'flag_value': 'FLAG{private-entry}',
+         'hints': ['Inspect the service with curl.', 'Return FLAG{private-entry}', 'Password is secret-password', '{{unresolved}}'],
+         'resolved_outputs': {'Password(password)': 'secret-password'}},
+        {'node_id': 'target', 'hint_levels': {'low': ['Look for the target page.']}},
+    ]}
+    ET.SubElement(tree.find('./Scenario'), 'FlowState').text = json.dumps(flow)
+    tree.write(xml)
+    inputs['readiness']['xml_sha256'] = sha256(xml.read_bytes())
+    export_package(**inputs)
+    metadata = json.loads((inputs['output']/'evaluator/task-metadata.json').read_text())
+    assert metadata['collect-flags']['progressive_hints'] == ['Inspect the service with curl.', 'Look for the target page.']
+    assert 'Inspect the service with curl.' not in (inputs['output']/'participant/tasks.json').read_text()
+
+
+def test_explicit_empty_hint_plan_does_not_inherit_flow_hints(inputs):
+    from scenarioforge.evaluation.export import _tasks
+    definitions = [dict(id='one',family='flags',flag_nodes=['entry'],required_checks=['ports'],progressive_hints=[])]
+    flow = {'flag_assignments': [{'node_id':'entry','hints':['Inspect the entry service.']}]}
+    _,_,metadata = _tasks(inputs['graph'],'scenario-id',definitions,'development',flow)
+    assert 'progressive_hints' not in metadata['one']
