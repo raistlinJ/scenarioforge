@@ -14397,6 +14397,9 @@ def _canonicalize_flow_state_paths(flow_state: dict[str, Any], *, xml_path: str 
         if chain_ids_norm:
             out['chain_ids'] = chain_ids_norm
             out['length'] = len(chain_ids_norm)
+            # Save XML clients send chain_ids; downstream evaluation also reads
+            # chain. Keep both representations in every persisted FlowState.
+            out['chain'] = _flow_state_chain_nodes(out)
     except Exception:
         pass
     return out

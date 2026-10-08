@@ -57,6 +57,11 @@ def test_flow_state_save_accepts_single_required_vulnerability_node(tmp_path):
     assert ok, error
     saved = app_backend._flow_state_from_xml_path(str(xml_path), "Scenario3")
     assert saved and saved["chain_ids"] == ["4"]
+    raw = json.loads(ET.parse(xml_path).find('.//FlowState').text)
+    assert raw['chain'][0]['id'] == '4'
+    assert raw['chain_ids'] == ['4']
+    from scenarioforge import cli
+    assert cli._flow_state_from_xml(str(xml_path), 'Scenario3')['chain'][0]['id'] == '4'
 
 
 def test_prefer_flow_rejects_existing_invalid_state_instead_of_expanding_it(tmp_path):
@@ -81,3 +86,22 @@ def test_prefer_flow_rejects_existing_invalid_state_instead_of_expanding_it(tmp_
     data = response.get_json() or {}
     assert response.status_code == 422
     assert "missing required vulnerability node" in str(data.get("error") or "").lower()
+
+
+def test_cli_reads_legacy_save_preview_chain_ids(tmp_path):
+    from scenarioforge import cli
+    xml_path, _ = _write_preview_xml(tmp_path, {
+        'flow_enabled': True, 'chain_ids': ['4'],
+        'flag_assignments': [{'node_id': '4', 'id': '131', 'type': 'flag-node-generator'}],
+    })
+    state = cli._flow_state_from_xml(str(xml_path), 'Scenario3')
+    assert state['chain'] == [{'id': '4', 'name': '4'}]
+
+
+def test_cli_does_not_resurrect_topology_dirty_sequence(tmp_path):
+    from scenarioforge import cli
+    xml_path, _ = _write_preview_xml(tmp_path, {
+        'chain_ids': ['4'], 'chain': [{'id': '4'}], 'topology_dirty': True,
+    })
+    state = cli._flow_state_from_xml(str(xml_path), 'Scenario3')
+    assert state['chain'] == [] and state['chain_ids'] == []

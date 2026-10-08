@@ -2558,7 +2558,17 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
         if not raw:
             return None
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        # Older Save/Preview clients persisted chain_ids without chain.
+        # Evaluation package generation needs nodes as well as their IDs.
+        if data.get('flow_enabled') is False or data.get('topology_dirty'):
+            data['chain'] = []
+            data['chain_ids'] = []
+        elif not data.get('chain') and isinstance(data.get('chain_ids'), list):
+            data['chain'] = [{'id': str(value).strip(), 'name': str(value).strip()}
+                             for value in data['chain_ids'] if value is not None and str(value).strip()]
+        return data
     except Exception:
         return None
 
