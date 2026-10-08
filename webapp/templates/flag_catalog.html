@@ -103,12 +103,15 @@
                           {% for grp in p.installed_grouped %}
                             <div>
                               {{ grp.kind }}{% if grp.count %} ({{ grp.count }}){% endif %}:
-                              <code>{{ (grp.ids or []) | join(', ') }}</code>
+                              Flow IDs: <code>{{ (grp.ids or []) | join(', ') }}</code>
+                              {% if grp.installation_ids and grp.installation_ids != grp.ids %}
+                                <div class="text-muted">Installation IDs: <code>{{ grp.installation_ids | join(', ') }}</code></div>
+                              {% endif %}
                             </div>
                           {% endfor %}
                         {% elif p.installed %}
                           {% for g in p.installed %}
-                            <div>{{ g.kind }}: <code>{{ g.id }}</code></div>
+                            <div>{{ g.kind }} — Flow ID: <code>{{ g.flow_id or g.id }}</code></div>
                           {% endfor %}
                         {% else %}
                           <span class="text-muted">—</span>
@@ -1664,6 +1667,7 @@
       : ['Test', isDisabled ? 'Enable' : 'Disable', 'Delete'].join(' ');
     return [
       g.id,
+      g._installed_assigned_id || '',
       g.name,
       isDisabled ? 'Disabled' : 'Enabled',
       isDuplicateConflict ? 'Duplicate ID' : '',
@@ -1773,6 +1777,7 @@
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
           </div>
+          ${generatorIdentityHtml(g)}
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed generator conflicts with another installed generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
@@ -1995,6 +2000,7 @@
             ${missingRequiredFiles.length ? `<span class="badge text-bg-warning ms-2">Missing Files</span>` : ''}
             ${g._requires_build_network ? `<span class="badge text-bg-warning ms-2" title="Builds an image that fetches from the internet at build time (${escapeHtml((Array.isArray(g._build_network_notes) ? g._build_network_notes.join(', ') : ''))}). Will fail on a CORE VM whose build container has no internet/DNS.">Build Internet</span>` : ''}
           </div>
+          ${generatorIdentityHtml(g)}
           ${g.description ? `<div class="small text-muted">${escapeHtml(g.description)}</div>` : ''}
           ${missingRequiredHtml}
           ${isDuplicateConflict ? `<div class="small text-danger">${escapeHtml(String(g._duplicate_conflict_note || 'This installed node-generator conflicts with another installed node-generator id. Remove one of the packs to resolve it.'))}</div>` : ''}
@@ -2678,6 +2684,12 @@
   // amd64-only image on an arm64 CORE VM runs only under qemu emulation. An
   // unscanned generator shows no badge -- empty means "not known", never
   // "runs nowhere".
+  function generatorIdentityHtml(generator) {
+    const flowId = String(generator.id ?? '').trim();
+    const installedId = String(generator._installed_assigned_id ?? '').trim();
+    return `<div class="small text-muted">Flow ID: <code>${escapeHtml(flowId)}</code>${installedId && installedId !== flowId ? ` · Installation ID: <code>${escapeHtml(installedId)}</code>` : ''}</div>`;
+  }
+
   function generatorArchitectureBadge(g) {
     const archs = Array.isArray(g && g._architectures) ? g._architectures.filter(Boolean) : [];
     const source = String((g && g._architecture_source) || '').trim();

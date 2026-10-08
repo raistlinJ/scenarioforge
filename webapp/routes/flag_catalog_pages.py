@@ -11,6 +11,7 @@ def register(
     app,
     *,
     load_installed_generator_packs_state: Callable[[], dict],
+    installed_generator_source_id: Callable[[dict], str] | None = None,
     save_installed_generator_packs_state: Callable[[dict], None] | None = None,
     flag_generators_from_sources: Callable[[], tuple[list[dict], list[dict]]] | None = None,
     flag_node_generators_from_sources: Callable[[], tuple[list[dict], list[dict]]] | None = None,
@@ -32,7 +33,10 @@ def register(
                 if item.get('uninstalled') is True:
                     continue
                 kind = str(item.get('kind') or '').strip()
-                gid = str(item.get('id') or '').strip()
+                installation_id = str(item.get('id') or '').strip()
+                source_id = installed_generator_source_id(item) if installed_generator_source_id else ''
+                gid = str(source_id or installation_id).strip()
+                item['flow_id'] = gid
                 if not kind or not gid:
                     continue
                 grouped.setdefault(kind, []).append(gid)
@@ -45,7 +49,13 @@ def register(
                         continue
                     seen.add(value)
                     uniq_ids.append(value)
-                installed_grouped.append({'kind': kind, 'ids': uniq_ids, 'count': len(uniq_ids)})
+                installation_ids = list(dict.fromkeys(
+                    str(item.get('id') or '').strip() for item in installed
+                    if isinstance(item, dict) and item.get('kind') == kind
+                    and item.get('uninstalled') is not True and item.get('id')
+                ))
+                installed_grouped.append({'kind': kind, 'ids': uniq_ids,
+                                          'installation_ids': installation_ids, 'count': len(uniq_ids)})
             if installed_grouped:
                 pack['installed_grouped'] = installed_grouped
 

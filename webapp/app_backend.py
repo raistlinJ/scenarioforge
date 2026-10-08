@@ -48446,6 +48446,7 @@ try:
     _flag_catalog_pages_routes.register(
         app,
         load_installed_generator_packs_state=lambda: _load_installed_generator_packs_state(),
+        installed_generator_source_id=lambda item: _installed_generator_marker_source_id(item),
         save_installed_generator_packs_state=lambda state: _save_installed_generator_packs_state(state),
         flag_generators_from_sources=lambda: _flag_generators_from_all_installed_sources(),
         flag_node_generators_from_sources=lambda: _flag_node_generators_from_all_installed_sources(),
