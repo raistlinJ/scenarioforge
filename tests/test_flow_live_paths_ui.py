@@ -43,7 +43,7 @@ def test_flow_prompts_before_clearing_saved_assignments_for_uninstalled_generato
     text = FLOW_TEMPLATE_PATH.read_text(encoding="utf-8", errors="ignore")
 
     assert "promptToRemoveUnavailableSavedFlowGenerators" in text
-    assert "no longer installed" in text
+    assert "unavailable in the enabled catalog (missing or disabled)" in text
     assert "Remove the unavailable assignments and clear this saved sequence?" in text
     assert "await ensureGeneratorCatalogsLoaded();" in text
 

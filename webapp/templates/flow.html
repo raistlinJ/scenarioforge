@@ -923,6 +923,19 @@
     }
   }
 
+  function savedFlowAssignmentCatalog(assignment, enabled) {
+    const catalog = String(assignment.generator_catalog || '').trim();
+    if (catalog === 'flag_generators' || catalog === 'flag_node_generators') return catalog;
+    const type = String(assignment.type || assignment.assignment_type || '').trim();
+    if (type === 'flag-node-generator') return 'flag_node_generators';
+    if (type === 'flag-generator') return 'flag_generators';
+    // Older saved assignments may omit their catalog and type. Only infer a
+    // catalog when the ID uniquely identifies an enabled generator.
+    const id = String(assignment.id || assignment.generator_id || '').trim();
+    const matches = Object.keys(enabled).filter(kind => enabled[kind].has(id));
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   async function promptToRemoveUnavailableSavedFlowGenerators(scenarioName) {
     const saved = getFlowStateForScenario(scenarioName);
     if (!saved || !Array.isArray(saved.flag_assignments) || !saved.flag_assignments.length) return false;
@@ -936,19 +949,20 @@
       if (!assignment || typeof assignment !== 'object') return null;
       const id = String(assignment.id || assignment.generator_id || '').trim();
       if (!id) return null;
-      const kind = String(assignment.generator_catalog || '').trim() === 'flag_node_generators'
-        || String(assignment.type || '').trim() === 'flag-node-generator'
-        ? 'flag_node_generators'
-        : 'flag_generators';
+      const kind = savedFlowAssignmentCatalog(assignment, enabled);
+      if (!kind) {
+        setStatus(`Cannot verify saved generator ${id}: its catalog/type is missing or ambiguous. The saved sequence was preserved.`, true);
+        return null;
+      }
       return enabled[kind].has(id) ? null : { id, kind, index };
     }).filter(Boolean);
     if (!stale.length) return false;
     if (staleSavedFlowGeneratorPrompted) return false;
     staleSavedFlowGeneratorPrompted = true;
 
-    const ids = [...new Set(stale.map(item => item.id))].join(', ');
+    const ids = [...new Set(stale.map(item => `${item.kind}/${item.id}`))].join(', ');
     const remove = window.confirm(
-      `The saved Flow sequence references generator(s) that are no longer installed: ${ids}.\n\nRemove the unavailable assignments and clear this saved sequence? You can then generate a new sequence.`
+      `The saved Flow sequence references generator(s) that are unavailable in the enabled catalog (missing or disabled): ${ids}.\n\nRemove the unavailable assignments and clear this saved sequence? You can then generate a new sequence.`
     );
     if (!remove) return false;
 
@@ -1354,6 +1368,7 @@
         'description_hints',
         'flag_value',
         'flag_generator',
+        'generator_catalog',
         'type',
       ];
       preferFallbackKeys.forEach((key) => {
@@ -1667,6 +1682,8 @@
       if (hintOvr !== undefined) out.hint_overrides = hintOvr;
       if (flagOvr !== undefined) out.flag_override = flagOvr;
       if (typeVal !== undefined) out.type = typeVal;
+      const catalogVal = String(curA.generator_catalog || '').trim();
+      if (catalogVal === 'flag_generators' || catalogVal === 'flag_node_generators') out.generator_catalog = catalogVal;
       if (genLabel !== undefined) out.flag_generator = genLabel;
       if (inputFields !== undefined) out.input_fields = inputFields;
       if (inputFieldsReq !== undefined) out.input_fields_required = inputFieldsReq;
