@@ -61,6 +61,7 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
         raise ValueError('Task definitions must be a nonempty JSON list')
     participant, verifiers, metadata = [], {}, {}
     rendered_hints = None
+    rendered_solutions = None
     for item in definitions:
         allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints'}
         if not isinstance(item, dict):
@@ -146,6 +147,16 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
             raise ValueError('progressive_hints must be up to 16 nonempty strings, each at most 1500 characters')
         if hints:
             metadata[task_id]['progressive_hints'] = hints
+        # Full solutions are separate from ordinary hints and remain evaluator-
+        # only until the host's configured try limit is reached.
+        if flow and item.get('progressive_hints') != []:
+            from .hints import guide_solutions, solutions_for_task
+            if rendered_solutions is None:
+                rendered_solutions = guide_solutions(flow, graph)
+            solutions = solutions_for_task(rendered_solutions, graph, refs, verifier, prompt,
+                                           labels if refs is not None else None)
+            if solutions:
+                metadata[task_id]['challenge_solutions'] = solutions
         if discovery:
             metadata[task_id].update(discovery=True, **knowledge)
             if refs is not None:

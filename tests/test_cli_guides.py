@@ -139,3 +139,13 @@ def test_hint_collector_uses_rendered_participant_groups_only():
     assert 'The event account is analyst.' not in texts  # Helpful Fact, not a hint
     assert not any('FACILITATOR' in text for text in texts)
     assert participant_hint_plan('Training', dict(preview, discovery=True)) == []
+
+
+def test_solution_collector_keeps_facilitator_walkthroughs_separate():
+    from scenarioforge.utils.guide_export import facilitator_solution_plan
+    nodes, assignments=sample_challenges()
+    solutions=facilitator_solution_plan('Training',{'chain':nodes,'flag_assignments':assignments})
+    assert [item['node_id'] for item in solutions]==['1','2','3']
+    assert 'Open the service' in solutions[0]['text']
+    assert 'FLAG_ONLY_FOR_FACILITATOR_1' in solutions[0]['text']
+    assert 'FLAG_ONLY_FOR_FACILITATOR_2' not in solutions[0]['text']

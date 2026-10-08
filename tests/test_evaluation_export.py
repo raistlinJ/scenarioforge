@@ -333,3 +333,29 @@ def test_discovery_does_not_inherit_hidden_step_hints(inputs):
                             'value':'10.77.0.10'}], discoverable_facts=[])]
     _, _, metadata = _tasks(inputs['graph'], 'scenario-id', definitions, 'development', flow)
     assert 'progressive_hints' not in metadata['discovery']
+
+
+def test_solutions_are_current_challenge_guide_sections_in_private_metadata(inputs):
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(inputs['xml_path'])
+    flow = {'flag_assignments':[
+        {'node_id':'entry','access_instructions':{'title':'Find the token', 'steps':[
+            {'instructions':'Use curl to inspect the headers.'}]},
+            'resolved_outputs':{'Flag(flag_id)':'FLAG{private-entry}'}},
+        {'node_id':'target','access_instructions':{'title':'Open the protected page','steps':[
+            {'instructions':'Submit the key to the protected endpoint.'}]},
+            'resolved_outputs':{'Flag(flag_id)':'FLAG{private-target}'}}]}
+    ET.SubElement(tree.find('./Scenario'),'FlowState').text=json.dumps(flow)
+    tree.write(inputs['xml_path'])
+    inputs['readiness']['xml_sha256']=sha256(inputs['xml_path'].read_bytes())
+    export_package(**inputs)
+    meta=json.loads((inputs['output']/'evaluator/task-metadata.json').read_text())['collect-flags']
+    solutions=meta['challenge_solutions']
+    assert [solution['node_id'] for solution in solutions]==['entry','target']
+    assert 'Use curl' in solutions[0]['text'] and 'FLAG{private-entry}' in solutions[0]['text']
+    assert 'FLAG{private-target}' not in solutions[0]['text']
+    assert 'Submit the key' in solutions[1]['text'] and 'FLAG{private-target}' in solutions[1]['text']
+    assert 'FLAG{private-entry}' not in solutions[1]['text']
+    assert solutions[0]['completion_values']==['FLAG{private-entry}']
+    assert 'FLAG{' not in (inputs['output']/'participant/tasks.json').read_text()
+    assert 'FLAG{' not in json.dumps(meta['progressive_hints'])

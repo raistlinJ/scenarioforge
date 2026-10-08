@@ -744,8 +744,13 @@ graph, so assistance matches the exported scenario.
 
 The resulting plan is stored only in `evaluator/task-metadata.json`, and the
 orchestrator's progressive-hints toggle controls whether it is released during
-a trial. Facilitator sections, resolved answers, secret outputs and unresolved
-templates are excluded. Helpful Facts remain starting information. Discovery
+a trial. Ordinary hints exclude facilitator sections, resolved answers, secret
+outputs and unresolved templates. Separately, `challenge_solutions` stores each
+challenge's facilitator guide section and exact answer in evaluator-only metadata.
+The host releases only the current unsolved challenge's walkthrough and answer
+after its configured `max_tries_before_solution` limit. Other challenge answers
+are withheld; solution-assisted success is reported separately from hints-only
+and unassisted success. Helpful Facts remain starting information. Discovery
 participant guides omit the walkthrough, so discovery assistance uses the task's
 explicit `discoverable_facts` or authored hints instead.
 

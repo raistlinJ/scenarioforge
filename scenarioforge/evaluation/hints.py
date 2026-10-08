@@ -16,11 +16,8 @@ def strings(value):
         yield json.dumps(value)
 
 
-def guide_hints(flow, graph):
+def _guide_preview(flow, graph):
     """Render the guide against the frozen graph's resolved hosts and outputs."""
-    if not flow:
-        return []
-    from scenarioforge.utils.guide_export import participant_hint_plan
     nodes = {str(node['id']): node for node in graph['nodes']}
     order = graph.get('chain_order') or list(nodes)
     chain = [dict(nodes[str(ref)], name=nodes[str(ref)].get('label') or str(ref))
@@ -37,12 +34,57 @@ def guide_hints(flow, graph):
             if generator.get(key) is not None:
                 assignment[key] = generator[key]
         assignments.append(assignment)
-    return participant_hint_plan(graph['scenario'], {
+    return {
         'chain': chain, 'flag_assignments': assignments,
         'starting_facts': graph.get('starting_facts', []),
         'discovery': bool(flow.get('discovery')),
         'vuln_readme_entries': flow.get('vuln_readme_entries', []),
-    })
+    }
+
+
+def guide_hints(flow, graph):
+    if not flow:
+        return []
+    from scenarioforge.utils.guide_export import participant_hint_plan
+    return participant_hint_plan(graph['scenario'], _guide_preview(flow, graph))
+
+
+def guide_solutions(flow, graph):
+    if not flow:
+        return []
+    from scenarioforge.utils.guide_export import facilitator_solution_plan
+    return facilitator_solution_plan(graph['scenario'], _guide_preview(flow, graph))
+
+
+def solutions_for_task(rendered, graph, refs, verifier, prompt, labels=None):
+    import json
+    nodes = {str(node['id']): node for node in graph['nodes']}
+    if refs is None:
+        matches = [ref for ref, node in nodes.items() if node.get('ipv4') and node['ipv4'] in prompt]
+        ref = matches[0] if len(matches) == 1 else next(iter(nodes)) if len(nodes) == 1 else None
+        selected = [dict(node_id=ref or 'task', text=next((item['text'] for item in rendered if item['node_id']==ref), ''))]
+    else:
+        selected = [item for item in rendered if item['node_id'] in refs]
+    all_flags = [node['generator']['flag_value'] for node in nodes.values()
+                 if isinstance(node.get('generator'),dict) and node['generator'].get('flag_value')]
+    result = []
+    for item in selected:
+        ref = item['node_id']
+        answer = verifier['expected']
+        if refs is not None:
+            flag = nodes[ref]['generator']['flag_value']
+            answer = {'flags':[flag]} if verifier['type']=='flags_found' else {'flags':{(labels or {}).get(ref,ref):flag}}
+            completion = [flag]
+        else:
+            completion = []
+        walkthrough = re.sub(r' @ (?:\d{1,3}\.){3}\d{1,3}', '', item['text'])
+        for flag in all_flags:
+            if flag not in completion:
+                walkthrough = walkthrough.replace(flag, '[another challenge answer withheld]')
+        text = 'Solution walkthrough for challenge ' + ref + ':\nReviewed task: ' + prompt + '\n' + walkthrough[:14000]
+        text += '\nExact answer / flag to submit:\n' + json.dumps(answer, ensure_ascii=False)
+        result.append(dict(node_id=ref,text=text,completion_values=completion))
+    return result
 
 
 def hints_for_nodes(flow, source_nodes, verifier, private_facts=(), *, rendered=(), graph=None):

@@ -1957,6 +1957,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
   lines.push('');
 
   nodes.forEach((node, index) => {
+    const solutionStart = lines.length;
     const _cell = (value) => String(value == null ? '' : value).replace(/\|/g, '\\|').replace(/\n/g, '<br>');
     const step = index + 1;
     const assignment = (alignedAssignments[index] && typeof alignedAssignments[index] === 'object') ? alignedAssignments[index] : {};
@@ -2344,6 +2345,9 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       });
     }
 
+    if (facilitatorMode && Array.isArray(opts.solutionCollector)) {
+      opts.solutionCollector.push({node_id: nodeId, text: lines.slice(solutionStart).join('\n')});
+    }
     lines.push(`- [ ] Step ${step} completed`);
     const previousLink = step > 1 ? `<a href="#guide-step-${step - 1}">Previous step</a>` : '<a href="#guide-contents">Contents</a>';
     const nextLink = step < nodes.length ? `<a href="#guide-step-${step + 1}">Next step</a>` : '<a href="#guide-completion">Finish the exercise</a>';
