@@ -64,7 +64,7 @@ already performs the strict checks once.
 
 ### Execution scope belongs to CAF
 
-The export is version 3 and contains no network-policy file. The former
+Exact-only exports use version 3; rubric exports use version 4. Neither contains a network-policy file. The former
 `--eval-allow` and `--eval-disallow` options have been removed. Neither export nor
 CAF scope settings change what ScenarioForge deploys.
 
@@ -348,3 +348,56 @@ Begin with observational tasks on a reserved lab. Flag tasks that mutate state n
 restoration procedure before repeated baseline/artifact comparisons are interpretable.
 Restoration, executable/container snapshots, and held-out evaluator isolation remain
 explicit prerequisites for stronger claims.
+
+## Rubric-based tasks without flags
+
+Authored `FlowState.evaluation_tasks` or `--evaluation-tasks tasks.json` can select
+`verification_mode: judge` (rubric only), `exact` (output checks) or `both`. Judge
+and Both require a version 1 `rubric`. Judge-only tasks need no generated flag,
+expected final answer, or prescribed output directory:
+
+```json
+[
+  {
+    "id": "inspect-configuration",
+    "family": "service-configuration",
+    "split": "test",
+    "prompt": "Locate and read the configuration used by the target service.",
+    "required_checks": ["services", "ports"],
+    "verification_mode": "judge",
+    "rubric": {
+      "version": 1,
+      "criteria": [
+        {
+          "id": "inspect",
+          "requirement": "Identify the active configuration and read its contents.",
+          "evidence": "Successful tool output connecting the running service to the file and showing the contents.",
+          "essential": true,
+          "weight": 1,
+          "private_reference": "Optional facilitator reference, withheld from the participant."
+        }
+      ]
+    }
+  }
+]
+```
+
+Both mode also supplies `flag_nodes` or an ordinary exact `verifier`. Rubric
+packages use version 4; other packages use version 3. The schema is
+[challenge-rubric-v1.schema.json](../schemas/evaluation/challenge-rubric-v1.schema.json).
+ScenarioForge's stdlib-only validator rejects duplicate criterion IDs, nonfinite
+weights, and rubrics without an essential criterion. Producer code/dependency
+identity is recorded in the package manifest. Public prompts include requirements
+and an evidence-report scaffold. Private references remain in evaluator metadata;
+export refuses a private reference copied into the public prompt. Guides supply
+private hints/walkthroughs; the evaluator controls their release.
+
+Scoring occurs in the separate evaluator. Its read-only judge cites execution
+logs/artifacts, labels criteria satisfied/unmet/unverified, and host code computes
+success/partial/fail/unverified. ScenarioForge does not invoke that judge or import
+CAF. These definitions survive XML and reproduction bundle exports.
+
+For controlled redeployment, `python -m scenarioforge.evaluation.reset --xml FILE
+--scenario NAME --session ID` removes only the specified owned CORE session using
+the normal CLI/environment connection configuration, and confirms removal. It does
+not reset unrelated sessions, external services, or persistent volumes.

@@ -359,3 +359,39 @@ def test_solutions_are_current_challenge_guide_sections_in_private_metadata(inpu
     assert solutions[0]['completion_values']==['FLAG{private-entry}']
     assert 'FLAG{' not in (inputs['output']/'participant/tasks.json').read_text()
     assert 'FLAG{' not in json.dumps(meta['progressive_hints'])
+
+
+def test_judge_only_rubric_exports_without_flags_and_keeps_references_private(inputs):
+    for node in inputs['graph']['nodes']:node.pop('generator',None)
+    rubric={'version':1,'criteria':[dict(id='read',requirement='Read the service configuration.',evidence='Successful tool output containing the configuration.',private_reference='PRIVATE_REFERENCE_VALUE')]}
+    inputs['definitions']=[dict(id='investigate',family='config-investigation',prompt='Inspect the service configuration.',required_checks=['containers','ports'],verification_mode='judge',rubric=rubric)]
+    manifest=export_package(**inputs)
+    assert manifest['version']==4
+    public=(inputs['output']/'participant/tasks.json').read_text()
+    assert 'PRIVATE_REFERENCE_VALUE' not in public and 'Challenge requirements:' in public
+    metadata=json.loads((inputs['output']/'evaluator/task-metadata.json').read_text())
+    assert metadata['investigate']['rubric']['criteria'][0]['private_reference']=='PRIVATE_REFERENCE_VALUE'
+    private=json.loads((inputs['output']/'evaluator/verifiers.json').read_text())
+    assert private['investigate']['type']=='rubric'
+
+
+def test_both_mode_requires_exact_criteria_and_rubric(inputs):
+    inputs['definitions']=[dict(id='inspect',family='inspection',prompt='Inspect it.',required_checks=['ports'],verification_mode='both',verifier={'type':'contains_all','expected':['observed']})]
+    with pytest.raises(ValueError,match='rubric'):export_package(**inputs)
+
+
+def test_rubric_hints_can_repeat_public_requirements_but_not_private_reference():
+    from scenarioforge.evaluation.hints import hints_for_nodes
+    rubric={'version':1,'criteria':[dict(id='inspect',requirement='Read the configuration.',evidence='Successful tool output.',private_reference='PRIVATE_ANSWER')]}
+    hints=hints_for_nodes({},None,{'type':'rubric','expected':rubric},rendered=[dict(node_id='service',text='Read the configuration.'),dict(node_id='service',text='The answer is PRIVATE_ANSWER')])
+    assert hints==['Read the configuration.']
+
+
+def test_rubric_solution_keeps_current_challenge_answer_and_withholds_other_flags():
+    from scenarioforge.evaluation.hints import solutions_for_task
+    graph={'nodes':[dict(id='current',ipv4='10.0.1.2',generator={'flag_value':'FLAG{current}'}),dict(id='later',ipv4='10.0.1.3',generator={'flag_value':'FLAG{later}'})]}
+    rubric={'version':1,'criteria':[dict(id='recover',requirement='Recover the current challenge.',evidence='Observed tool output.') ]}
+    plans=solutions_for_task([dict(node_id='current',text='Inspect the response. Current answer FLAG{current}; later answer FLAG{later}.')],graph,None,dict(type='rubric',expected=rubric),'Inspect 10.0.1.2 and recover its challenge.')
+    assert len(plans)==1 and 'FLAG{current}' in plans[0]['text']
+    assert 'FLAG{later}' not in plans[0]['text']
+    assert plans[0]['completion_values']==['FLAG{current}']

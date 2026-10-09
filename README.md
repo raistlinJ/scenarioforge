@@ -343,7 +343,7 @@ The `catalog-rest-batch-test` scope names match the Web UI filters (`untested`, 
 
 ### Evaluation suites for artifact comparisons
 
-Successful WebUI executions prepare an **Evaluation package (ZIP)** under **Reports → Download**. CLI users can request it with `execute --evaluation-export`, or export separately with `evaluation-export`. Packages include participant tasks, private verifiers, attack-graph provenance, and deployment readiness evidence for CyberAgentFlow. See [the evaluation export workflow](docs/EVALUATION_EXPORT.md).
+Successful WebUI executions prepare an **Evaluation package (ZIP)** under **Reports → Download**. CLI users can request it with `execute --evaluation-export`, or export separately with `evaluation-export`. Packages include participant tasks, private verifiers or challenge rubrics, attack-graph provenance, and deployment readiness evidence for CyberAgentFlow. See [the evaluation export workflow](docs/EVALUATION_EXPORT.md).
 
 The consumer is CAF's **separate evaluation CLI**, which shares the main app's agent
 engine but owns trial configuration, scoring and datasets. The main CAF app creates,

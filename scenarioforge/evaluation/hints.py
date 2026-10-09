@@ -77,12 +77,24 @@ def solutions_for_task(rendered, graph, refs, verifier, prompt, labels=None):
             completion = [flag]
         else:
             completion = []
+            if verifier['type'] == 'rubric' and ref in nodes:
+                flag = (nodes[ref].get('generator') or {}).get('flag_value')
+                if flag:
+                    completion = [flag]
         walkthrough = re.sub(r' @ (?:\d{1,3}\.){3}\d{1,3}', '', item['text'])
         for flag in all_flags:
             if flag not in completion:
                 walkthrough = walkthrough.replace(flag, '[another challenge answer withheld]')
         text = 'Solution walkthrough for challenge ' + ref + ':\nReviewed task: ' + prompt + '\n' + walkthrough[:14000]
-        text += '\nExact answer / flag to submit:\n' + json.dumps(answer, ensure_ascii=False)
+        if verifier['type'] == 'rubric':
+            references = [c.get('private_reference', '') for c in answer['criteria'] if c.get('private_reference')]
+            if not walkthrough.strip() and not references and not completion:
+                continue
+            text += '\nFacilitator reference:\n' + '\n'.join(references)
+            if completion:
+                text += '\nCurrent challenge answer / flag:\n' + '\n'.join(completion)
+        else:
+            text += '\nExact answer / flag to submit:\n' + json.dumps(answer, ensure_ascii=False)
         result.append(dict(node_id=ref,text=text,completion_values=completion))
     return result
 
@@ -92,7 +104,8 @@ def hints_for_nodes(flow, source_nodes, verifier, private_facts=(), *, rendered=
     assignments = [item for item in assignments if isinstance(item, dict)] if isinstance(assignments, list) else []
     assignments += [node['generator'] for node in (graph or {}).get('nodes', [])
                     if isinstance(node.get('generator'), dict)]
-    secrets = list(strings(verifier.get('expected')))
+    secrets = ([c.get('private_reference', '') for c in verifier['expected']['criteria']]
+               if verifier.get('type') == 'rubric' else list(strings(verifier.get('expected'))))
     secrets += [str(item.get('value') or '') for item in private_facts if isinstance(item, dict)]
     for assignment in assignments:
         secrets.append(str(assignment.get('flag_value') or ''))

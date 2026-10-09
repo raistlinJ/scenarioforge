@@ -63,7 +63,7 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
     rendered_hints = None
     rendered_solutions = None
     for item in definitions:
-        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints'}
+        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints', 'rubric', 'verification_mode'}
         if not isinstance(item, dict):
             raise ValueError('Task definition must be an object')
         unknown = set(item) - allowed
@@ -85,8 +85,20 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
         if not discovery and any(k in item for k in ('starting_facts', 'discoverable_facts', 'objective_requires')):
             raise ValueError('Fact declarations require discovery: true')
         briefing, knowledge = prepare_facts(item, nodes) if discovery else ('', {})
+        from .rubric import MODES, validate_rubric, participant_scaffold
+        mode = item.get('verification_mode', 'exact')
+        if mode not in MODES:
+            raise ValueError('verification_mode must be exact, judge or both')
+        rubric = validate_rubric(item['rubric']) if 'rubric' in item else None
+        if mode in {'judge', 'both'} and rubric is None:
+            raise ValueError('Judge/both tasks require a challenge rubric')
         refs = item.get('flag_nodes')
-        if refs is not None:
+        if mode == 'judge':
+            if refs is not None or 'verifier' in item:
+                raise ValueError('Judge-only tasks use a rubric without flag_nodes or an exact verifier')
+            verifier = {'type': 'rubric', 'expected': rubric}
+            prompt = item.get('prompt')
+        elif refs is not None:
             if 'verifier' in item or not isinstance(refs, list) or not refs or len(refs) != len(set(refs)):
                 raise ValueError('Use distinct flag_nodes or an explicit verifier, not both')
             if any(ref not in flags for ref in refs):
@@ -130,10 +142,14 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
             supplied = [f for f in graph.get('starting_facts', []) if not f.get('task_id') or f['task_id'] == task_id]
             if supplied:
                 prompt += '\n' + starting_facts_markdown(supplied)
+        if rubric:
+            prompt += '\n\n' + participant_scaffold(rubric)
         participant.append({'id': task_id, 'family': family, 'split': task_split,
                             'scenario_id': scenario_id, 'prompt': prompt})
         verifiers[task_id] = verifier
         metadata[task_id] = {'source_nodes': sorted(refs or []), 'required_checks': sorted(set(checks))}
+        if rubric:
+            metadata[task_id].update(rubric=rubric, verification_mode=mode)
         hints = item.get('progressive_hints', [])
         if 'progressive_hints' not in item and not discovery:
             from .hints import guide_hints, hints_for_nodes
@@ -165,6 +181,10 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
     public = json.dumps(participant, ensure_ascii=False)
     for task_metadata in metadata.values():
         reject_discovery_leaks(public, task_metadata.get('discoverable_facts', []))
+        for criterion in task_metadata.get('rubric', {}).get('criteria', []):
+            reference = criterion.get('private_reference', '')
+            if reference and reference in public:
+                raise ValueError('A private rubric reference appears in participant task content')
     if any(flag in public for flag in flags.values()):
         raise ValueError('A resolved flag appears in participant task content')
     return participant, verifiers, metadata
@@ -222,9 +242,11 @@ def export_package(*, xml_path, graph, output, suite_id,
         'evaluator/attack-graph.json': encoded(graph),
         'evaluator/scenario.xml': xml,
     }
-    manifest = {'format': 'scenarioforge-evaluation', 'version': 3, 'id': suite_id,
+    manifest = {'format': 'scenarioforge-evaluation', 'version': 4 if any('rubric' in m for m in metadata.values()) else 3, 'id': suite_id,
                 'created_at': datetime.now(timezone.utc).isoformat(), 'scenario': scenario,
                 'files': {path: sha256(content) for path, content in files.items()}}
+    from .provenance import identity as producer_identity
+    manifest['producer'] = producer_identity()
     manifest['package_hash'] = sha256(encoded(manifest))
     files['manifest.json'] = encoded(manifest)
     output = Path(output).resolve()
