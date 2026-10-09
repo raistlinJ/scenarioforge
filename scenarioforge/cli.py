@@ -2562,7 +2562,8 @@ def _flow_state_from_xml(xml_path: str, scenario_name: str | None) -> dict[str, 
             return None
         # Older Save/Preview clients persisted chain_ids without chain.
         # Evaluation package generation needs nodes as well as their IDs.
-        if data.get('flow_enabled') is False or data.get('topology_dirty'):
+        evaluation_chain = isinstance(data.get('evaluation_tasks'), list) and bool(data['evaluation_tasks'])
+        if data.get('topology_dirty') or (data.get('flow_enabled') is False and not evaluation_chain):
             data['chain'] = []
             data['chain_ids'] = []
         elif not data.get('chain') and isinstance(data.get('chain_ids'), list):
@@ -7634,11 +7635,28 @@ def _run_guides_phase(args: Any) -> int:
         state = _flow_state_from_xml(xml_path, scenario)
         if not isinstance(state, dict) or not (state.get('chain') or state.get('chain_ids')):
             raise ValueError('No saved flow chain found. Run flag-sequencing first.')
-        view = backend.app.view_functions['api_flow_attackflow_preview']
-        with backend.app.test_request_context('/api/flag-sequencing/attackflow_preview', query_string={
-            'scenario': scenario, 'xml_path': xml_path, 'prefer_preview': '1', 'prefer_flow': '1',
-        }):
-            status, preview = _response_payload_and_status(view())
+        if state.get('flow_enabled') is False and state.get('evaluation_tasks'):
+            # Fixed/custom tasks can use a saved resolved target chain without
+            # deploying flag generators. Reports must not require sequencing.
+            preview = dict(chain=state['chain'], flag_assignments=state.get('flag_assignments', []))
+            assignments = {str(item.get('node_id')): dict(item) for item in preview['flag_assignments'] if isinstance(item, dict)}
+            for node in preview['chain']:
+                ref = str(node.get('id') or '')
+                assignment = assignments.setdefault(ref, {'node_id':ref})
+                tasks = [task for task in state['evaluation_tasks'] if isinstance(task, dict) and
+                         (not task.get('flag_nodes') or ref in task['flag_nodes'])]
+                if tasks and not assignment.get('access_instructions'):
+                    assignment['access_instructions'] = {'title':'Evaluation task', 'steps':[
+                        {'title':str(task.get('id') or 'Task'),'instructions':str(task.get('prompt') or '')} for task in tasks]}
+                    assignment['hints'] = [hint for task in tasks for hint in task.get('progressive_hints', [])]
+            preview['flag_assignments'] = list(assignments.values())
+            status = 200
+        else:
+            view = backend.app.view_functions['api_flow_attackflow_preview']
+            with backend.app.test_request_context('/api/flag-sequencing/attackflow_preview', query_string={
+                'scenario': scenario, 'xml_path': xml_path, 'prefer_preview': '1', 'prefer_flow': '1',
+            }):
+                status, preview = _response_payload_and_status(view())
         if status >= 400 or preview.get('ok') is False:
             raise ValueError(preview.get('error') or f'Flow preview failed: HTTP {status}')
         if preview.get('flow_valid') is False:

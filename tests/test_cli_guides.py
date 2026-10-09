@@ -149,3 +149,27 @@ def test_solution_collector_keeps_facilitator_walkthroughs_separate():
     assert 'Open the service' in solutions[0]['text']
     assert 'FLAG_ONLY_FOR_FACILITATOR_1' in solutions[0]['text']
     assert 'FLAG_ONLY_FOR_FACILITATOR_2' not in solutions[0]['text']
+
+
+def test_guides_and_graph_reader_preserve_explicit_evaluation_chain_when_flow_is_off(tmp_path,monkeypatch,capsys):
+    import xml.etree.ElementTree as ET
+    nodes, _ = sample_challenges()
+    state={'flow_enabled':False,'chain':nodes[:1],'flag_assignments':[], 'evaluation_tasks':[
+        {'id':'token','prompt':'Fetch the service and return its token.','progressive_hints':['Inspect the HTTP response body.']}]}
+    root=ET.Element('Scenarios');scenario=ET.SubElement(root,'Scenario',name='Custom')
+    flow=ET.SubElement(ET.SubElement(scenario,'FlagSequencing'),'FlowState');flow.text=json.dumps(state)
+    path=tmp_path/'scenario.xml';ET.ElementTree(root).write(path)
+    assert cli._flow_state_from_xml(str(path),'Custom')['chain']==nodes[:1]
+    monkeypatch.setattr(cli,'_load_web_backend_module',lambda:SimpleNamespace())
+    monkeypatch.setattr(cli,'_cli_phase_scenario',lambda *a,**k:'Custom')
+    args=cli._build_cli_parser().parse_args(['guides','--xml',str(path),'--output-dir',str(tmp_path/'guides')])
+    assert cli._run_guides_phase(args)==0
+    payload=json.loads(capsys.readouterr().out)
+    from pathlib import Path
+    assert 'Fetch the service' in Path(payload['outputs']['participant']['html']).read_text()
+    assert 'Inspect the HTTP response body.' in Path(payload['outputs']['participant']['html']).read_text()
+    state['evaluation_tasks']=[];flow.text=json.dumps(state);ET.ElementTree(root).write(path)
+    assert cli._flow_state_from_xml(str(path),'Custom')['chain']==[]
+    state['evaluation_tasks']=[{'id':'token'}];state['topology_dirty']=True
+    flow.text=json.dumps(state);ET.ElementTree(root).write(path)
+    assert cli._flow_state_from_xml(str(path),'Custom')['chain']==[]

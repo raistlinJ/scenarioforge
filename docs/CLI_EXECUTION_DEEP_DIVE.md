@@ -731,6 +731,12 @@ shared JavaScript guide renderer. It uses the saved flow preview, including
 resolved hints, pivots, and participant network setup. It does not download the
 catalog README appendices that the browser adds to facilitator exports.
 
+Scenarios with explicit saved `evaluation_tasks` can also export a resolved
+target chain while `flow_enabled` is false. This supports fixed evaluation
+scenarios without deploying flag generators; task prompts and authored hints
+appear in their guides. The saved chain must still be current: a dirty topology
+requires resolving the chain again before exporting references.
+
 
 ### Progressive assistance in evaluation packages
 
