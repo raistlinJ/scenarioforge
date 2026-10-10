@@ -654,7 +654,14 @@ def _rewrite_compose_injected_to_volume_copy(
 
 
 def _rewrite_compose_host_network(compose_path: Path) -> None:
-    """Force docker-compose services/builds to use host networking."""
+    """Force generator containers to use host networking at runtime.
+
+    Do not set ``build.network: host`` here. Modern BuildKit treats that as a
+    privileged build entitlement and rejects an implicit Compose build unless
+    the caller separately grants ``network.host``. Generators need the CORE
+    host network while they run; their image builds can use Docker's normal
+    build network.
+    """
     try:
         import yaml  # type: ignore
     except Exception:
@@ -679,13 +686,6 @@ def _rewrite_compose_host_network(compose_path: Path) -> None:
             continue
         svc['network_mode'] = 'host'
         svc.pop('networks', None)
-        build = svc.get('build')
-        if isinstance(build, dict):
-            build = dict(build)
-            build.setdefault('network', 'host')
-            svc['build'] = build
-        elif isinstance(build, str):
-            svc['build'] = {'context': build, 'network': 'host'}
 
     try:
         compose_path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding='utf-8')

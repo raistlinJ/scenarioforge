@@ -302,6 +302,47 @@ def test_prepare_remote_cli_context_rewrites_local_compose_build_contexts(tmp_pa
     assert fake_sftp.uploaded_bytes[remote_index].decode('utf-8') == 'hello\n'
 
 
+def test_materialize_preview_vulnerabilities_freezes_random_catalog_choice(tmp_path):
+    recipe = tmp_path / 'tomcat' / 'CVE-2020-1938' / 'docker-compose.yml'
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text('services:\n  app:\n    image: example\n', encoding='utf-8')
+    preview = {
+        'full_preview': {
+            'vulnerabilities_plan': {'tomcat/CVE-2020-1938': 1},
+        }
+    }
+    root = backend.ET.fromstring(
+        '<Scenarios><Scenario name="demo"><ScenarioEditor>'
+        '<section name="Vulnerabilities" density="0.5">'
+        '<item selected="Random" factor="1" v_metric="Count" v_count="1" />'
+        '</section><PlanPreview>'
+        + json.dumps(preview).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        + '</PlanPreview></ScenarioEditor></Scenario></Scenarios>'
+    )
+
+    changed = backend._materialize_preview_vulnerabilities_for_remote(
+        root,
+        [{'Name': 'tomcat/CVE-2020-1938', 'Path': str(recipe)}],
+    )
+
+    assert changed == 1
+    section = root.find(".//section[@name='Vulnerabilities']")
+    assert section is not None
+    assert section.get('explicit_count') == '1'
+    assert section.get('derived_count') == '0'
+    assert section.get('total_planned') == '1'
+    items = section.findall('./item')
+    assert len(items) == 1
+    assert items[0].attrib == {
+        'selected': 'Specific',
+        'factor': '1.000',
+        'v_metric': 'Count',
+        'v_count': '1',
+        'v_name': 'tomcat/CVE-2020-1938',
+        'v_path': str(recipe),
+    }
+
+
 def test_prepare_remote_cli_context_uploads_env_file_assets(tmp_path, monkeypatch):
     env_path = tmp_path / 'config.env'
     env_path.write_text('DB_PASSWORD=secret\n', encoding='utf-8')

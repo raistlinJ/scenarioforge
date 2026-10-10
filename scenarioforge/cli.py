@@ -4360,7 +4360,43 @@ def _maybe_prepare_cli_execute_hitl_xml(
         return [], []
 
     hitl_cfg = scenario_payload.get('hitl') if isinstance(scenario_payload.get('hitl'), dict) else None
-    if not isinstance(hitl_cfg, dict) or not hitl_cfg:
+    saved_hitl_element = False
+    try:
+        xml_root = ET.parse(xml_path).getroot()
+        if xml_root.tag == 'ScenarioEditor':
+            saved_hitl_element = xml_root.find('HardwareInLoop') is not None
+        else:
+            for xml_scenario in xml_root.findall('Scenario'):
+                if scenario_name and str(xml_scenario.get('name') or '').strip() != str(scenario_name).strip():
+                    continue
+                editor = xml_scenario.find('ScenarioEditor')
+                saved_hitl_element = editor is not None and editor.find('HardwareInLoop') is not None
+                break
+    except Exception:
+        saved_hitl_element = False
+    defaulted_hitl = False
+    empty_parsed_hitl = (not isinstance(hitl_cfg, dict) or not hitl_cfg or (
+        not hitl_cfg.get('enabled') and not hitl_cfg.get('interfaces')
+        and not hitl_cfg.get('core') and not hitl_cfg.get('proxmox')))
+    if empty_parsed_hitl and not saved_hitl_element:
+        # Older WebUI/imported XML may predate the VM-mode defaults that `new`
+        # writes into fresh scenarios. An absent element means no scenario-level
+        # choice was saved, so use the configured VM HITL interface for execute.
+        # An explicit enabled=false mapping remains authoritative.
+        if _cli_runtime_mode(backend) != 'vm':
+            return [], []
+        try:
+            vm_defaults = backend._webui_vm_mode_defaults(include_password=False)
+        except Exception:
+            vm_defaults = {}
+        candidate = vm_defaults.get('hitl') if isinstance(vm_defaults, dict) else None
+        if (not isinstance(candidate, dict) or not candidate.get('enabled')
+                or not any(isinstance(item, dict) and str(item.get('name') or '').strip()
+                           for item in candidate.get('interfaces') or [])):
+            return [], []
+        hitl_cfg = deepcopy(candidate)
+        defaulted_hitl = True
+    elif not isinstance(hitl_cfg, dict) or not hitl_cfg:
         return [], []
 
     try:
@@ -4380,6 +4416,16 @@ def _maybe_prepare_cli_execute_hitl_xml(
     except Exception as exc:
         return [f'Failed to validate HITL interface names before execute: {exc}'], []
 
+    if defaulted_hitl and not hitl_errors:
+        hitl_changes = [
+            *list(hitl_changes or []),
+            {
+                'action': 'defaulted',
+                'to': ', '.join(str(item.get('name') or '').strip()
+                                for item in validated_hitl_cfg.get('interfaces') or []
+                                if isinstance(item, dict) and str(item.get('name') or '').strip()),
+            },
+        ]
     if hitl_errors or not hitl_changes:
         return list(hitl_errors or []), list(hitl_changes or [])
 

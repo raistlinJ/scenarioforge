@@ -177,9 +177,17 @@ def _attack_graph_for_chain(
     except Exception:
         assignment_by_node_id = {}
 
-    def _node_ipv4(node: dict[str, Any]) -> str:
+    def _node_ipv4(node: dict[str, Any], assignment: dict[str, Any] | None = None) -> str:
         try:
-            return _first_valid_ipv4(node.get('ipv4') or node.get('ip4') or node.get('ip') or '')
+            direct = _first_valid_ipv4(node.get('ipv4') or node.get('ip4') or node.get('ip') or '')
+            if direct:
+                return direct
+            resolved_inputs = _resolved_map(assignment, 'resolved_inputs')
+            for key in ('Knowledge(ip)', 'target_ip', 'host_ip', 'ip4', 'ipv4', 'ip'):
+                resolved = _first_valid_ipv4(resolved_inputs.get(key) or '')
+                if resolved:
+                    return resolved
+            return ''
         except Exception:
             return ''
 
@@ -289,7 +297,7 @@ def _attack_graph_for_chain(
             'label': str(node.get('name') or nid),
             'type': str(node.get('type') or ''),
             'is_vuln': bool(node.get('is_vuln')),
-            'ipv4': _node_ipv4(node) or None,
+            'ipv4': _node_ipv4(node, assignment) or None,
             'generator': generator or None,
         })
 
@@ -7359,6 +7367,96 @@ def _ensure_remote_traffic_agent(
         pass
 
 
+def _materialize_preview_vulnerabilities_for_remote(
+    root: ET.Element,
+    catalog: list[dict[str, Any]],
+) -> int:
+    """Freeze preview-resolved random vulnerabilities in the remote XML copy.
+
+    The APP and CORE hosts do not necessarily have the same installed
+    vulnerability catalog.  A saved preview has already resolved every
+    ``Random`` row to concrete recipes; allowing CORE to draw from its own
+    catalog can therefore change the plan and fail the saved-preview guard.
+    Replace the vulnerability rows in the temporary upload tree with the
+    preview's concrete count plan.  The normal remote asset uploader below
+    then stages each selected recipe and rewrites its compose path.
+
+    The saved scenario on APP remains unchanged and can still be regenerated
+    from its original Random/weighted inputs.
+    """
+    catalog_paths: dict[str, str] = {}
+    for row in catalog or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get('Name') or '').strip()
+        path = str(row.get('Path') or '').strip()
+        if name and path and os.path.isfile(os.path.abspath(path)):
+            catalog_paths.setdefault(name, os.path.abspath(path))
+
+    changed = 0
+    for scenario_el in root.findall('.//Scenario'):
+        section_el = scenario_el.find(".//section[@name='Vulnerabilities']")
+        if section_el is None:
+            continue
+        items = list(section_el.findall('./item'))
+        if not any(str(item.get('selected') or '').strip().lower() == 'random' for item in items):
+            continue
+        preview_el = scenario_el.find('.//PlanPreview')
+        raw_preview = str(preview_el.text or '').strip() if preview_el is not None else ''
+        if not raw_preview:
+            continue
+        try:
+            preview_payload = json.loads(raw_preview)
+        except Exception:
+            continue
+        full_preview = preview_payload.get('full_preview') if isinstance(preview_payload, dict) else None
+        plan = full_preview.get('vulnerabilities_plan') if isinstance(full_preview, dict) else None
+        if not isinstance(plan, dict):
+            continue
+
+        concrete: list[tuple[str, int, str]] = []
+        unresolved: list[str] = []
+        for raw_name, raw_count in sorted(plan.items(), key=lambda pair: str(pair[0])):
+            name = str(raw_name or '').strip()
+            try:
+                count = max(0, int(raw_count or 0))
+            except Exception:
+                count = 0
+            if not name or name.startswith('__') or count <= 0:
+                continue
+            path = catalog_paths.get(name, '')
+            if not path:
+                unresolved.append(name)
+                continue
+            concrete.append((name, count, path))
+        if unresolved:
+            # Keep the original XML intact. The caller's existing validation
+            # will report the catalog mismatch rather than silently dropping a
+            # challenge from the remote plan.
+            continue
+
+        for item in items:
+            section_el.remove(item)
+        for name, count, path in concrete:
+            ET.SubElement(
+                section_el,
+                'item',
+                {
+                    'selected': 'Specific',
+                    'factor': '1.000',
+                    'v_metric': 'Count',
+                    'v_count': str(count),
+                    'v_name': name,
+                    'v_path': path,
+                },
+            )
+        section_el.set('explicit_count', str(sum(count for _name, count, _path in concrete)))
+        section_el.set('derived_count', '0')
+        section_el.set('total_planned', str(sum(count for _name, count, _path in concrete)))
+        changed += 1
+    return changed
+
+
 def _prepare_remote_cli_context(
     *,
     client: Any,
@@ -7724,6 +7822,17 @@ def _prepare_remote_cli_context(
                 catalog = load_vuln_catalog(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
             except Exception:
                 pass
+
+            materialized_sections = _materialize_preview_vulnerabilities_for_remote(root, catalog)
+            if materialized_sections:
+                rewrites += materialized_sections
+                try:
+                    log_handle.write(
+                        '[remote] materialized saved preview vulnerability selections '
+                        f'for {materialized_sections} scenario(s)\n'
+                    )
+                except Exception:
+                    pass
 
             for item_el in root.findall('.//item'):
                 try:

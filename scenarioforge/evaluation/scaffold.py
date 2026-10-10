@@ -5,6 +5,7 @@ review: generated outputs help define the objective but do not prove solvability
 """
 
 import hashlib
+import ipaddress
 import json
 import re
 from .rubric import validate_rubric
@@ -23,6 +24,24 @@ def graph_from_flow(flow, scenario):
     by_id = {str(n.get("id") or n.get("node_id")): n for n in entries}
     order = [str(n) for n in flow.get("chain_ids", [])] or list(by_id)
     nodes = []
+
+    def resolved_ipv4(node, assignment):
+        values = [node.get("ipv4"), node.get("ip4"), node.get("ip")]
+        resolved_inputs = assignment.get("resolved_inputs") or {}
+        if isinstance(resolved_inputs, dict):
+            values.extend(
+                resolved_inputs.get(key)
+                for key in ("Knowledge(ip)", "target_ip", "host_ip", "ip4", "ipv4", "ip")
+            )
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            try:
+                return str(ipaddress.ip_interface(value.strip()).ip)
+            except ValueError:
+                continue
+        return None
+
     for ref in order:
         node = by_id.get(ref, {"id": ref})
         assignment = assignments.get(ref, {})
@@ -31,7 +50,7 @@ def graph_from_flow(flow, scenario):
                 node,
                 id=ref,
                 label=node.get("name") or ref,
-                ipv4=node.get("ipv4") or node.get("ip4"),
+                ipv4=resolved_ipv4(node, assignment),
                 generator=assignment,
             )
         )

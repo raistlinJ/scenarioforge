@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 from scripts import run_flag_generator as rfg
 
@@ -149,6 +150,26 @@ def test_source_cache_digest_tracks_generator_source_and_ignores_transient_compo
 
     generator_path.write_text("print('new')\n", encoding="utf-8")
     assert rfg._source_cache_digest(tmp_path) != initial
+
+
+def test_host_network_rewrite_only_changes_runtime_network(tmp_path: Path) -> None:
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  generator:\n"
+        "    build:\n"
+        "      context: .\n"
+        "    networks: [default]\n",
+        encoding="utf-8",
+    )
+
+    rfg._rewrite_compose_host_network(compose)
+
+    rendered = yaml.safe_load(compose.read_text(encoding="utf-8"))
+    service = rendered["services"]["generator"]
+    assert service["network_mode"] == "host"
+    assert "networks" not in service
+    assert service["build"] == {"context": "."}
 
 
 def _run_compose_capturing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, cached: bool, supports_no_build: bool) -> list[list[str]]:

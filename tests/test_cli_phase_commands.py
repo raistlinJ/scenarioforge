@@ -2317,6 +2317,49 @@ def test_cli_execute_phase_validates_hitl_interfaces_before_remote_delegate(tmp_
     assert 'name="ens19"' in rewritten_text
 
 
+def test_cli_execute_defaults_missing_hitl_from_vm_configuration(tmp_path, monkeypatch):
+    from webapp import app_backend as backend
+
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')
+    argv0 = cli.sys.argv[:]
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(cli, '_load_web_backend_module', lambda: backend)
+    monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
+    monkeypatch.setattr(backend, '_resolve_preexecute_xml_path', lambda path, _scenario: str(path))
+    monkeypatch.setattr(backend, '_scenario_names_from_xml', lambda _path: ['Scenario A'])
+    monkeypatch.setattr(backend, '_parse_scenarios_xml', lambda _path: {
+        'scenarios': [{'name': 'Scenario A'}], 'core': {'ssh_enabled': True}})
+    monkeypatch.setattr(backend, '_webui_runtime_mode', lambda: 'vm')
+    monkeypatch.setattr(backend, '_webui_vm_mode_defaults', lambda include_password=False: {
+        'hitl': {'enabled': True, 'interfaces': [
+            {'name': 'ens19', 'attachment': 'existing_router', 'ipv4': ['10.254.200.3/24']}
+        ]}})
+    monkeypatch.setattr(cli, '_resolve_cli_core_context', lambda *_a, **_k: ('Scenario A', {}, True))
+    monkeypatch.setattr(backend, '_validate_hitl_interface_names_for_execute',
+                        lambda cfg, _core: (cfg, [], []))
+    monkeypatch.setattr(backend, '_outputs_dir', lambda: str(tmp_path))
+
+    def _capture_delegate(args, *, backend, scenario_name):
+        captured['xml_path'] = str(args.xml)
+        return 0
+
+    monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', _capture_delegate)
+    try:
+        cli.sys.argv = ['scenarioforge.cli', 'execute', '--xml', str(xml_path), '--scenario', 'Scenario A']
+        ret = cli.main()
+    finally:
+        cli.sys.argv = argv0
+
+    assert ret == 0
+    assert captured['xml_path'] != str(xml_path.resolve())
+    root = ET.parse(captured['xml_path']).getroot()
+    hitl = root.find('./Scenario/ScenarioEditor/HardwareInLoop')
+    assert hitl is not None and hitl.get('enabled') == 'true'
+    assert hitl.find('Interface').get('name') == 'ens19'
+
+
 def test_cli_execute_remote_delegated_skips_repeat_hitl_validation(tmp_path, monkeypatch):
     xml_path = tmp_path / 'scenario.xml'
     xml_path.write_text('<Scenarios><Scenario name="Scenario A"><ScenarioEditor /></Scenario></Scenarios>', encoding='utf-8')

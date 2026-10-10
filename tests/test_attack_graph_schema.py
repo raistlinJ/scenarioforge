@@ -66,3 +66,18 @@ def test_attack_graph_v2_schema_rejects_invalid_contract_fields():
     invalid_fact_dependency = copy.deepcopy(_export())
     invalid_fact_dependency["fact_dependencies"][0]["relationship"] = "sequence"
     assert list(validator.iter_errors(invalid_fact_dependency))
+
+
+def test_attack_graph_uses_generator_resolved_target_when_chain_node_has_no_ip():
+    graph = _attack_graph_for_chain(
+        chain_nodes=[{"id": "2", "name": "docker-1", "type": "docker"}],
+        scenario_label="Generated scenario",
+        flag_assignments=[{
+            "node_id": "2",
+            "id": "binary_xor_loader_blob",
+            "resolved_inputs": {"Knowledge(ip)": "172.17.230.2"},
+            "resolved_outputs": {"Flag(flag_id)": "FLAG{example}"},
+        }],
+    )
+
+    assert graph["nodes"][0]["ipv4"] == "172.17.230.2"

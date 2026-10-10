@@ -68,6 +68,23 @@ def test_draft_separates_private_references_and_maps_dependencies():
     validate_plan(task["challenge_plan"], task["rubric"])
 
 
+def test_flow_graph_and_draft_use_generator_resolved_target_address():
+    flow = dict(
+        chain=[dict(id="target", name="Target")],
+        flag_assignments=[dict(
+            node_id="target",
+            resolved_inputs={"Knowledge(ip)": "172.17.230.3/24"},
+            resolved_outputs={"Artifact(value)": "private-value"},
+        )],
+    )
+
+    graph = graph_from_flow(flow, "Lab")
+    task = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])[0]
+
+    assert graph["nodes"][0]["ipv4"] == "172.17.230.3"
+    assert "Target at 172.17.230.3" in task["rubric"]["criteria"][0]["requirement"]
+
+
 def test_native_export_preserves_scaffold_privately_and_each_solution(tmp_path):
     flow, graph = fixture()
     tasks = draft_tasks(flow, graph)
