@@ -20,8 +20,11 @@ Evaluation package (ZIP)**. The download waits for generation to finish. It is
 available to administrators and builders authorized for that scenario, and contains
 evaluator-only answers: do not distribute the complete ZIP to participants.
 
-Without saved task definitions, the WebUI default creates a whole-scenario flag task.
-Saved `FlowState.evaluation_tasks` supplies authored tasks to automatic export.
+Saving a resolved Flow in the WebUI also saves a generated Judge task under
+`FlowState.evaluation_tasks`. It is regenerated when that Flow changes. Explicitly
+authored task definitions are preserved and are never replaced by the automatic
+draft. Older XML without saved task definitions retains the whole-scenario flag
+fallback during export.
 CAF's evaluation YAML owns execution scope:
 configure allow/disallow only in the CAF evaluation YAML. ScenarioForge exports
 objectives and topology, not execution permissions. Scenarios need resolved flags

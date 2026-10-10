@@ -71,3 +71,32 @@ def test_state_save_preserves_facts_for_older_clients_and_allows_explicit_clear(
             assert response.get_json()['ok']
     assert captured[0]['starting_facts'] == [START] and captured[0]['evaluation_tasks'] == [TASK]
     assert captured[1]['starting_facts'] == [] and captured[1]['evaluation_tasks'] == []
+
+
+def test_state_save_generates_evaluation_tasks_for_resolved_flow(monkeypatch, tmp_path):
+    from webapp import app_backend as backend
+    monkeypatch.setattr(backend, '_enrich_flow_state_with_artifacts', lambda state: state)
+    xml_path = tmp_path / 'scenario.xml'
+    xml_path.write_text(
+        '<Scenarios><Scenario name="Lab"><ScenarioEditor/></Scenario></Scenarios>',
+        encoding='utf-8',
+    )
+    flow = {
+        'flow_enabled': True,
+        'topology_dirty': False,
+        'chain_ids': ['entry'],
+        'chain': [{'id': 'entry', 'name': 'entry-host'}],
+        'flag_assignments': [{
+            'node_id': 'entry',
+            'id': 'token-generator',
+            'resolved_inputs': {'Knowledge(ip)': '10.77.0.10'},
+            'resolved_outputs': {'Token(service)': 'private-token'},
+        }],
+    }
+    with backend.app.test_request_context('/api/flag-sequencing/save_flow_state_to_xml', method='POST', json={
+            'xml_path': str(xml_path), 'scenario': 'Lab', 'flow_state': flow}):
+        response = backend.app.view_functions['api_flow_save_flow_state_to_xml']()
+    assert response.get_json()['evaluation_tasks'] == {'status': 'generated', 'count': 1}
+    saved = backend._flow_state_from_xml_path(str(xml_path), 'Lab')
+    assert saved['evaluation_tasks'][0]['id'] == 'solve-scenario'
+    assert saved['evaluation_tasks'][0]['verification_mode'] == 'judge'

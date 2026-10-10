@@ -19,7 +19,9 @@ def register(app, *, backend_module: Any) -> None:
         xml_path = str(payload.get('xml_path') or '').strip()
         scenario_label = str(payload.get('scenario') or '').strip()
         flow_state = payload.get('flow_state') if isinstance(payload.get('flow_state'), dict) else None
+        evaluation_tasks_explicit = isinstance(flow_state, dict) and 'evaluation_tasks' in flow_state
         clear_state = backend._coerce_bool(payload.get('clear'))
+        evaluation_task_result = {'status': 'cleared' if clear_state else 'not-resolved', 'count': 0}
 
         if not xml_path:
             return jsonify({'ok': False, 'error': 'xml_path required'}), 400
@@ -36,6 +38,7 @@ def register(app, *, backend_module: Any) -> None:
         if clear_state:
             ok, message = backend._clear_flow_state_in_xml(xml_path, scenario_label)
         else:
+            persisted_state = None
             try:
                 # Older clients do not know about the expansion audit fields.
                 # Treat omission as "unchanged" so a routine state save cannot
@@ -64,6 +67,43 @@ def register(app, *, backend_module: Any) -> None:
             except Exception:
                 pass
             flow_state = backend._enrich_flow_state_with_artifacts(flow_state)
+            persisted_tasks_were_generated = False
+            try:
+                from scenarioforge.evaluation.task_persistence import (
+                    apply_default_tasks,
+                    auto_saved,
+                )
+                persisted_tasks_were_generated = auto_saved(
+                    (persisted_state or {}).get('evaluation_tasks')
+                )
+                flow_state, evaluation_task_result = apply_default_tasks(
+                    flow_state,
+                    scenario_label,
+                    existing_tasks=(persisted_state or {}).get('evaluation_tasks'),
+                    explicit=evaluation_tasks_explicit,
+                )
+            except Exception as exc:
+                # Do not silently keep a generated contract that describes an
+                # older Flow if refreshing it fails. Authored tasks remain intact.
+                if (
+                    persisted_tasks_were_generated
+                    and not evaluation_tasks_explicit
+                    and isinstance(flow_state, dict)
+                ):
+                    flow_state.pop('evaluation_tasks', None)
+                evaluation_task_result = {'status': 'generation-error', 'count': 0, 'error': str(exc)}
+                try:
+                    app.logger.exception(
+                        '[flow.save_flow_state_to_xml] automatic evaluation task generation failed scenario=%s',
+                        backend._normalize_scenario_label(scenario_label),
+                    )
+                except Exception:
+                    pass
+                return jsonify({
+                    'ok': False,
+                    'error': f'Flow evaluation task generation failed: {exc}',
+                    'evaluation_tasks': evaluation_task_result,
+                }), 422
             try:
                 plan_payload = backend._load_plan_preview_from_xml(xml_path, scenario_label)
             except Exception:
@@ -120,6 +160,6 @@ def register(app, *, backend_module: Any) -> None:
             )
         except Exception:
             pass
-        return jsonify({'ok': True, 'xml_path': xml_path})
+        return jsonify({'ok': True, 'xml_path': xml_path, 'evaluation_tasks': evaluation_task_result})
 
     mark_routes_registered(app, 'flag_sequencing_state_routes')

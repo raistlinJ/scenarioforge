@@ -462,3 +462,7 @@ python -m scenarioforge.cli evaluation-scaffold --xml scenario.xml \
 ```
 
 Review the resulting `evaluation-tasks.json` before using it with `--evaluation-tasks`. It defaults to Judge verification and contains public rubric requirements plus private, per-step guide solutions and a `challenge_plan`. The plan maps criteria and graph prerequisites to progressive assistance; private data remains in evaluator metadata. Saved scoped guide sections can be reused by the orchestrator's cached task loader. A generated draft does not establish that the scenario is solvable or that its judge is human calibrated. The [challenge plan schema](schemas/challenge-plan-v1.schema.json) and stdlib validator are shipped here without importing CAF or the evaluator.
+
+The WebUI persists this generated contract automatically whenever it saves a
+resolved Flow. Later Flow changes refresh only tasks marked as ScenarioForge
+generated; explicitly supplied `evaluation_tasks` remain authoritative.
