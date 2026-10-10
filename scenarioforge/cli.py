@@ -7586,6 +7586,31 @@ def _add_cli_evaluation_args(container: Any) -> None:
     container.add_argument('--eval-split', choices=['development', 'validation', 'test'], default='development')
 
 
+def _run_evaluation_scaffold_phase(args):
+    from pathlib import Path
+    from .evaluation.scaffold import draft_tasks
+    try:
+        backend = _load_web_backend_module()
+        scenario = _cli_phase_scenario(args, backend=backend)
+        state = _flow_state_from_xml(os.path.abspath(args.xml), scenario)
+        if not isinstance(state, dict) or not state.get('chain'):
+            raise ValueError('Scaffold requires a saved resolved Flow chain')
+        graph = backend._attack_graph_for_chain(chain_nodes=state['chain'], scenario_label=scenario,
+                                                flag_assignments=state.get('flag_assignments', []))
+        tasks = draft_tasks(state, graph)
+        output = Path(args.output_dir)
+        output.mkdir(parents=True, mode=0o700, exist_ok=False)
+        destination = output / 'evaluation-tasks.json'
+        destination.write_text(json.dumps(tasks, indent=2, ensure_ascii=False) + '\n')
+        destination.chmod(0o600)
+        _emit_phase_json(dict(ok=True, phase='evaluation-scaffold', review_required=True,
+                              tasks_file=str(destination.resolve()), task_count=len(tasks)), output_path=args.plan_output)
+        return 0
+    except Exception as exc:
+        _emit_phase_json(dict(ok=False, phase='evaluation-scaffold', error=str(exc)), stream=sys.stderr)
+        return 1
+
+
 def _run_evaluation_export_phase(args: Any) -> int:
     from pathlib import Path
     from .evaluation.export import export_package, read_readiness
@@ -7940,7 +7965,7 @@ def _run_attack_graph_phase(args: Any) -> int:
     return 0
 
 
-CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'guides', 'evaluation-export', 'topo', 'check-artifacts', 'list-sessions')
+CLI_PHASES = ('execute', 'new', 'ai', 'preview-plan', 'flag-sequencing', 'attack-graph', 'guides', 'evaluation-export', 'evaluation-scaffold', 'topo', 'check-artifacts', 'list-sessions')
 CLI_HELP_EPILOG = (
     'Use "cli.py <phase> --help" to view phase-specific options.\n'
     'Run "cli.py list-sessions" to see running CORE sessions with their scenario and XML, then '
@@ -8011,7 +8036,7 @@ def _add_cli_phase_arg(container: Any) -> None:
         nargs='?',
         choices=list(CLI_PHASES),
         default='execute',
-        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, guides, evaluation-export, topo, check-artifacts, or list-sessions',
+        help='Phase to run: execute, new, ai, preview-plan, flag-sequencing, attack-graph, guides, evaluation-export, evaluation-scaffold, topo, check-artifacts, or list-sessions',
     )
 
 
@@ -8612,6 +8637,8 @@ def _build_cli_help_parser(phase: str | None) -> argparse.ArgumentParser:
     elif phase == 'flag-sequencing':
         _add_cli_core_connection_args(ap)
         _add_cli_flag_sequencing_args(ap)
+    elif phase == 'evaluation-scaffold':
+        ap.add_argument('--output-dir', required=True, help='New directory for editable Judge task scaffold')
     elif phase == 'evaluation-export':
         _add_cli_evaluation_args(ap)
         ap.add_argument('--output-dir', required=True, help='New evaluation package directory')
@@ -8655,6 +8682,8 @@ def main():
                 action.required = False
     args = ap.parse_args()
     _configure_cli_logging(args)
+    if args.phase == 'evaluation-scaffold':
+        return _run_evaluation_scaffold_phase(args)
     if args.phase == 'evaluation-export':
         return _run_evaluation_export_phase(args)
 

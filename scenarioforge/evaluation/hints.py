@@ -130,3 +130,43 @@ def hints_for_nodes(flow, source_nodes, verifier, private_facts=(), *, rendered=
         if len(result) == 16:
             break
     return result
+
+
+def solutions_for_plan(rendered, graph, plan, rubric):
+    """Release only the selected challenge's private walkthrough and references."""
+    nodes = {str(n['id']): n for n in graph['nodes']}
+    guides = {str(s['node_id']): s['text'] for s in rendered}
+    criteria = {c['id']: c for c in rubric['criteria']}
+    flags = {ref: (n.get('generator') or {}).get('flag_value') for ref, n in nodes.items()}
+    result = []
+    for step in plan['steps']:
+        ref = step['node_id']
+        text = guides.get(ref) or step.get('solution', '')
+        text += '\nFacilitator reference for this challenge:\n' + '\n'.join(
+            criteria[c].get('private_reference', '') for c in step['criterion_ids'])
+        if flags.get(ref):
+            text += '\nCurrent challenge answer / flag:\n' + flags[ref]
+        text = withhold_other_answers(text, graph, ref)
+        if text.strip():
+            result.append(dict(node_id=ref, step_id=step['id'], text=text[:32000],
+                               completion_values=[flags[ref]] if flags.get(ref) else []))
+    return result
+
+
+def withhold_other_answers(text, graph, current_node):
+    """Keep other challenges' known answers out of a released walkthrough."""
+    nodes = {str(n['id']): n for n in graph['nodes']}
+    def answers(node):
+        generator = node.get('generator') or {}
+        values = list(strings(generator.get('flag_value')))
+        for key, value in (generator.get('resolved_outputs') or {}).items():
+            if any(word in str(key).lower() for word in ('flag','token','secret','password','credential','proof')):
+                values.extend(strings(value))
+        return {value for value in values if value}
+    current = answers(nodes.get(str(current_node), {}))
+    for ref, node in nodes.items():
+        if ref == str(current_node):
+            continue
+        for value in sorted(answers(node) - current, key=len, reverse=True):
+            text = text.replace(value, '[another challenge answer withheld]')
+    return text

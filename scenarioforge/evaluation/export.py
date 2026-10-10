@@ -63,7 +63,7 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
     rendered_hints = None
     rendered_solutions = None
     for item in definitions:
-        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints', 'rubric', 'verification_mode'}
+        allowed = {'id', 'family', 'split', 'prompt', 'flag_nodes', 'verifier', 'required_checks', 'discovery', 'starting_facts', 'discoverable_facts', 'objective_requires', 'progressive_hints', 'rubric', 'verification_mode', 'challenge_plan'}
         if not isinstance(item, dict):
             raise ValueError('Task definition must be an object')
         unknown = set(item) - allowed
@@ -150,6 +150,16 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
         metadata[task_id] = {'source_nodes': sorted(refs or []), 'required_checks': sorted(set(checks))}
         if rubric:
             metadata[task_id].update(rubric=rubric, verification_mode=mode)
+        plan = None
+        if 'challenge_plan' in item:
+            from .challenge_plan import validate_plan
+            if rubric is None:
+                raise ValueError('Challenge plan requires a rubric')
+            plan = validate_plan(item['challenge_plan'], rubric)
+            if any(step['node_id'] not in nodes for step in plan['steps']):
+                raise ValueError('Challenge plan references a missing attack-graph node')
+            metadata[task_id]['challenge_plan'] = plan
+            metadata[task_id]['source_nodes'] = [step['node_id'] for step in plan['steps']]
         hints = item.get('progressive_hints', [])
         if 'progressive_hints' not in item and not discovery:
             from .hints import guide_hints, hints_for_nodes
@@ -165,12 +175,16 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
             metadata[task_id]['progressive_hints'] = hints
         # Full solutions are separate from ordinary hints and remain evaluator-
         # only until the host's configured try limit is reached.
-        if flow and item.get('progressive_hints') != []:
+        if (flow or plan) and item.get('progressive_hints') != []:
             from .hints import guide_solutions, solutions_for_task
             if rendered_solutions is None:
-                rendered_solutions = guide_solutions(flow, graph)
-            solutions = solutions_for_task(rendered_solutions, graph, refs, verifier, prompt,
-                                           labels if refs is not None else None)
+                rendered_solutions = guide_solutions(flow or {}, graph)
+            if plan:
+                from .hints import solutions_for_plan
+                solutions = solutions_for_plan(rendered_solutions, graph, plan, rubric)
+            else:
+                solutions = solutions_for_task(rendered_solutions, graph, refs, verifier, prompt,
+                                               labels if refs is not None else None)
             if solutions:
                 metadata[task_id]['challenge_solutions'] = solutions
         if discovery:
