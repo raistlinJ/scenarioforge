@@ -1,6 +1,7 @@
 import json
 import shutil
 import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +61,29 @@ def test_changed_xml_refused_before_checks(build):
     with pytest.raises(ValueError, match='changed after execution'):
         build_execution_package(**build, expected_xml_sha256='old-hash')
     assert not build['output'].exists()
+
+
+def test_non_flag_execution_exports_frozen_judge_scaffold(build):
+    from scenarioforge.evaluation.scaffold import draft_tasks
+    root = ET.parse(build['xml_path'])
+    node = root.find('.//FlowState')
+    flow = json.loads(node.text)
+    for assignment in flow['flag_assignments']:
+        assignment['flag_value'] = None
+        assignment['resolved_outputs'] = {'Proof(token)': 'private-proof'}
+    graph = _attack_graph_for_chain(chain_nodes=flow['chain'], scenario_label=build['scenario'],
+                                    flag_assignments=flow['flag_assignments'])
+    tasks = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])
+    flow['evaluation_tasks'] = tasks
+    node.text = json.dumps(flow)
+    root.write(build['xml_path'])
+    result = build_execution_package(**build)
+    assert result['readiness_passed'] is True
+    metadata = json.loads((build['output'] / 'evaluator/task-metadata.json').read_text())['solve-scenario']
+    assert metadata['verification_mode'] == 'judge'
+    assert metadata['challenge_plan'] == tasks[0]['challenge_plan']
+    assert 'private-proof' not in (build['output'] / 'participant/tasks.json').read_text()
+    assert json.loads((build['output'] / 'evaluator/verifiers.json').read_text())['solve-scenario']['type'] == 'rubric'
 
 
 def test_cli_post_execute_uses_split_without_scope(build, capsys):
@@ -180,3 +204,21 @@ def test_cli_streams_readiness_summary_even_when_export_fails(build, monkeypatch
     assert cli.CHECK_ARTIFACTS_MARKER in text
     assert '[evaluation-export] Failed (ValueError)' in text
     assert 'EVALUATION_PACKAGE_JSON:' not in text
+
+
+@pytest.mark.parametrize('message,visible', [
+    ('No resolved flag values; supply reviewed --evaluation-tasks definitions', True),
+    ('private connection secret', False),
+])
+def test_cli_explains_missing_flag_tasks_without_exposing_arbitrary_errors(build, monkeypatch, capsys, message, visible):
+    def fail(**kwargs):
+        raise ValueError(message)
+    monkeypatch.setattr('scenarioforge.evaluation.execution.build_execution_package', fail)
+    args = SimpleNamespace(xml=str(build['xml_path']), scenario=build['scenario'],
+        suite_id='cli-failure', evaluation_output_dir=str(build['output']),
+        eval_split='development', evaluation_tasks=None, readiness_report=None)
+    assert not cli._post_execution_evaluation(args, backend=build['backend'],
+                                               core_cfg=build['core_cfg'], session_id=9)
+    text = capsys.readouterr().out
+    assert ('non-flag scenarios can use a Judge rubric' in text) is visible
+    assert 'private connection secret' not in text

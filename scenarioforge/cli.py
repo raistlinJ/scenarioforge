@@ -7572,7 +7572,13 @@ def _post_execution_evaluation(args, *, backend, core_cfg, session_id, stream=No
         return bool(result['readiness_passed'])
     except Exception as exc:
         logging.error('Evaluation package generation failed: %s', exc)
-        print(f'[evaluation-export] Failed ({type(exc).__name__}); see ScenarioForge latest.errors for details.',
+        detail = ''
+        if isinstance(exc, ValueError) and str(exc) == 'No resolved flag values; supply reviewed --evaluation-tasks definitions':
+            # This fixed validation message is safe for streamed deployment
+            # logs; arbitrary exception text can contain connection secrets.
+            detail = ('No resolved flag values. Supply reviewed evaluation tasks; '
+                      'non-flag scenarios can use a Judge rubric from evaluation-scaffold. ')
+        print(f'[evaluation-export] Failed ({type(exc).__name__}); {detail}see ScenarioForge latest.errors for details.',
               file=stream or sys.stdout, flush=True)
         return False
 
