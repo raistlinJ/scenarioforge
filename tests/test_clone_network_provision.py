@@ -79,6 +79,9 @@ def test_bootstrap_detach_preserves_nic_slots_with_or_without_caf(tmp_path, caf)
     script = r'''source "$1"
 CYBER_AGENT_FLOW="$2"
 PARTICIPANT_VMID=123
+HITL_BRIDGE=sfhitl1
+UPLINK_BRIDGE=vmbr0
+LLM_BRIDGE=vmbr0
 config="$3"
 calls="$4"
 qm() {

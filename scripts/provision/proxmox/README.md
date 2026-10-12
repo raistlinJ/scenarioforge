@@ -1156,8 +1156,11 @@ When CAF is enabled, `net2` is dedicated LLM egress. Do not delete the disconnec
 adapter when converting to a template or cloning; deleting it can renumber Kali
 interfaces. Clone each adapter into the corresponding bridge for that lab (for
 example `sfhitl2` for clone 2), preserving NIC slots and device types. Proxmox
-readiness verifies the LLM Netplan match uses the interface name rather than a
-template MAC, that the interface exists, and that the DHCP route service agrees.
+provisioning creates all participant adapters in the initial `qm create` command
+and verifies the host-side slots and bridges before first boot and before
+disconnecting the bootstrap uplink. Readiness also verifies the LLM Netplan match
+uses the interface name rather than a template MAC, that the interface exists,
+and that the DHCP route service agrees.
 This does not migrate existing templates with old MAC-based definitions.
 
 
@@ -1192,6 +1195,8 @@ the following from the current ScenarioForge checkout on the Proxmox host:
 ```bash
 git pull
 PARTICIPANT_VMID=625100 # replace with the current participant clone
+qm config "$PARTICIPANT_VMID" | grep -q '^net2:' || \
+  qm set "$PARTICIPANT_VMID" --net2 "virtio,bridge=vmbr0"
 LLM_MAC=$(qm config "$PARTICIPANT_VMID" | sed -n 's/^net2: [^=]*=\([^,]*\).*/\1/p')
 qm guest exec "$PARTICIPANT_VMID" --timeout 180 --pass-stdin 1 -- \
   /usr/bin/python3 - --llm-mac "$LLM_MAC" \

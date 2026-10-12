@@ -8,7 +8,7 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../common/reinsta
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/orchestrator.sh"
 
-SCRIPT_VERSION="0.11.0"
+SCRIPT_VERSION="0.11.1"
 STATE_DIR="${SCENARIOFORGE_LAB_STATE_DIR:-/etc/scenarioforge-lab}"
 STATE_FILE="$STATE_DIR/state.env"
 CREDENTIALS_FILE="$STATE_DIR/credentials.env"
@@ -2158,6 +2158,28 @@ create_vm() {
     run qm set "$vmid" --ide2 "$VM_STORAGE:cloudinit" --boot order=scsi0
 }
 
+verify_participant_vm_network_contract() {
+    [[ "$DRY_RUN" == 0 ]] || return 0
+    local hardware_config actual index label bridge
+    hardware_config="$(qm config "$PARTICIPANT_VMID")" \
+        || die "Cannot read participant VMID $PARTICIPANT_VMID hardware after creation"
+    for index in 0 1; do
+        case "$index" in
+            0) label=HITL; bridge="$HITL_BRIDGE" ;;
+            1) label='bootstrap uplink'; bridge="$UPLINK_BRIDGE" ;;
+        esac
+        actual="$(sed -n "s/^net$index: //p" <<<"$hardware_config")"
+        [[ -n "$actual" && ",$actual," == *",bridge=$bridge,"* ]] \
+            || die "Participant VMID $PARTICIPANT_VMID is missing its $label adapter in Proxmox net$index (expected bridge $bridge)"
+    done
+    if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+        actual="$(sed -n 's/^net2: //p' <<<"$hardware_config")"
+        [[ -n "$actual" && ",$actual," == *",bridge=$LLM_BRIDGE,"* ]] \
+            || die "Participant VMID $PARTICIPANT_VMID is missing the CAF LLM adapter in Proxmox net2 (expected bridge $LLM_BRIDGE); refusing to install guest configuration for $(participant_interface_name 2)"
+    fi
+    log 'Participant Proxmox NIC layout verified against the generated guest network configuration'
+}
+
 create_vms() {
     if reinstall_selects core; then
         create_vm "$CORE_VMID" "$CORE_NAME" "$CORE_MEMORY_MB" "$CORE_CORES" "$CORE_DISK_GB" "$DEBIAN_IMAGE" \
@@ -2177,13 +2199,17 @@ create_vms() {
             "user=$SNIPPET_STORAGE:snippets/scenarioforge-app-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-app-network.yaml"
     fi
     if reinstall_selects participant; then
+        local -a participant_networks=(
+            --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE"
+            --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
+        )
+        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
+            participant_networks+=(--net2 "virtio=$PARTICIPANT_NET2_MAC,bridge=$LLM_BRIDGE")
+        fi
         create_vm "$PARTICIPANT_VMID" "$PARTICIPANT_NAME" "$PARTICIPANT_MEMORY_MB" "$PARTICIPANT_CORES" "$PARTICIPANT_DISK_GB" "$PARTICIPANT_IMAGE" \
             --startup order=30,up=15 \
-            --net0 "virtio=$PARTICIPANT_NET0_MAC,bridge=$HITL_BRIDGE" \
-            --net1 "virtio=$PARTICIPANT_NET1_MAC,bridge=$UPLINK_BRIDGE"
-        if [[ "$CYBER_AGENT_FLOW" == 1 ]]; then
-            run qm set "$PARTICIPANT_VMID" --net2 "virtio=$PARTICIPANT_NET2_MAC,bridge=$LLM_BRIDGE"
-        fi
+            "${participant_networks[@]}"
+        verify_participant_vm_network_contract
         run qm set "$PARTICIPANT_VMID" --cicustom \
             "user=$SNIPPET_STORAGE:snippets/scenarioforge-participant-user.yaml,network=$SNIPPET_STORAGE:snippets/scenarioforge-participant-network.yaml"
     fi
@@ -2225,7 +2251,14 @@ write_state() {
         shell_assignment CORE_HITL_CIDR "$CORE_HITL_CIDR"
         shell_assignment PARTICIPANT_CIDR "$PARTICIPANT_CIDR"
         shell_assignment PARTICIPANT_GATEWAY "$PARTICIPANT_GATEWAY"
-        shell_assignment APP_NET0_MAC "$APP_NET0_MAC"
+        shell_assignment CORE_NET0_MAC "${CORE_NET0_MAC:-}"
+        shell_assignment CORE_NET1_MAC "${CORE_NET1_MAC:-}"
+        shell_assignment CORE_NET2_MAC "${CORE_NET2_MAC:-}"
+        shell_assignment APP_NET0_MAC "${APP_NET0_MAC:-}"
+        shell_assignment APP_NET1_MAC "${APP_NET1_MAC:-}"
+        shell_assignment PARTICIPANT_NET0_MAC "${PARTICIPANT_NET0_MAC:-}"
+        shell_assignment PARTICIPANT_NET1_MAC "${PARTICIPANT_NET1_MAC:-}"
+        shell_assignment PARTICIPANT_NET2_MAC "${PARTICIPANT_NET2_MAC:-}"
         shell_assignment INSTALL_FLAG_GENERATORS "$INSTALL_FLAG_GENERATORS"
         shell_assignment INSTALL_VULNHUB "$INSTALL_VULNHUB"
         shell_assignment FLAG_GENERATORS_REF "$FLAG_GENERATORS_REF"
@@ -2282,6 +2315,7 @@ if payload.get("exitcode") == 0:
 verify_participant_caf_contract() {
     [[ "$CYBER_AGENT_FLOW" == 1 && "$DRY_RUN" == 0 ]] || return 0
     local expected source output
+    verify_participant_vm_network_contract
     expected="$(python3 -c 'import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())' "$(dirname "$CAF_HELPER")/update-llm-destination.py")"
     source="$(cat "$(dirname "$CAF_HELPER")/verify_caf_participant.py")"
     output="$(qm guest exec "$PARTICIPANT_VMID" -- /usr/bin/python3 -c "$source" /usr/local/sbin/update-llm-destination /opt/cyber-agent-flow/configs/cli.json "$expected" --expected-interface "$(participant_interface_name 2)" 2>/dev/null)" || {
@@ -2457,6 +2491,7 @@ wait_for_participant_bootstrap() {
 }
 
 detach_participant_bootstrap_uplink() {
+    verify_participant_vm_network_contract
     if ! qm config "$PARTICIPANT_VMID" 2>/dev/null | grep -q '^net1:'; then
         PARTICIPANT_BOOTSTRAP_UPLINK_ATTACHED=0
         write_state

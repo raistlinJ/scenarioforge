@@ -175,18 +175,41 @@ def test_proxmox_third_nic_attached(tmp_path):
     probe = f'''source {shlex.quote(str(installer))}
 CYBER_AGENT_FLOW=1
 LLM_BRIDGE=vmbr9
+HITL_BRIDGE=sfhitl0
+UPLINK_BRIDGE=vmbr0
 PARTICIPANT_NET2_MAC=02:00:00:00:00:09
 for name in CORE_NET0_MAC CORE_NET1_MAC CORE_NET2_MAC APP_NET0_MAC APP_NET1_MAC PARTICIPANT_NET0_MAC PARTICIPANT_NET1_MAC; do printf -v "$name" '%s' 02:00:00:00:00:01; done
 DEBIAN_IMAGE=/tmp/debian
 UBUNTU_IMAGE=/tmp/ubuntu
 PARTICIPANT_IMAGE=/tmp/kali
-create_vm() {{ :; }}
+create_vm() {{ printf '%s\n' "$*"; }}
+qm() {{
+    if [[ "$1" == config ]]; then
+        printf 'net0: virtio=02:00:00:00:00:01,bridge=sfhitl0\nnet1: virtio=02:00:00:00:00:01,bridge=vmbr0\nnet2: virtio=02:00:00:00:00:09,bridge=vmbr9\n'
+    fi
+}}
 run() {{ printf '%s\\n' "$*"; }}
 create_vms
 '''
     result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert '--net2 virtio=02:00:00:00:00:09,bridge=vmbr9' in result.stdout
+
+
+def test_proxmox_caf_participant_hardware_contract_rejects_missing_net2():
+    installer = ROOT / 'scripts/provision/proxmox/install-scenarioforge-lab.sh'
+    probe = f'''source {shlex.quote(str(installer))}
+CYBER_AGENT_FLOW=1
+PARTICIPANT_VMID=9403
+HITL_BRIDGE=sfhitl0
+UPLINK_BRIDGE=vmbr0
+LLM_BRIDGE=vmbr0
+qm() {{ printf 'net0: virtio=02:00:00:00:00:01,bridge=sfhitl0\nnet1: virtio=02:00:00:00:00:02,bridge=vmbr0\n'; }}
+verify_participant_vm_network_contract
+'''
+    result = subprocess.run(['bash', '-c', probe], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert 'missing the CAF LLM adapter in Proxmox net2' in result.stderr
 
 
 def test_launcher_starts_web_mode(config, tmp_path):

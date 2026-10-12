@@ -512,7 +512,7 @@ vm_owned_by_installer() {{ [[ {mode} != unowned && "$ownership_changed" == 0 ]];
 stopped_vmids=''
 qm() {{
     case "$1" in
-        config) printf 'memory: 4096\\ncores: 2\\nscsi0: local:disk,size=40G\\nnet0: virtio=02:00:00:00:00:10,bridge=hitl\\n' ;;
+        config) printf 'memory: 4096\\ncores: 2\\nscsi0: local:disk,size=40G\\nnet0: virtio=02:00:00:00:00:10,bridge=sfhitl0\\nnet1: virtio=02:00:00:00:00:11,bridge=vmbr0\\n' ;;
         status)
             case {mode} in
                 graceful|shutdown_timeout|late_shutdown|stop_failed|still_running|ownership_changed)
@@ -614,6 +614,8 @@ LLM_MODEL=test-model
 LLM_BRIDGE=vmbr0
 LLM_INTERFACE_CIDR=''
 LLM_GATEWAY=''
+HITL_BRIDGE=sfhitl1
+UPLINK_BRIDGE=vmbr0
 PARTICIPANT_VMID=9403
 event() { printf '%s\n' "$*" >> "$test_root/events"; }
 load_cleanup_scope() { :; }
