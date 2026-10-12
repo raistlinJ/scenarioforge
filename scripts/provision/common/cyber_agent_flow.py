@@ -204,6 +204,10 @@ fi
     || fail_bootstrap 'CyberAgentFlow requires MCP v1; install mcp>=1.28,<2 in its virtual environment'
 /opt/cyber-agent-flow/venv/bin/python -c "import flask, requests, mcp, ollama, importlib.util; assert importlib.util.find_spec('pynput'), 'pynput is missing'" \\
     || fail_bootstrap 'CyberAgentFlow dependency verification failed; inspect the Python error above'
+[[ -f /opt/cyber-agent-flow/post_run_analysis.py ]] \\
+    || fail_bootstrap 'CyberAgentFlow post-run analyzer is missing; update the configured cyber_agent_flow_ref'
+/opt/cyber-agent-flow/venv/bin/python -c "import post_run_analysis; assert callable(post_run_analysis.extract_trial_helper)" \\
+    || fail_bootstrap 'CyberAgentFlow post-run analyzer import check failed after installation'
 cat > /usr/local/sbin/update-llm-destination <<'CAF_UPDATE_SCRIPT'
 {route_helper.rstrip(chr(10))}
 CAF_UPDATE_SCRIPT
