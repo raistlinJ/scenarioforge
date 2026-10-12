@@ -174,6 +174,41 @@ def test_vulnerability_walkthrough_is_the_access_procedure_for_injected_artifact
     assert 'No specific access instructions' not in text
 
 
+def test_generator_access_instructions_win_over_vulnerability_and_artifact_fallbacks():
+    from scenarioforge.evaluation.access import access_check
+    from scenarioforge.utils.guide_export import facilitator_solution_plan
+    nodes = [{'id':'1', 'name':'wallet', 'ip4':'10.20.0.11'}]
+    assignments = [{'node_id':'1', 'id':'database-wallet',
+        'resolved_outputs': {
+            'Directory(host, path)':'/srv/wallet',
+            'PortForward(host, port)':11521,
+            'FlagFile(path)':'/tmp/vulns/run/service/database/private.txt',
+            'Endpoint(path)':'/database/private.txt',
+        },
+        'access_instructions': {'title':'Wallet protocol','steps':[{
+            'title':'Connect and retrieve',
+            'instructions':'Use nc {{NODE}} {{PORT}}, then enter LIST and GET {{FLAG_FILE}}.'
+        }]}}]
+    preview = {'chain':nodes, 'flag_assignments':assignments,
+        'vuln_readme_entries':[{'step':1, 'vulnName':'unrelated fallback',
+            'templateVars':{'NODE_IP':'10.20.0.11'},
+            'access_instructions':{'title':'Fallback','steps':[{
+                'title':'Wrong protocol',
+                'instructions':'Use curl http://{{NODE_IP}}/proof.'
+            }]}}]}
+    solutions = facilitator_solution_plan('Training', preview)
+    assert len(solutions) == 1
+    text = solutions[0]['text']
+    assert 'nc 10.20.0.11 11521' in text
+    assert 'GET /database/private.txt' in text
+    assert '/tmp/vulns/run' not in text.split('### Check Your Progress', 1)[0]
+    assert 'mount -t nfs' not in text
+    assert 'curl http://10.20.0.11/proof' not in text.split('### Check Your Progress', 1)[0]
+    report = access_check({'steps':[{'id':'step-001','node_id':'1','title':'wallet',
+        'solution':text}]}, {'nodes':[{'id':'1','ipv4':'10.20.0.11'}]})
+    assert report['status'] == 'pass'
+
+
 def test_flow_preview_merge_restores_vulnerability_guidance(monkeypatch):
     from types import SimpleNamespace
     from webapp import app_backend

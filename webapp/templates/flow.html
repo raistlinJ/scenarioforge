@@ -13893,14 +13893,19 @@ function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options
                 const key = _findOutputKey('RpcbindPort');
                 return key ? String(outputs[key] || '').split(':').pop().trim() : '111';
               })
-              .replace(/\{\{NODE\}\}/g, nodeName)
+              // Generator manifests use NODE as the participant-reachable target.
+              // CORE node names are not guaranteed to resolve from the participant VM.
+              .replace(/\{\{NODE\}\}/g, nodeIp || nodeName)
               .replace(/\{\{PATH\}\}/g, () => {
                 const key = _findOutputKey('Directory');
                 return key ? _extractCleanPath(outputs[key]) : 'exports';
               })
               .replace(/\{\{FLAG_FILE\}\}/g, () => {
+                const endpointKey = _findOutputKey('Endpoint');
+                const endpoint = endpointKey ? String(outputs[endpointKey] || '').trim() : '';
+                if (endpoint && endpoint !== '/') return endpoint;
                 const key = _findOutputKey('FlagFile');
-                return key ? String(outputs[key] || '').trim() : 'flag.txt';
+                return key ? _extractCleanPath(outputs[key]) : 'flag.txt';
               })
               .replace(/\{\{KEY_FILE\}\}/g, () => {
                 const key = _findOutputKey('SSHPrivateKey') || _findOutputKey('PrivateKey') || _findOutputKey('KeyFile');
