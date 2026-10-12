@@ -1528,7 +1528,7 @@ GENERATOR_INSTALL
     fi
 
     if [[ "$INSTALL_VULNHUB" == "1" ]]; then
-        set_bootstrap_status 55 'installing the pinned Vulhub vulnerability catalog snapshot'
+        set_bootstrap_status 55 'installing the selected Vulhub vulnerability catalog revision'
         [[ -d "$payload_dir/vulnhub/content" ]] \
             || fail_bootstrap 'optional payload is missing the Vulhub catalog'
         vulnhub_zip=/tmp/scenarioforge-vulnhub-catalog.zip
@@ -1553,6 +1553,7 @@ VULNHUB_ZIP
             /opt/scenarioforge/.venv/bin/python - "$vulnhub_zip" \
             "$FLAG_GENERATORS_RESOLVED_COMMIT" "$TESTED_FLAG_GENERATORS_COMMIT" <<'VULNHUB_INSTALL'
 import sys
+from pathlib import Path
 from webapp import app_backend
 
 entry = app_backend._install_vuln_catalog_zip_file(
@@ -1580,16 +1581,28 @@ if target is None:
 items = app_backend._normalize_vuln_catalog_items(target)
 validated = sum(item.get("validated_ok") is True for item in items)
 disabled = sum(bool(item.get("disabled")) for item in items)
+content_dir = Path(app_backend._vuln_catalog_pack_content_dir(str(entry.get("id") or "")))
+guidance_metadata = sum(1 for _ in content_dir.rglob("scenarioforge.vuln.yaml"))
 if resolved_commit == tested_commit and (
-    len(items) != 306 or validated != 294 or disabled != 12
+    len(items) != 306
+    or validated != 294
+    or disabled != 12
+    or guidance_metadata != 306
 ):
     raise SystemExit(
         "Tested Vulhub metadata did not produce the expected state: "
-        f"total={len(items)}, validated={validated}, disabled={disabled}"
+        f"total={len(items)}, validated={validated}, disabled={disabled}, "
+        f"guidance={guidance_metadata}"
     )
+# Optional-content installation is an explicit catalog selection.  Activate
+# the imported revision even when provisioning is repairing an existing APP
+# disk that already had a catalog selected.
+state["active_id"] = str(entry.get("id") or "")
+app_backend._write_vuln_catalogs_state(state)
 print(
     f"Imported portable Vulhub metadata: {validated}/{len(items)} validated, "
-    f"{len(items) - disabled} enabled, {disabled} disabled"
+    f"{len(items) - disabled} enabled, {disabled} disabled, "
+    f"{guidance_metadata} guidance records"
 )
 print(f"Installed Vulhub catalog {entry['id']} with {entry['compose_count']} recipes")
 VULNHUB_INSTALL

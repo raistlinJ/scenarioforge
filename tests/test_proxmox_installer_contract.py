@@ -225,7 +225,8 @@ def test_optional_catalogs_default_to_and_verify_portable_metadata_snapshot() ->
         'len(installed) != 148 or validated != 147 or disabled != 4 or enabled_node != 85',
         '"Imported portable generator metadata:',
         'archive.write(path, path.relative_to(source).as_posix())',
-        'len(items) != 306 or validated != 294 or disabled != 12',
+        'or guidance_metadata != 306',
+        'state["active_id"] = str(entry.get("id") or "")',
         '"Imported portable Vulhub metadata:',
         "its own portable catalog metadata, if present, will be imported",
     ]
