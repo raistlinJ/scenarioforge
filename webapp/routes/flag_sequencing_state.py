@@ -66,6 +66,16 @@ def register(app, *, backend_module: Any) -> None:
                     flow_state['flags_enabled'] = False
             except Exception:
                 pass
+            # Rehydrate evaluation-relevant target data from the frozen
+            # topology. Older and compact browser payloads retain only a
+            # node's id/name/type and otherwise lose addresses/vulnerabilities.
+            try:
+                plan_payload = backend._load_plan_preview_from_xml(xml_path, scenario_label)
+            except Exception:
+                plan_payload = None
+            flow_state = backend._flow_merge_plan_preview_metadata(
+                flow_state, plan_payload, scenario_label=scenario_label
+            )
             flow_state = backend._enrich_flow_state_with_artifacts(flow_state)
             persisted_tasks_were_generated = False
             try:
@@ -104,10 +114,6 @@ def register(app, *, backend_module: Any) -> None:
                     'error': f'Flow evaluation task generation failed: {exc}',
                     'evaluation_tasks': evaluation_task_result,
                 }), 422
-            try:
-                plan_payload = backend._load_plan_preview_from_xml(xml_path, scenario_label)
-            except Exception:
-                plan_payload = None
             if isinstance(plan_payload, dict) and plan_payload:
                 ok, message = backend._persist_plan_preview_and_flow_state_in_xml(
                     xml_path,

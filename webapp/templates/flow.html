@@ -1041,7 +1041,7 @@
         length: chain_ids.length,
         dependency_level: getFlowDependencyLevel(),
         chain_ids: chain_ids,
-        chain: currentChain.map(node => ({ id: String(node.id || ''), name: String(node.name || ''), type: String(node.type || '') })),
+        chain: currentChain.map(serializeFlowChainNode),
         flag_assignments: buildPersistAssignments(chain_ids),
         allow_node_duplicates: !!allowNodeDuplicates,
         include_all_topology_pivots: !!includeAllTopologyPivots,
@@ -1096,7 +1096,7 @@
       length: chain_ids.length,
       dependency_level: getFlowDependencyLevel(),
       chain_ids,
-      chain: (!flowEnabled) ? [] : currentChain.map(node => ({ id: String(node.id || ''), name: String(node.name || ''), type: String(node.type || '') })),
+      chain: (!flowEnabled) ? [] : currentChain.map(serializeFlowChainNode),
       flag_assignments: (!flowEnabled) ? [] : buildPersistAssignments(chain_ids),
       allow_node_duplicates: !!allowNodeDuplicates,
       include_all_topology_pivots: !!includeAllTopologyPivots,
@@ -1314,6 +1314,20 @@
     }
   }
 
+  function serializeFlowChainNode(node) {
+    const source = (node && typeof node === 'object') ? node : {};
+    const out = {
+      id: String(source.id || ''),
+      name: String(source.name || ''),
+      type: String(source.type || ''),
+    };
+    ['ip4', 'ipv4', 'ip', 'address', 'interfaces', 'vulnerabilities',
+      'is_vuln', 'is_vulnerability', 'is_vulnerable'].forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(source, key)) out[key] = source[key];
+    });
+    return out;
+  }
+
   function buildPersistAssignments(chain_ids) {
     const ids = Array.isArray(chain_ids) ? chain_ids : [];
     let fallbackAssignments = null;
@@ -1365,6 +1379,8 @@
         'pivot_inputs',
         'pivot_outputs',
         'pivot_hints',
+        'vulnerabilities',
+        'access_instructions',
         'hint',
         'hints',
         'description_hints',
@@ -1703,6 +1719,10 @@
       if (hintLevelsVal !== undefined) out.hint_levels = hintLevelsVal;
       if (hintLevelTemplatesVal !== undefined) out.hint_level_templates = hintLevelTemplatesVal;
       if (descHints !== undefined) out.description_hints = descHints;
+      if (Array.isArray(curA.vulnerabilities)) out.vulnerabilities = curA.vulnerabilities;
+      if (curA.access_instructions && typeof curA.access_instructions === 'object') {
+        out.access_instructions = curA.access_instructions;
+      }
       try {
         if (curA && typeof curA.resolved_inputs === 'object' && !Array.isArray(curA.resolved_inputs)) {
           out.resolved_inputs = curA.resolved_inputs;

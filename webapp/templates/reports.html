@@ -1989,6 +1989,7 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
     const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
     const resolvedInjects = normalizeGuidePathArtifacts(assignment);
+    const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
 
 
     lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
@@ -2129,7 +2130,33 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       lines.push('');
     }
     
-    // Apply access instructions: check generator metadata first, then heuristics
+    const _applyVulnerabilityAccessLocal = (entries) => {
+      const usable = (entries || []).filter((entry) => {
+        const access = (entry && entry.access_instructions) || {};
+        return Array.isArray(access.steps) && access.steps.some((item) => item && item.instructions);
+      });
+      if (!usable.length) return false;
+      lines.push('### Access Instructions', '');
+      usable.forEach((entry) => {
+        const vars = { NODE_IP: nodeIp, NODE_NAME: nodeName, ...((entry && entry.templateVars) || {}) };
+        const render = (value) => String(value || '').replace(/\{\{\s*([A-Z][A-Z0-9_]*)\s*\}\}/g,
+          (token, key) => Object.prototype.hasOwnProperty.call(vars, key) && String(vars[key] || '').trim()
+            ? String(vars[key]) : token);
+        const access = entry.access_instructions || {};
+        lines.push(`**${render(access.title || entry.vulnName || 'Vulnerability walkthrough')}**`, '');
+        access.steps.forEach((item, position) => {
+          const instructions = render(item.instructions);
+          if (!instructions || /\{\{\s*[A-Z][A-Z0-9_]*\s*\}\}/.test(instructions)) return;
+          lines.push(`Step ${position + 1}: **${render(item.title || 'Step')}**`);
+          instructions.split('\n').forEach((line) => lines.push(`   ${line}`));
+          lines.push('');
+        });
+      });
+      return true;
+    };
+
+    // Prefer a vulnerability-specific exploit procedure. A generic generator
+    // heuristic cannot explain how the participant first reaches the target.
     const _applyAccessInstructionsLocal = (assign, nodeName, nodeIp, nodeId) => {
       if (!assign || typeof assign !== 'object') return false;
       
@@ -2267,7 +2294,8 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     };
     
     // Apply access instructions
-    const hasAccessInstructions = _applyAccessInstructionsLocal(assignment, nodeName, nodeIp, nodeId);
+    const hasAccessInstructions = _applyVulnerabilityAccessLocal(stepVulnReadmes)
+      || _applyAccessInstructionsLocal(assignment, nodeName, nodeIp, nodeId);
     if (!hasAccessInstructions) {
       lines.push('### Access Instructions');
       lines.push('');
@@ -2320,7 +2348,6 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
       });
     }
 
-    const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
     lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes,
       (group) => collectHints(nodeId, group, group.values)));
     if (facilitatorMode && stepVulnReadmes.some(entry => entry.content)) {

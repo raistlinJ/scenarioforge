@@ -21,7 +21,11 @@ def auto_saved(tasks):
 
 
 def readiness_checks(flow):
-    checks = ["containers", "services", "ports"]
+    # Auto-generated contracts must be runnable by a participant, not merely
+    # deployable on CORE. Authored tasks may opt out by supplying their own
+    # required_checks, but ScenarioForge-generated tasks fail fast when their
+    # current guide lacks a concrete connection/retrieval procedure.
+    checks = ["containers", "services", "ports", "challenge_access"]
     assignments = [
         item
         for item in flow.get("flag_assignments", [])
@@ -85,7 +89,25 @@ def apply_default_tasks(flow, scenario, *, existing_tasks=None, explicit=False):
         return result, {"status": "not-resolved", "count": 0}
 
     graph = graph_from_flow(result, scenario)
-    tasks = draft_tasks(result, graph, checks=readiness_checks(result))
+    rendered_hints = []
+    rendered_solutions = []
+    try:
+        from scenarioforge.utils.guide_export import evaluation_guide_plan
+        guide_plan = evaluation_guide_plan(scenario, result)
+        rendered_hints = guide_plan.get("hints", [])
+        rendered_solutions = guide_plan.get("solutions", [])
+    except Exception:
+        # Keep Flow saving available when the optional renderer dependency is
+        # unavailable. The generated task remains marked for access review and
+        # challenge_access will block its evaluation export.
+        pass
+    tasks = draft_tasks(
+        result,
+        graph,
+        checks=readiness_checks(result),
+        rendered_hints=rendered_hints,
+        rendered_solutions=rendered_solutions,
+    )
     for task in tasks:
         task["challenge_plan"]["source"]["auto_saved_by"] = AUTO_SAVE_MARKER
     result["evaluation_tasks"] = tasks

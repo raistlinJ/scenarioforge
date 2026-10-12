@@ -151,6 +151,56 @@ def test_solution_collector_keeps_facilitator_walkthroughs_separate():
     assert 'FLAG_ONLY_FOR_FACILITATOR_2' not in solutions[0]['text']
 
 
+def test_vulnerability_walkthrough_is_the_access_procedure_for_injected_artifact():
+    from scenarioforge.utils.guide_export import facilitator_solution_plan
+    nodes = [{'id':'1', 'name':'webmin', 'ip4':'10.20.0.11',
+              'vulnerabilities':['webmin/CVE-2019-15107']}]
+    assignments = [{'node_id':'1', 'id':'plain-flag', 'type':'flag-generator',
+                    'inject_files':['/flow_injects/proof.txt']}]
+    preview = {'chain':nodes, 'flag_assignments':assignments,
+        'vuln_readme_entries':[{'step':1, 'vulnName':'webmin/CVE-2019-15107',
+            'templateVars':{'NODE_IP':'10.20.0.11','NODE_NAME':'webmin',
+                            'ARTIFACT_PATH':'/flow_injects/proof.txt'},
+            'access_instructions':{'title':'Exploit and retrieve','steps':[{
+                'title':'Run the exploit',
+                'instructions':'Use curl to exploit https://{{NODE_IP}}:10000 and run cat {{ARTIFACT_PATH}}.'
+            }]}}]}
+    solutions = facilitator_solution_plan('Training', preview)
+    assert len(solutions) == 1
+    text = solutions[0]['text']
+    assert '### Access Instructions' in text
+    assert 'curl to exploit https://10.20.0.11:10000' in text
+    assert 'cat /flow_injects/proof.txt' in text
+    assert 'No specific access instructions' not in text
+
+
+def test_flow_preview_merge_restores_vulnerability_guidance(monkeypatch):
+    from types import SimpleNamespace
+    from webapp import app_backend
+    facts = SimpleNamespace(
+        hint_levels={'low':['Inspect {{NODE_IP}}.']},
+        access_instructions={'title':'Retrieve','steps':[{
+            'title':'Exploit',
+            'instructions':'curl https://{{NODE_IP}}/run cat {{ARTIFACT_PATH}}'
+        }]},
+    )
+    monkeypatch.setattr(app_backend, '_load_vuln_metadata_index',
+                        lambda: SimpleNamespace(lookup=lambda name: facts))
+    monkeypatch.setattr(app_backend, '_flow_enrich_saved_flag_assignments',
+                        lambda assignments, chain, scenario_label: assignments)
+    flow = {'chain':[{'id':'7','name':'target','type':'docker'}],
+            'flag_assignments':[{'node_id':'7','inject_files':['proof.txt -> /flow_injects']}]}
+    plan = {'full_preview':{'hosts':[{'node_id':7,'ip4':'192.0.2.7/24',
+             'vulnerabilities':['webmin/CVE-2019-15107']}]}}
+    merged = app_backend._flow_merge_plan_preview_metadata(
+        flow, plan, scenario_label='Training')
+    assert merged['chain'][0]['ip4'] == '192.0.2.7/24'
+    assert merged['flag_assignments'][0]['vulnerabilities'] == ['webmin/CVE-2019-15107']
+    entry = merged['vuln_readme_entries'][0]
+    assert entry['templateVars']['NODE_IP'] == '192.0.2.7'
+    assert entry['templateVars']['ARTIFACT_PATH'] == '/flow_injects/proof.txt'
+
+
 def test_guides_and_graph_reader_preserve_explicit_evaluation_chain_when_flow_is_off(tmp_path,monkeypatch,capsys):
     import xml.etree.ElementTree as ET
     nodes, _ = sample_challenges()

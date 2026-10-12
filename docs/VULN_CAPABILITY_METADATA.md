@@ -265,7 +265,8 @@ participant and facilitator guides. Commands retain Markdown code fences and
 line breaks. No hint or walkthrough section is added when its metadata is absent.
 
 Supported substitutions are `{{NODE_IP}}` (the current target IP, without a CIDR
-suffix) and `{{NODE_NAME}}` (the current target name). Ports, paths, credentials,
+suffix), `{{NODE_NAME}}` (the current target name), and `{{ARTIFACT_PATH}}`
+(the first injected challenge artifact path for an evaluation Flow). Ports, credentials,
 and payloads must be supplied explicitly by the metadata author; ports are not
 automatically inferred or remapped. A hint or step with unresolved placeholders
 is omitted to avoid publishing an incomplete command. These vulnerability fields

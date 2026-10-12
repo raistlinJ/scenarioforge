@@ -36,6 +36,7 @@ def test_resolved_flow_gets_refreshable_saved_evaluation_task():
         "containers",
         "services",
         "ports",
+        "challenge_access",
         "injects",
         "flow_pivot",
     ]

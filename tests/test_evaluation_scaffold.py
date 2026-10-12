@@ -116,6 +116,28 @@ def test_native_export_preserves_scaffold_privately_and_each_solution(tmp_path):
     assert "FLAG_TWO" in solutions[1]["text"] and "FLAG_ONE" not in solutions[1]["text"]
 
 
+def test_export_refreshes_auto_saved_plan_from_current_guide():
+    from scenarioforge.evaluation.export import _tasks
+    flow, graph = fixture()
+    flow['flag_assignments'][0]['access_instructions'] = {
+        'title':'Retrieve proof',
+        'steps':[{'title':'Fetch','instructions':
+                  'Use curl http://192.0.2.10/proof to retrieve the result.'}],
+    }
+    saved = draft_tasks(
+        flow, graph,
+        rendered_solutions=[{'node_id':'entry','text':
+                             '### Access Instructions\nUse the stale NFS plan.'}],
+    )
+    saved[0]['challenge_plan']['source']['auto_saved_by'] = (
+        'scenarioforge-flow-save-v1'
+    )
+    _, _, metadata = _tasks(graph, 'scenario-id', saved, 'development', flow)
+    current = metadata['solve-scenario']['challenge_plan']['steps'][0]['solution']
+    assert 'curl http://192.0.2.10/proof' in current
+    assert 'stale NFS' not in current
+
+
 def test_standalone_cli_scaffold(tmp_path, monkeypatch, capsys):
     from scenarioforge import cli
 

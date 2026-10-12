@@ -406,13 +406,18 @@ the normal CLI/environment connection configuration, and confirms removal. It do
 not reset unrelated sessions, external services, or persistent volumes.
 
 
-Exports with a challenge plan require the `challenge_access` readiness check.
+Exports with a challenge plan include a `challenge_access` documentation advisory.
 It checks for a resolved target, a documented participant connection and retrieval
 procedure, unresolved placeholders, and host/container paths incorrectly used as
 service `GET` paths. A flag, an internal artifact path or a generic hint alone is
 insufficient. Missing procedures are listed per challenge in private task metadata
-and readiness.json; export still preserves a diagnostic package, but evaluation
-is blocked until corrected and re-exported. This is static documentation validation:
+and readiness.json's `advisories`; missing guides do not block a runtime-ready
+scenario. To require reviewed procedures before execution, explicitly include
+`challenge_access` in the task's `required_checks`. Failures then block evaluation
+until corrected and re-exported. This is static documentation validation:
 runtime readiness, successful exploitation and human solvability review are separate.
 Reviewed tasks can supply a concrete access procedure in their prompt or per-step
 solution. Generated task provenance also lists the steps that need access review.
+Tasks generated automatically when a Flow is saved require this check and use
+the current participant/facilitator guide renderer, so unsupported catalog
+entries are identified before the evaluation contract can run.

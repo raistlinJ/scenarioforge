@@ -26241,6 +26241,115 @@ def _enrich_flow_state_with_artifacts(flow_state: dict[str, Any]) -> dict[str, A
 
 
 
+def _flow_merge_plan_preview_metadata(
+    flow_state: dict[str, Any],
+    plan_payload: dict[str, Any] | None,
+    *,
+    scenario_label: str,
+) -> dict[str, Any]:
+    """Restore target metadata used by guides and evaluation export."""
+    if not isinstance(flow_state, dict):
+        return flow_state
+    result = dict(flow_state)
+    preview = plan_payload.get('full_preview') if isinstance(plan_payload, dict) else None
+    if not isinstance(preview, dict):
+        preview = plan_payload if isinstance(plan_payload, dict) else {}
+    hosts = preview.get('hosts') if isinstance(preview.get('hosts'), list) else []
+    by_id: dict[str, dict[str, Any]] = {}
+    for host in hosts:
+        if isinstance(host, dict):
+            node_id = str(host.get('node_id') or host.get('id') or '').strip()
+            if node_id:
+                by_id[node_id] = host
+
+    chain: list[dict[str, Any]] = []
+    for raw in result.get('chain') or []:
+        if not isinstance(raw, dict):
+            continue
+        node = dict(raw)
+        host = by_id.get(str(node.get('id') or '').strip(), {})
+        for key in ('ip4', 'ipv4', 'ip', 'address', 'interfaces', 'vulnerabilities',
+                    'is_vuln', 'is_vulnerability', 'is_vulnerable'):
+            if key in host and (key not in node or not node.get(key)):
+                node[key] = host[key]
+        chain.append(node)
+    result['chain'] = chain
+
+    chain_by_id = {str(node.get('id') or ''): node for node in chain}
+    assignments: list[dict[str, Any]] = []
+    for raw in result.get('flag_assignments') or []:
+        if not isinstance(raw, dict):
+            continue
+        assignment = dict(raw)
+        node = chain_by_id.get(str(assignment.get('node_id') or ''), {})
+        if isinstance(node.get('vulnerabilities'), list):
+            assignment['vulnerabilities'] = list(node['vulnerabilities'])
+        assignments.append(assignment)
+    result['flag_assignments'] = _flow_enrich_saved_flag_assignments(
+        assignments, chain, scenario_label=scenario_label
+    )
+
+    metadata = _load_vuln_metadata_index()
+    guidance: list[dict[str, Any]] = []
+    assignments_by_id = {
+        str(item.get('node_id') or ''): item for item in result['flag_assignments']
+        if isinstance(item, dict)
+    }
+    if metadata:
+        for position, node in enumerate(chain, 1):
+            node_id = str(node.get('id') or '')
+            assignment = assignments_by_id.get(node_id, {})
+            raw_vulns = assignment.get('vulnerabilities') or node.get('vulnerabilities') or []
+            names: list[str] = []
+            for vuln in raw_vulns if isinstance(raw_vulns, list) else []:
+                if isinstance(vuln, str):
+                    name = vuln.strip()
+                elif isinstance(vuln, dict):
+                    name = next((str(vuln.get(key) or '').strip() for key in
+                                 ('name', 'title', 'id', 'vuln', 'cve', 'cve_id', 'slug')
+                                 if str(vuln.get(key) or '').strip()), '')
+                else:
+                    name = ''
+                if name and name not in names:
+                    names.append(name)
+            artifact_paths: list[str] = []
+            for detail in assignment.get('inject_files_detail') or []:
+                if isinstance(detail, dict):
+                    path = str(detail.get('path') or detail.get('destination') or '').strip()
+                    if path and path not in artifact_paths:
+                        artifact_paths.append(path)
+            for value in assignment.get('inject_files') or []:
+                text = str(value or '').strip()
+                if '->' in text:
+                    source, destination = [part.strip() for part in text.split('->', 1)]
+                    path = destination.rstrip('/') + '/' + source.rsplit('/', 1)[-1]
+                    if path not in artifact_paths:
+                        artifact_paths.append(path)
+                elif text.startswith('/') and text not in artifact_paths:
+                    artifact_paths.append(text)
+            for name in names:
+                facts = metadata.lookup(name)
+                if not facts or (not facts.hint_levels and not facts.access_instructions):
+                    continue
+                node_ip = _first_valid_ipv4(
+                    node.get('ip4') or node.get('ipv4') or node.get('ip') or ''
+                ) or ''
+                guidance.append({
+                    'step': position,
+                    'node_id': node_id,
+                    'vulnName': name,
+                    'hint_levels': dict(facts.hint_levels),
+                    'access_instructions': dict(facts.access_instructions),
+                    'templateVars': {
+                        'NODE_IP': node_ip,
+                        'NODE_NAME': str(node.get('name') or node.get('label') or node_id),
+                        'ARTIFACT_PATH': artifact_paths[0] if artifact_paths else '',
+                    },
+                })
+    result['vuln_readme_entries'] = guidance
+    return result
+
+
 def _flow_parse_bool(value: Any, *, default: bool = False) -> bool:
     """Parse a truthy/falsey value commonly used in query args/JSON."""
     if value is None:

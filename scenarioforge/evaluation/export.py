@@ -57,6 +57,39 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
             raise ValueError('No resolved flag values; supply reviewed --evaluation-tasks definitions')
         definitions = [{'id': 'collect-flags', 'family': 'flag-collection', 'split': split,
                         'flag_nodes': sorted(flags), 'required_checks': ['containers', 'services', 'ports', 'injects']}]
+    elif flow and isinstance(definitions, list):
+        # A Flow-save contract is derived data. Rebuild its rubric, private
+        # references and step solutions from the current frozen Flow and guide,
+        # rather than carrying stale walkthrough text into access validation or
+        # the judge's reference material.
+        refreshed_definitions = []
+        for definition in definitions:
+            marker = (
+                definition.get('challenge_plan', {}).get('source', {}).get('auto_saved_by')
+                if isinstance(definition, dict) else None
+            )
+            if marker != 'scenarioforge-flow-save-v1':
+                refreshed_definitions.append(definition)
+                continue
+            try:
+                from .scaffold import draft_tasks
+                from scenarioforge.utils.guide_export import evaluation_guide_plan
+                guide_plan = evaluation_guide_plan(graph.get('scenario') or '', flow)
+                current = draft_tasks(
+                    flow, graph,
+                    checks=definition.get('required_checks'),
+                    rendered_hints=guide_plan.get('hints', []),
+                    rendered_solutions=guide_plan.get('solutions', []),
+                )[0]
+                current['id'] = definition.get('id', current['id'])
+                current['split'] = definition.get('split', current['split'])
+                current['challenge_plan']['source']['auto_saved_by'] = marker
+                refreshed_definitions.append(current)
+            except Exception:
+                # The later challenge_access check remains the fail-safe when a
+                # renderer is unavailable on a nonstandard installation.
+                refreshed_definitions.append(definition)
+        definitions = refreshed_definitions
     if not isinstance(definitions, list) or not definitions:
         raise ValueError('Task definitions must be a nonempty JSON list')
     participant, verifiers, metadata = [], {}, {}
@@ -187,6 +220,22 @@ def _tasks(graph, scenario_id, definitions, split, flow=None):
                                                labels if refs is not None else None)
             if solutions:
                 metadata[task_id]['challenge_solutions'] = solutions
+                if plan and (
+                    plan.get('source', {}).get('auto_saved_by')
+                    == 'scenarioforge-flow-save-v1'
+                ):
+                    # The rendered facilitator guide is authoritative. The
+                    # persisted scaffold can predate regenerated artifacts or
+                    # newer generator/vulnerability metadata; validating that
+                    # stale text produced false access failures and released
+                    # stale walkthroughs.
+                    latest = {
+                        str(solution.get('step_id') or ''): str(solution.get('text') or '')
+                        for solution in solutions if isinstance(solution, dict)
+                    }
+                    for step in metadata[task_id]['challenge_plan']['steps']:
+                        if latest.get(step['id']):
+                            step['solution'] = latest[step['id']]
         if discovery:
             metadata[task_id].update(discovery=True, **knowledge)
             if refs is not None:
@@ -236,26 +285,50 @@ def export_package(*, xml_path, graph, output, suite_id,
                     flow = candidate
     except (ET.ParseError, ValueError):
         pass
+    # Repair compact/legacy FlowState in memory from the frozen PlanPreview.
+    # This lets an existing saved scenario benefit from newly installed
+    # vulnerability guidance without requiring the operator to edit/resave it.
+    try:
+        from webapp import app_backend
+        plan_payload = app_backend._load_plan_preview_from_xml(
+            str(xml_path), scenario_name
+        )
+        flow = app_backend._flow_merge_plan_preview_metadata(
+            flow, plan_payload, scenario_label=scenario_name
+        )
+    except Exception:
+        pass
     tasks, verifiers, metadata = _tasks(graph, scenario_id, definitions, split, flow)
     readiness = dict(readiness) if readiness is not None else {'status': 'unverified', 'checks': []}
     from .access import access_check
     access_items = []
+    required_access_items = []
     for task in tasks:
         entry = metadata[task['id']]
         if entry.get('challenge_plan'):
             report = access_check(entry['challenge_plan'], graph, task['prompt'])
             entry['access_validation'] = report
-            entry['required_checks'] = sorted(set(entry['required_checks']) | {'challenge_access'})
-            access_items.extend(dict(item, task_id=task['id']) for item in report['items'])
+            items = [dict(item, task_id=task['id']) for item in report['items']]
+            access_items.extend(items)
+            if 'challenge_access' in entry['required_checks']:
+                required_access_items.extend(items)
     if access_items:
         failed = sum(item['status'] == 'fail' for item in access_items)
-        checks = [c for c in readiness.get('checks', []) if c.get('key') != 'challenge_access']
-        checks.append(dict(key='challenge_access', label='Challenge participant access procedures',
+        report = dict(key='challenge_access', label='Challenge participant access procedures',
             status='fail' if failed else 'pass', items=access_items,
-            summary=f'{failed} of {len(access_items)} access procedures need review' if failed else 'Documented access procedures present (static validation)'))
-        readiness['checks'] = checks
-        if failed:
-            readiness.update(ok=False, overall='fail', overall_summary=checks[-1]['summary'])
+            summary=f'{failed} of {len(access_items)} access procedures need review' if failed else 'Documented access procedures present (static validation)')
+        # Documentation quality is not evidence that the live environment is down.
+        # Retain the findings separately; only explicitly required procedures gate execution.
+        advisories = [c for c in readiness.get('advisories', []) if c.get('key') != 'challenge_access']
+        readiness['advisories'] = [*advisories, report]
+        if required_access_items:
+            failed_required = sum(item['status'] == 'fail' for item in required_access_items)
+            checks = [c for c in readiness.get('checks', []) if c.get('key') != 'challenge_access']
+            checks.append(dict(report, items=required_access_items, status='fail' if failed_required else 'pass',
+                summary=f'{failed_required} of {len(required_access_items)} required access procedures need review' if failed_required else 'Required access procedures documented (static validation)'))
+            readiness['checks'] = checks
+            if failed_required:
+                readiness.update(ok=False, overall='fail', overall_summary=checks[-1]['summary'])
     if readiness.get('xml_sha256') and readiness['xml_sha256'] != xml_hash:
         raise ValueError('Readiness XML hash does not match frozen scenario XML')
     if readiness.get('scenario') and readiness['scenario'] != scenario_name:
