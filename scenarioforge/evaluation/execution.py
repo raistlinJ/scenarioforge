@@ -72,6 +72,7 @@ def build_execution_package(*, backend, xml_path, scenario, session_id, core_cfg
         temporary.replace(archive)
     finally:
         temporary.unlink(missing_ok=True)
+    readiness = json.loads((output / 'evaluator/readiness.json').read_text())
     metadata = json.loads((output / 'evaluator/task-metadata.json').read_text())
     required = {key for task in metadata.values() for key in task['required_checks']}
     checks = {c.get('key'): c.get('status') for c in readiness.get('checks', [])}

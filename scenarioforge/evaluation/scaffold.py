@@ -248,6 +248,10 @@ def draft_tasks(
             json.dumps([rendered_hints, rendered_solutions], sort_keys=True).encode()
         ).hexdigest(),
     )
+    from .access import access_check
+    access = access_check(dict(steps=steps), graph)
+    source['access_validation'] = dict(status=access['status'], summary=access['summary'],
+        review_steps=[item['step_id'] for item in access['items'] if item['status'] == 'fail'])
     plan = validate_plan(dict(version=1, steps=steps, source=source), rubric)
     return [
         dict(

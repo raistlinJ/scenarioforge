@@ -73,7 +73,7 @@ def test_non_flag_execution_exports_frozen_judge_scaffold(build):
         assignment['resolved_outputs'] = {'Proof(token)': 'private-proof'}
     graph = _attack_graph_for_chain(chain_nodes=flow['chain'], scenario_label=build['scenario'],
                                     flag_assignments=flow['flag_assignments'])
-    tasks = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])
+    tasks = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[dict(node_id=str(n['id']), text='curl http://' + str(n['ipv4']) + '/proof') for n in graph['nodes']])
     flow['evaluation_tasks'] = tasks
     node.text = json.dumps(flow)
     root.write(build['xml_path'])

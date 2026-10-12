@@ -404,3 +404,15 @@ For controlled redeployment, `python -m scenarioforge.evaluation.reset --xml FIL
 --scenario NAME --session ID` removes only the specified owned CORE session using
 the normal CLI/environment connection configuration, and confirms removal. It does
 not reset unrelated sessions, external services, or persistent volumes.
+
+
+Exports with a challenge plan require the `challenge_access` readiness check.
+It checks for a resolved target, a documented participant connection and retrieval
+procedure, unresolved placeholders, and host/container paths incorrectly used as
+service `GET` paths. A flag, an internal artifact path or a generic hint alone is
+insufficient. Missing procedures are listed per challenge in private task metadata
+and readiness.json; export still preserves a diagnostic package, but evaluation
+is blocked until corrected and re-exported. This is static documentation validation:
+runtime readiness, successful exploitation and human solvability review are separate.
+Reviewed tasks can supply a concrete access procedure in their prompt or per-step
+solution. Generated task provenance also lists the steps that need access review.

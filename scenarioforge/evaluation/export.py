@@ -238,6 +238,24 @@ def export_package(*, xml_path, graph, output, suite_id,
         pass
     tasks, verifiers, metadata = _tasks(graph, scenario_id, definitions, split, flow)
     readiness = dict(readiness) if readiness is not None else {'status': 'unverified', 'checks': []}
+    from .access import access_check
+    access_items = []
+    for task in tasks:
+        entry = metadata[task['id']]
+        if entry.get('challenge_plan'):
+            report = access_check(entry['challenge_plan'], graph, task['prompt'])
+            entry['access_validation'] = report
+            entry['required_checks'] = sorted(set(entry['required_checks']) | {'challenge_access'})
+            access_items.extend(dict(item, task_id=task['id']) for item in report['items'])
+    if access_items:
+        failed = sum(item['status'] == 'fail' for item in access_items)
+        checks = [c for c in readiness.get('checks', []) if c.get('key') != 'challenge_access']
+        checks.append(dict(key='challenge_access', label='Challenge participant access procedures',
+            status='fail' if failed else 'pass', items=access_items,
+            summary=f'{failed} of {len(access_items)} access procedures need review' if failed else 'Documented access procedures present (static validation)'))
+        readiness['checks'] = checks
+        if failed:
+            readiness.update(ok=False, overall='fail', overall_summary=checks[-1]['summary'])
     if readiness.get('xml_sha256') and readiness['xml_sha256'] != xml_hash:
         raise ValueError('Readiness XML hash does not match frozen scenario XML')
     if readiness.get('scenario') and readiness['scenario'] != scenario_name:
