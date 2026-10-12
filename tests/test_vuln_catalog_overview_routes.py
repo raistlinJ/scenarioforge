@@ -163,6 +163,10 @@ def test_vuln_catalog_items_data_returns_active_items(monkeypatch, tmp_path):
     assert payload['items'][0]['readme_url'].endswith('/vuln_catalog_packs/readme/cat-1/vulhub/sample/README.md')
     assert payload['items'][0]['hint_levels'] == {}
     assert payload['items'][0]['access_instructions'] == {}
+    assert payload['items'][0]['guidance_audit']['status'] == 'missing'
+    assert payload['items'][0]['guidance_audit']['evaluation_ready'] is False
+    assert payload['guidance_audit']['total'] == 1
+    assert payload['guidance_audit']['ready'] == 0
 
     (item_dir / 'scenarioforge.vuln.yaml').write_text(
         'schema_version: 1\nmatch: vulhub/sample\nhint_levels:\n  medium:\n    - "Scan port 8080 on {{NODE_IP}}"\n'
@@ -171,6 +175,18 @@ def test_vuln_catalog_items_data_returns_active_items(monkeypatch, tmp_path):
     updated = client.get('/vuln_catalog_items_data').get_json()['items'][0]
     assert updated['hint_levels']['medium'] == ['Scan port 8080 on {{NODE_IP}}']
     assert updated['access_instructions']['steps'][0]['instructions'] == 'curl http://{{NODE_IP}}:8080/'
+    assert updated['guidance_audit']['status'] == 'partial'
+    assert updated['guidance_audit']['capability_ready'] is False
+
+
+def test_vuln_catalog_template_exposes_guidance_audit() -> None:
+    text = VULN_CATALOG_TEMPLATE_PATH.read_text(encoding='utf-8', errors='ignore')
+    assert '>Guidance</th>' in text
+    assert 'id="vulnGuidanceAuditDownloadBtn"' in text
+    assert 'function downloadVulnerabilityGuidanceAudit()' in text
+    assert 'has:guidance-ready' in text
+    assert 'has:guidance-missing' in text
+    assert 'Guidance ready:' in text
 
 
 

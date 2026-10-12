@@ -66,7 +66,7 @@ function Read-InstallerConfig {
         core_disk_gb = 80; app_disk_gb = 80; participant_disk_gb = 80
         core_password = ''; app_password = ''; participant_password = ''; web_admin_password = ''; ssh_public_key = ''
         core_minimal_ref = 'main'; core_ref = 'master'; scenarioforge_ref = 'main'
-        flag_generators = $false; vulnhub = $false; flag_generators_ref = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
+        flag_generators = $false; vulnhub = $false; flag_generators_ref = 'main'
     }
     if ($Path) {
         $provided = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable

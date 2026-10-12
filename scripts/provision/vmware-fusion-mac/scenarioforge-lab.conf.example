@@ -58,7 +58,7 @@ web_admin_password=
 core_minimal_ref=main
 core_ref=master
 scenarioforge_ref=main
-flag_generators_ref=5f612eecb8ff5df74a0e517d0de1e54385a62044
+flag_generators_ref=main
 
 # --- Optional lab content ---
 flag_generators=true

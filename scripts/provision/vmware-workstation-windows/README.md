@@ -259,7 +259,8 @@ repository access. The built-in defaults remain `false` when no config is suppli
 For the enabled catalogs, authenticate Git for
 `https://github.com/raistlinJ/flag-generators.git` using **Git for Windows** first.
 Git is only required for these optional catalogs; it is discovered on PATH or
-through the `git_exe` setting. The native builder archives the tested snapshot
+through the `git_exe` setting. The native builder fetches the configured ref
+(`main` by default), records the resolved commit, and archives that snapshot
 with its Unix file permissions intact. Windows transfers the archive through
 VMware Tools, and APP verifies its checksum.
 GitHub credentials are not copied into a guest.

@@ -293,8 +293,10 @@ APP after the archive is verified.
 catalog and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`; APP provisioning fails
 instead of claiming readiness unless both catalog kinds are visible. The
-default repository revision is the tested metadata snapshot
-`5f612eecb8ff5df74a0e517d0de1e54385a62044`. Its `pack.json` travels through
+default repository revision is the latest `main` revision. The installer records
+the resolved commit in its state, while `--flag-generators-ref <commit>` provides
+a reproducible pin when needed. The currently tested commit is
+`b6d3ed6b57f597521e815f8540b9433cceb7dff3`. Its `pack.json` travels through
 the normal pack importer and records 147 successfully tested generators. The
 enabled catalog contains 144 generators overall and exactly the 85 enabled
 flag-node generators exercised by the paper and resolved dataset. Three working
@@ -504,7 +506,7 @@ Every option has an `SF_` environment equivalent. Useful values include:
 | `SF_SCENARIOFORGE_REF` | `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
 | `SF_FLAG_GENERATORS_URL` | `https://github.com/raistlinJ/flag-generators.git` |
-| `SF_FLAG_GENERATORS_REF` | `5f612eecb8ff5df74a0e517d0de1e54385a62044` (tested metadata snapshot) |
+| `SF_FLAG_GENERATORS_REF` | `main` (latest; pass a commit for a reproducible pin) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 | `SF_WAIT_MINUTES` | `180` |

@@ -13,6 +13,11 @@ from .metadata import (
     metadata_filenames,
     validate_vuln_metadata_doc,
 )
+from .guidance_audit import (
+    audit_vulnerability_guidance,
+    guidance_audit_markdown,
+    summarize_guidance_audits,
+)
 
 __all__ = [
     'IMPACT_PROVIDES',
@@ -26,4 +31,7 @@ __all__ = [
     'load_vuln_metadata_index',
     'metadata_filenames',
     'validate_vuln_metadata_doc',
+    'audit_vulnerability_guidance',
+    'guidance_audit_markdown',
+    'summarize_guidance_audits',
 ]

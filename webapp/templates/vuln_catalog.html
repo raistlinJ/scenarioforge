@@ -158,6 +158,7 @@
                   <input id="vulnCatalogFilter" class="form-control" placeholder="Filter vulnerabilities…" />
                 </div>
                 <div class="col-md-6 d-flex flex-wrap align-items-center justify-content-md-end gap-3">
+                  <button class="btn btn-sm btn-outline-primary" type="button" id="vulnGuidanceAuditDownloadBtn" disabled title="Download the attack-graph, guide, and artifact-retrieval readiness check for every catalog item">Export Guidance Audit</button>
                   <button class="btn btn-sm btn-outline-secondary" type="button" id="vulnDependencyRecheckBtn">Dependency Check</button>
                   <div class="form-check mt-2 mt-md-0">
                     <input class="form-check-input" type="checkbox" id="vulnCatalogCheckAllVisible" aria-label="Select all viewable vulnerabilities">
@@ -166,6 +167,7 @@
                 </div>
               </div>
               <div class="small text-muted mt-2" id="vulnCatalogMeta"></div>
+              <div class="small text-muted mt-1">Runtime validation confirms that the recipe deploys. Guidance readiness separately checks attack-graph capability facts, progressive hints, a participant access procedure, and generated artifact retrieval.</div>
               <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
                 <div class="small text-muted" id="vulnSelectionMeta">0 selected.</div>
                 <div class="btn-group btn-group-sm" role="group" aria-label="Selected vulnerability actions">
@@ -192,6 +194,7 @@
                       <th>Name</th>
                       <th style="width: 150px;">Architecture</th>
                       <th>Description</th>
+                      <th style="width: 150px;">Guidance</th>
                       <th style="width: 140px;">Validated</th>
                       <th>Category / Source</th>
                       <th style="width: 130px;">Image Cache</th>
@@ -663,6 +666,7 @@
   const _vulnCatalogState = {
     active: null,
     items: [],
+    guidanceAudit: null,
     selectedItem: null,
     selectedItemIds: new Set(),
     activeTestRunId: null,
@@ -1287,6 +1291,8 @@
       missing.length ? `Missing compose support file${missing.length === 1 ? '' : 's'} ${missing.join(' ')}` : '',
       `ID: ${item.id ?? ''}`,
       item.readme_url ? 'README' : '—',
+      item.guidance_audit && item.guidance_audit.evaluation_ready ? 'Guidance Ready has:guidance-ready' : 'Guidance Missing has:guidance-missing',
+      ...((item.guidance_audit && Array.isArray(item.guidance_audit.issues)) ? item.guidance_audit.issues.map((issue) => `${issue.code || ''} ${issue.message || ''}`) : []),
       validation,
       item.note || '',
       item.log_download_url ? 'Log' : '',
@@ -1347,6 +1353,14 @@
       if (missingRequiredFiles.length) tr.classList.add('table-warning');
       const isSelected = !!(_vulnCatalogState.selectedItemIds && _vulnCatalogState.selectedItemIds.has(itemId));
       const logLink = it.log_download_url ? `<a class="btn btn-link btn-sm p-0 ms-2 align-baseline" href="${escapeHtml(it.log_download_url)}">Log</a>` : '';
+      const guidanceAudit = (it.guidance_audit && typeof it.guidance_audit === 'object') ? it.guidance_audit : {};
+      const guidanceIssues = Array.isArray(guidanceAudit.issues) ? guidanceAudit.issues : [];
+      const guidanceIssueText = guidanceIssues.map((issue) => String((issue && issue.message) || '')).filter(Boolean).join(' ');
+      const guidanceBadge = guidanceAudit.evaluation_ready
+        ? '<span class="badge text-bg-success">Ready</span>'
+        : (guidanceAudit.status === 'partial'
+          ? '<span class="badge text-bg-warning">Partial</span>'
+          : '<span class="badge text-bg-danger">Missing</span>');
       tr.innerHTML = `
         <td><input class="form-check-input" type="checkbox" data-role="row-select" data-item-id="${escapeHtml(itemId)}" ${isSelected ? 'checked' : ''} ${mutationsLocked ? 'disabled' : ''} aria-label="Select vulnerability ${escapeHtml(it.name || '')}"></td>
         <td class="text-muted">${idx + 1}</td>
@@ -1366,6 +1380,11 @@
         <td class="small">${architectureBadge(it)}</td>
         <td class="small">
           ${it.readme_url ? `<a href="${escapeHtml(it.readme_url)}" target="_blank" rel="noopener">README</a>` : '<span class="text-muted">—</span>'}
+        </td>
+        <td class="small" title="${escapeHtml(guidanceIssueText || 'Capability facts, progressive hints, access instructions, and artifact retrieval are complete.')}">
+          ${guidanceBadge}
+          <div class="text-muted" style="font-size:11px;">Graph ${guidanceAudit.capability_ready ? '✓' : '✗'} · Guide ${guidanceAudit.guide_ready ? '✓' : '✗'} · Artifact ${guidanceAudit.artifact_retrieval_ready ? '✓' : '✗'}</div>
+          ${guidanceIssues.length ? `<div class="text-danger-emphasis" style="font-size:11px;">${escapeHtml(String(guidanceIssues[0].message || 'Needs metadata'))}${guidanceIssues.length > 1 ? ` +${guidanceIssues.length - 1} more` : ''}</div>` : ''}
         </td>
         <td class="small">
           ${it.validated_incomplete === true
@@ -1449,7 +1468,7 @@
 
     if (!rows.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td colspan="9" class="text-muted">No vulnerabilities found.</td>`;
+      tr.innerHTML = `<td colspan="11" class="text-muted">No vulnerabilities found.</td>`;
       body.appendChild(tr);
     }
 
@@ -1482,6 +1501,7 @@
       }
       _vulnCatalogState.active = data.active || null;
       _vulnCatalogState.items = Array.isArray(data.items) ? data.items : [];
+      _vulnCatalogState.guidanceAudit = (data.guidance_audit && typeof data.guidance_audit === 'object') ? data.guidance_audit : null;
       // Architecture verdicts are relative to the host that will run the
       // scenario, so record what this deployment actually is.
       if (typeof data.host_architecture === 'string') {
@@ -1491,7 +1511,11 @@
       const src = _vulnCatalogState.active && _vulnCatalogState.active.from_source ? String(_vulnCatalogState.active.from_source) : '';
       const activeLabel = _vulnCatalogState.active && _vulnCatalogState.active.label ? String(_vulnCatalogState.active.label) : 'repo default';
       const recheckText = recheckResult ? ` • Rechecked ${Number(recheckResult.checked_count || 0)} item(s)` : '';
-      if (metaEl) metaEl.textContent = `${_vulnCatalogState.items.length} items • Active: ${activeLabel}${src ? ' • From: ' + src : ''}${recheckText}`;
+      const audit = _vulnCatalogState.guidanceAudit;
+      const auditText = audit ? ` • Guidance ready: ${Number(audit.ready || 0)} / ${Number(audit.total || 0)}` : '';
+      if (metaEl) metaEl.textContent = `${_vulnCatalogState.items.length} items • Active: ${activeLabel}${src ? ' • From: ' + src : ''}${auditText}${recheckText}`;
+      const auditDownloadBtn = _qs('vulnGuidanceAuditDownloadBtn');
+      if (auditDownloadBtn) auditDownloadBtn.disabled = !_vulnCatalogState.items.length;
       _renderVulnCatalogTable();
       try { renderVulnBatchSelectionPreview(); } catch (e) {}
     } catch (e) {
@@ -1500,6 +1524,42 @@
     } finally {
       if (recheckBtn) recheckBtn.disabled = false;
     }
+  }
+
+  function downloadVulnerabilityGuidanceAudit() {
+    const items = Array.isArray(_vulnCatalogState.items) ? _vulnCatalogState.items : [];
+    if (!items.length) return;
+    const active = _vulnCatalogState.active || {};
+    const payload = {
+      schema_version: 1,
+      generated_at: new Date().toISOString(),
+      catalog: active,
+      summary: _vulnCatalogState.guidanceAudit || {},
+      readiness_definition: {
+        attack_graph: 'Reviewed impact or explicit requires/provides capability facts.',
+        guides: 'Reviewed low, medium, and high hints plus a concrete participant access procedure.',
+        evaluation: 'Attack-graph and guide requirements plus an explicit generated artifact retrieval procedure.',
+      },
+      items: items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        category: item.category,
+        validated_ok: item.validated_ok,
+        disabled: item.disabled,
+        readme_available: !!item.readme_url,
+        guidance_audit: item.guidance_audit || {},
+      })),
+    };
+    const safeCatalog = String(active.label || active.id || 'catalog').replace(/[^A-Za-z0-9._-]+/g, '-');
+    const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${safeCatalog}-guidance-audit.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
   }
 
   const _vulnBatchStorageKey = 'coretg_vuln_batch_run_id';
@@ -3248,6 +3308,8 @@
         _appendLog('vulnCatalogLog', `Error: ${e}`);
       }
     });
+    const guidanceAuditDownloadBtn = _qs('vulnGuidanceAuditDownloadBtn');
+    if (guidanceAuditDownloadBtn) guidanceAuditDownloadBtn.addEventListener('click', downloadVulnerabilityGuidanceAudit);
     const batchFilter = _qs('vulnBatchFilter');
     if (batchFilter) batchFilter.addEventListener('input', renderVulnBatchSelectionPreview);
     const batchScope = _qs('vulnBatchScope');
@@ -3281,9 +3343,13 @@
       { label: '', key: null },
       { label: '#', key: null },
       { label: 'Name', key: 'name' },
+      { label: 'Architecture', key: null },
       { label: 'Description', key: null },
+      { label: 'Guidance', key: null },
       { label: 'Validated', key: null },
       { label: 'Category / Source', key: 'from_source' },
+      { label: 'Image Cache', key: null },
+      { label: 'Notes', key: null },
       { label: 'Actions', key: null },
     ], _renderVulnCatalogTable);
     const tab = _qs('vulnCatalogTab');

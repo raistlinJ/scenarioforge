@@ -326,8 +326,10 @@ guest.
 `--flag-generators` imports the flag and flag-node generator catalogs through
 ScenarioForge's pack importer. Their files and pack state live under
 `/opt/scenarioforge/outputs/installed_generators`, and provisioning verifies
-that both catalog kinds are visible. The default revision is the previously
-tested metadata snapshot `5f612eecb8ff5df74a0e517d0de1e54385a62044`.
+that both catalog kinds are visible. The default revision is the latest `main`
+revision; the installer records its resolved commit, and an explicit commit can
+be supplied for a reproducible install. The currently tested commit is
+`b6d3ed6b57f597521e815f8540b9433cceb7dff3`.
 Its portable `pack.json` records 147 successfully tested generators, with 144
 enabled overall and exactly the 85 enabled flag-node generators represented by
 the paper and resolved dataset. Three working samples remain catalog-disabled;
@@ -455,7 +457,7 @@ The commonly useful settings are:
 | `SF_CORE_REPO_URL` / `SF_CORE_REPO_REF` | `raistlinJ/core.git` / `master` |
 | `SF_SCENARIOFORGE_URL` / `SF_SCENARIOFORGE_REF` | `raistlinJ/scenarioforge.git` / `main` |
 | `SF_INSTALL_FLAG_GENERATORS` / `SF_INSTALL_VULNHUB` | `0` / `0` |
-| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `5f612eecb8ff5df74a0e517d0de1e54385a62044` (tested metadata snapshot) |
+| `SF_FLAG_GENERATORS_URL` / `SF_FLAG_GENERATORS_REF` | `raistlinJ/flag-generators.git` / `main` (latest; pass a commit to pin) |
 | `SF_CORE_PASSWORD` / `SF_APP_PASSWORD` | empty (generate independently) |
 | `SF_PARTICIPANT_PASSWORD` / `SF_WEB_ADMIN_PASSWORD` | empty (generate independently) |
 

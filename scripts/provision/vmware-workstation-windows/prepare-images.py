@@ -30,7 +30,7 @@ import cyber_agent_flow as caf
 import image_cache
 import hitl_gateway
 SHARED = HERE.parent / 'proxmox' / 'install-scenarioforge-lab.sh'
-TESTED_CATALOG_COMMIT = '5f612eecb8ff5df74a0e517d0de1e54385a62044'
+TESTED_CATALOG_COMMIT = 'b6d3ed6b57f597521e815f8540b9433cceb7dff3'
 CORE_HITL_CIDR = '10.254.200.3/24'
 CATALOG_URL = 'https://github.com/raistlinJ/flag-generators.git'
 IMAGES = {

@@ -184,7 +184,7 @@ Repository overrides:
   --core-minimal-ref REF       default: main
   --core-ref REF               default: master
   --scenarioforge-ref REF      default: main
-  --flag-generators-ref REF    default: tested metadata snapshot 5f612eecb8ff
+  --flag-generators-ref REF    default: latest main; pass a commit to pin the catalog
 
 When the requested HITL vmnet is unsafe or missing, an interactive install can
 propose an unused isolated replacement and confirm it before requesting macOS

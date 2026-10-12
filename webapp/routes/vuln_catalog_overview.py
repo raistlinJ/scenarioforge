@@ -170,6 +170,10 @@ def register(
             return parts[-1] if parts else base
 
         base_dir = vuln_catalog_pack_content_dir(cid)
+        from scenarioforge.vulns.guidance_audit import (
+            audit_vulnerability_guidance,
+            summarize_guidance_audits,
+        )
         from scenarioforge.vulns.metadata import load_vuln_metadata_index
         metadata_dirs = []
         for item in items:
@@ -226,9 +230,14 @@ def register(
                 except Exception:
                     log_download_url = ''
             guidance = guidance_index.lookup(item.get('dir_rel'), item.get('rel_dir'), item.get('name'), _display_name(item))
+            guidance_audit = audit_vulnerability_guidance(
+                guidance,
+                readme_available=bool(readme_url),
+            )
             out_items.append({
                 'hint_levels': guidance.hint_levels if guidance else {},
                 'access_instructions': guidance.access_instructions if guidance else {},
+                'guidance_audit': guidance_audit,
                 'id': int(item.get('id') or 0),
                 'name': _display_name(item),
                 'category': str(item.get('category') or '').strip() or None,
@@ -279,6 +288,10 @@ def register(
                 'from_source': from_source,
             },
             'host_architecture': host_arch,
+            'guidance_audit': summarize_guidance_audits(
+                item.get('guidance_audit') or {} for item in out_items
+            ),
+            'guidance_metadata_errors': guidance_index.errors,
             'items': out_items,
         })
 

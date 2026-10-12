@@ -200,6 +200,35 @@ python scripts/scaffold_vuln_metadata.py --all --output vuln_metadata.yaml
 python scripts/scaffold_vuln_metadata.py --include-unvalidated --force
 ```
 
+Audit the active catalog after filling the scaffold:
+
+```bash
+python scripts/audit_vuln_guidance.py \
+  --json-output outputs/vulnerability-guidance-audit.json \
+  --markdown-output outputs/vulnerability-guidance-audit.md
+```
+
+The audit reports three independent readiness areas:
+
+- **Attack graph:** reviewed `impact` or explicit `requires`/`provides` facts.
+- **Guides:** nonempty low, medium, and high hints plus a concrete participant
+  procedure that targets `{{NODE_IP}}` or `{{NODE_NAME}}`.
+- **Evaluation:** the preceding requirements plus an exploit/retrieval step
+  containing `{{ARTIFACT_PATH}}`, so the walkthrough retrieves the artifact
+  generated for this particular run rather than merely reproducing the CVE.
+
+Catalog authors can check a source tree before packaging it and fail CI on
+incomplete entries:
+
+```bash
+python scripts/audit_vuln_guidance.py --catalog-dir ../flag-generators/vulnhub/content --check
+```
+
+The Vulnerability Catalog page runs the same audit for the active installed
+catalog, shows each item's Graph/Guide/Artifact verdict, supports the filter
+tokens `has:guidance-ready` and `has:guidance-missing`, and exports the full
+JSON audit.
+
 Fill in the real impact per entry, then require coverage:
 
 ```bash

@@ -55,8 +55,10 @@ SCENARIOFORGE_URL="${SF_SCENARIOFORGE_URL:-https://github.com/raistlinJ/scenario
 SCENARIOFORGE_REF="${SF_SCENARIOFORGE_REF:-main}"
 CORE_USE_SYSTEMD_RESOLVED_STUB="${SF_CORE_USE_SYSTEMD_RESOLVED_STUB:-0}"
 FLAG_GENERATORS_URL="${SF_FLAG_GENERATORS_URL:-https://github.com/raistlinJ/flag-generators.git}"
-TESTED_FLAG_GENERATORS_COMMIT="5f612eecb8ff5df74a0e517d0de1e54385a62044"
-FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-$TESTED_FLAG_GENERATORS_COMMIT}"
+TESTED_FLAG_GENERATORS_COMMIT="b6d3ed6b57f597521e815f8540b9433cceb7dff3"
+# Follow the catalog's latest main revision by default. The resolved commit is
+# still recorded in state, and operators can pin any ref for reproducible labs.
+FLAG_GENERATORS_REF="${SF_FLAG_GENERATORS_REF:-main}"
 FLAG_GENERATORS_RESOLVED_COMMIT=""
 INSTALL_FLAG_GENERATORS="${SF_INSTALL_FLAG_GENERATORS:-0}"
 INSTALL_VULNHUB="${SF_INSTALL_VULNHUB:-0}"
@@ -417,7 +419,7 @@ Repository overrides:
   --core-minimal-ref REF       Default: main
   --core-ref REF               Default: master
   --scenarioforge-ref REF      Default: main
-  --flag-generators-ref REF    Default: tested metadata snapshot 5f612eecb8ff
+  --flag-generators-ref REF    Default: latest main; pass a commit to pin the catalog
 
 Environment variables with the SF_ prefix can set every default; see
 scripts/provision/proxmox/README.md for the complete list and config-file format.
