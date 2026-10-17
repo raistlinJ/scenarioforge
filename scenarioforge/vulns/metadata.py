@@ -216,6 +216,7 @@ class VulnFacts:
     source_path: str = ''
     hint_levels: Dict[str, List[str]] = field(default_factory=dict)
     access_instructions: Dict[str, Any] = field(default_factory=dict)
+    success: Dict[str, str] = field(default_factory=dict)
 
     @property
     def canonical_requires(self) -> Set[str]:
@@ -463,6 +464,17 @@ def validate_vuln_metadata_doc(
             if steps:
                 access_instructions = {'title': str(raw_access.get('title') or 'Walkthrough'), 'steps': steps}
 
+        success = {}
+        if 'success' in raw:
+            raw_success = raw.get('success')
+            if not isinstance(raw_success, dict) or set(raw_success) != {'objective', 'evidence'}:
+                errors.append(f'{label}.success must contain objective and evidence')
+            elif any(not isinstance(raw_success.get(key), str) or not raw_success[key].strip()
+                     or len(raw_success[key].strip()) > 2000 for key in ('objective', 'evidence')):
+                errors.append(f'{label}.success objective and evidence must be nonempty strings up to 2000 characters')
+            else:
+                success = {key: raw_success[key].strip() for key in ('objective', 'evidence')}
+
         records.append(
             VulnFacts(
                 key=key or cve_value,
@@ -474,6 +486,7 @@ def validate_vuln_metadata_doc(
                 source_path=source,
                 hint_levels=hint_levels,
                 access_instructions=access_instructions,
+                success=success,
             )
         )
 

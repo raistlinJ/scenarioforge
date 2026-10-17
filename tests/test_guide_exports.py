@@ -66,6 +66,10 @@ def sample_challenges():
         "hint_levels": {"low": ["The event account is analyst.", "Inspect the response headers."], "medium": ["Look for a token in the response."], "high": ["Use the discovered token on the protected endpoint."]},
         "promoted_first_step_hint_lines": ["The event account is analyst."],
         "chain_supplied_input_hints": ["The event account is analyst."],
+        "success": {
+            "objective": "Recover the service token from {{THIS_NODE_NAME}} at {{NODE_IP}}.",
+            "evidence": "Provide the successful request and response containing the token.",
+        },
     } for i in range(1, 4)]
     assignments[1]["pivot_decisions"] = [{
         "disposition": "own_step", "insert_before": 1, "subnet": "10.30.0.0/24",
@@ -101,6 +105,9 @@ def test_guides_keep_task_flow_and_audience_boundaries(name, tmp_path):
         assert '<summary>Hint Low</summary>' in html
         assert not re.search(r"<summary>[^<]*Inspect the response headers", html)
         assert "The event account is analyst." in html
+        assert "Recover the service token from Challenge 1 at 10.20.0.11." in html
+        assert "Evidence of success" in html
+        assert "successful request and response" in html
         assert "10.20.0.2/24" in html
         assert 'Training &lt;lab&gt;' in html
         # Direct navigation to the second step must include its prerequisite.

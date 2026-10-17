@@ -469,6 +469,8 @@ def test_build_generator_scaffold_accepts_runtime_inputs_and_generator_override(
     assert 'name: node_name' in manifest_yaml
     assert 'required: false' in manifest_yaml
     assert 'flow_supply_when_first: true' in manifest_yaml
+    assert 'success:' in manifest_yaml
+    assert 'Recover the challenge flag through the exposed service' in manifest_yaml
     assert '    - File(path)' in manifest_yaml
     assert scaffold_files['flag_node_generators/py_token_gate/generator.py'] == 'print("hello from override")\n'
 
@@ -518,6 +520,7 @@ def test_build_generator_scaffold_preserves_access_instructions_and_candidate_pa
     manifest_doc = yaml.safe_load(manifest_yaml) or {}
     assert manifest_doc['inject_candidate_paths'] == ['/srv/share', '/var/www/html', '/opt/uploads']
     assert manifest_doc['access_instructions']['steps'][0]['vars']['PORT'] == 'PortForward(host, port)'
+    assert set(manifest_doc['success']) == {'objective', 'evidence'}
 
 
 def test_generator_ai_scaffold_normalizes_model_output(monkeypatch):

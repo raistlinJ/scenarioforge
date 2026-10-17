@@ -240,3 +240,96 @@ def test_future_non_flag_answers_are_withheld_from_current_walkthrough():
         "FUTURE_TOKEN" not in solutions[0]["text"]
         and "FUTURE_TOKEN" in solutions[1]["text"]
     )
+
+
+@pytest.mark.parametrize("flag_value", [None, "PRIVATE_FLAG"])
+def test_briefing_uses_goal_instead_of_artifact_wiring(flag_value):
+    flow = dict(chain=[dict(id="web", name="Web", ipv4="192.0.2.20")],
+                flag_assignments=[dict(node_id="web", flag_value=flag_value,
+                    resolved_outputs={"Flag(flag_id)": "PRIVATE_FLAG", "FlagDelivery(mode)": "file",
+                                      "FlagFile(path)": "/hidden/flag", "PortForward(host, port)": "11521",
+                                      "Version(service)": "PRIVATE_VERSION", "Credential(user, password)": "PRIVATE_CREDENTIAL"})])
+    graph = graph_from_flow(flow, "Lab")
+    task = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])[0]
+    requirement = task["rubric"]["criteria"][0]["requirement"]
+    assert requirement == "Recover the challenge flag on Web at 192.0.2.20."
+    assert "Enumerate exposed services" in task["prompt"]
+    assert "partial" in task["prompt"]
+    assert task["challenge_plan"]["source"]["objective_review_steps"] == []
+    public = task["prompt"] + requirement
+    for private in ("PRIVATE_FLAG", "PRIVATE_CREDENTIAL", "/hidden/flag", "11521", "FlagDelivery", "Version(service)"):
+        assert private not in public
+
+
+def test_briefing_and_rubric_use_the_catalog_success_contract():
+    flow = dict(chain=[dict(id="web", name="Web", ipv4="192.0.2.20")],
+                flag_assignments=[dict(node_id="web", flag_value="PRIVATE_FLAG",
+                    success={"objective": "Recover the service token from {{THIS_NODE_NAME}} at {{NODE_IP}}.",
+                             "evidence": "Provide the successful request and response containing the token."},
+                    resolved_outputs={"Flag(flag_id)": "PRIVATE_FLAG"})])
+    task = draft_tasks(flow, graph_from_flow(flow, "Lab"), rendered_hints=[], rendered_solutions=[])[0]
+    criterion = task["rubric"]["criteria"][0]
+    assert criterion["requirement"].startswith("Recover the service token from Web at 192.0.2.20")
+    assert criterion["evidence"] == "Provide the successful request and response containing the token."
+
+
+def test_briefing_keeps_flow_context_and_dependency_goals_with_slim_graph():
+    flow, graph = fixture()
+    flow["flag_assignments"][0]["description"] = "A service with a credential leak. Password: PASSWORD_ONE."
+    # Real exported graphs omit descriptions, and may have an empty name.
+    graph["nodes"][0]["generator"] = dict(graph["nodes"][0]["generator"], name="")
+    task = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])[0]
+    first, second = task["rubric"]["criteria"]
+    assert "recover the challenge credentials" in first["requirement"]
+    assert "A service with a credential leak" in first["requirement"]
+    assert "PASSWORD_ONE" not in first["requirement"]
+    assert "Prerequisites: complete step-001 first" in second["requirement"]
+    assert "Credential(password)" not in first["requirement"]
+
+
+def test_non_flag_objective_is_actionable_without_leaking_nested_values():
+    flow = dict(chain=[dict(id="auth", name="Login", ipv4="192.0.2.30")],
+                flag_assignments=[dict(node_id="auth", description="Recover user PRIVATE_USER and PRIVATE_PASSWORD.",
+                    resolved_outputs={"Credential(user, password)": {"user": "PRIVATE_USER", "password": "PRIVATE_PASSWORD"},
+                                      "PortForward(host, port)": 22})])
+    task = draft_tasks(flow, graph_from_flow(flow, "Lab"), rendered_hints=[], rendered_solutions=[])[0]
+    requirement = task["rubric"]["criteria"][0]["requirement"]
+    assert requirement.startswith("Recover the challenge credentials on Login at 192.0.2.30.")
+    assert "PRIVATE_USER" not in requirement and "PRIVATE_PASSWORD" not in requirement
+
+
+def test_briefing_preserves_authored_objective_and_withholds_walkthrough():
+    flow, graph = fixture()
+    graph["nodes"][0]["objective"] = "Demonstrate authenticated access to the portal."
+    task = draft_tasks(flow, graph, rendered_hints=[dict(node_id="entry", text="PRIVATE_HINT")],
+                       rendered_solutions=[dict(node_id="entry", text="PRIVATE_WALKTHROUGH")])[0]
+    requirement = task["rubric"]["criteria"][0]["requirement"]
+    assert requirement.startswith("Demonstrate authenticated access to the portal.")
+    assert "Target: Entry at 192.0.2.10" in requirement
+    assert "PRIVATE_HINT" not in task["prompt"] + requirement
+    assert "PRIVATE_WALKTHROUGH" not in task["prompt"] + requirement
+
+
+def test_fallback_graph_preserves_only_explicit_starting_facts(tmp_path):
+    flow, _ = fixture()
+    flow["starting_facts"] = [dict(id="entry-address", artifact="Knowledge(ip)", value="192.0.2.10")]
+    flow["flag_assignments"][0]["chain_supplied_input_values"] = {"Credential(user, password)": "PUBLIC_LOGIN"}
+    graph = graph_from_flow(flow, "Lab")
+    tasks = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])
+    xml = tmp_path / "lab.xml"
+    xml.write_text('<Scenarios><Scenario name="Lab"/></Scenarios>')
+    export_package(xml_path=xml, graph=graph, definitions=tasks, output=tmp_path / "package", suite_id="briefing")
+    public = json.loads((tmp_path / "package/participant/tasks.json").read_text())[0]["prompt"]
+    assert "PUBLIC\\_LOGIN" in public and "192.0.2.10" in public
+    assert "PASSWORD_ONE" not in public and "FLAG_ONE" not in public
+
+
+def test_unknown_goal_is_marked_for_review_and_discovery_does_not_publish_targets():
+    flow, graph = fixture()
+    flow["discovery"] = True
+    graph["nodes"][0]["generator"] = {"description": "Private target 192.0.2.10", "resolved_outputs": {"Version(service)": "1.2"}}
+    flow["flag_assignments"][0] = dict(node_id="entry")
+    task = draft_tasks(flow, graph, rendered_hints=[], rendered_solutions=[])[0]
+    public = task["prompt"] + " ".join(c["requirement"] for c in task["rubric"]["criteria"])
+    assert "192.0.2.10" not in public and "192.0.2.11" not in public
+    assert task["challenge_plan"]["source"]["objective_review_steps"] == ["step-001"]

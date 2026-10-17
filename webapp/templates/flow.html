@@ -13726,13 +13726,7 @@ function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options
       const resolvedInputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_inputs));
       const resolvedOutputs = filterGuideEntries(normalizeObjectEntries(assignment.resolved_outputs));
       const resolvedInjects = normalizeGuidePathArtifacts(assignment);
-
-
-      lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
-      lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
-      lines.push('');
-      lines.push(`Objective: Complete the challenge on ${nodeName} and record evidence of your result.`);
-      lines.push('');
+      const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
 
       const ipCandidates = [
         String((node && (node.ip4 || node.ipv4 || node.ip || node.address)) || '').trim(),
@@ -13741,6 +13735,26 @@ function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options
       ].filter(Boolean);
       const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
       const guideContext = { nodeName, nodeIp, nodeId };
+      const assignmentSuccess = (assignment.success && typeof assignment.success === 'object') ? assignment.success : {};
+      const vulnerabilitySuccess = stepVulnReadmes
+        .map((entry) => (entry.success && typeof entry.success === 'object') ? entry.success : null)
+        .find(Boolean) || {};
+      const success = Object.keys(vulnerabilitySuccess).length ? vulnerabilitySuccess : assignmentSuccess;
+      const objective = resolveFlowGuideTemplateText(
+        String(success.objective || `Complete the challenge on ${nodeName}.`), assignment, guideContext
+      );
+      const evidence = resolveFlowGuideTemplateText(
+        String(success.evidence || 'Record the successful tool request or command and the resulting target output.'), assignment, guideContext
+      );
+
+      lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
+      lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
+      lines.push('');
+      lines.push(`**Objective:** ${objective}`);
+      lines.push('');
+      lines.push(`**Evidence of success:** ${evidence}`);
+      lines.push('');
+
       hint = renderGuideHintLine(hint, assignment, guideContext);
       allHints = allHints.map((value) => renderGuideHintLine(value, assignment, guideContext)).filter(Boolean);
       descHints = descHints.map((value) => renderGuideHintLine(value, assignment, guideContext)).filter(Boolean);
@@ -14034,7 +14048,6 @@ function buildParticipantGuideMarkdown(scenarioName, chain, assignments, options
         });
       }
 
-      const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
       lines.push(...vulnerabilityGuidanceMarkdown(stepVulnReadmes));
       if (facilitatorMode && stepVulnReadmes.some(entry => entry.content)) {
         lines.push('### Publicly available documentation');

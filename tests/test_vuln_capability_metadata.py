@@ -863,10 +863,13 @@ def test_optional_guidance_preserves_commands_and_capabilities():
         'match': 'demo', 'impact': 'remote_code_execution',
         'hint_levels': {'high': [command]},
         'access_instructions': {'steps': [{'title': 'Inspect', 'instructions': command}]},
+        'success': {'objective': 'Demonstrate code execution on {{NODE_NAME}}.',
+                    'evidence': 'Provide the command and returned output.'},
     }]})
     assert not errors
     assert records[0].hint_levels == {'high': [command]}
     assert records[0].access_instructions['steps'][0]['instructions'] == command
+    assert records[0].success['objective'].startswith('Demonstrate code execution')
     assert 'Shell(host)' in records[0].provides
 
 
@@ -878,4 +881,14 @@ def test_invalid_optional_guidance_does_not_drop_capabilities():
     assert len(errors) == 2
     assert records[0].hint_levels == {}
     assert records[0].access_instructions == {}
+    assert 'Shell(host)' in records[0].provides
+
+
+def test_invalid_success_contract_does_not_drop_capabilities():
+    records, errors = validate_vuln_metadata_doc({'schema_version': 1, 'vulns': [{
+        'match': 'demo', 'impact': 'remote_code_execution',
+        'success': {'objective': 'Missing evidence'},
+    }]})
+    assert errors == ['vulns[0].success must contain objective and evidence']
+    assert records[0].success == {}
     assert 'Shell(host)' in records[0].provides

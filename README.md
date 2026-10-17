@@ -466,3 +466,19 @@ Review the resulting `evaluation-tasks.json` before using it with `--evaluation-
 The WebUI persists this generated contract automatically whenever it saves a
 resolved Flow. Later Flow changes refresh only tasks marked as ScenarioForge
 generated; explicitly supplied `evaluation_tasks` remain authoritative.
+
+Generated evaluation briefings express challenge goals in plain language (for
+example, recover a flag or obtain a credential), identify the target and any
+prerequisite challenges, and explain what observed evidence to report. Generator
+delivery modes, ports, paths and version fields are not automatically treated as
+success objectives. Explicit starting facts and chain-supplied inputs are included;
+walkthroughs, unreleased hints and discovered answer values remain private.
+Authored objectives take precedence. If no supported goal can be inferred, the
+plan's `source.objective_review_steps` identifies the steps needing an authored
+objective. Saving a resolved Flow or exporting its automatically generated task
+refreshes the briefing; existing frozen experiment runs retain their original input.
+
+Generator manifests and vulnerability sidecars may define a public `success`
+contract with `objective` and `evidence` strings. ScenarioForge renders that
+same contract in participant/facilitator guides and in judge-backed evaluation
+criteria. Hints, walkthroughs and answers remain separate private assistance.

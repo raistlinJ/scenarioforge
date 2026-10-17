@@ -1991,13 +1991,6 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     const resolvedInjects = normalizeGuidePathArtifacts(assignment);
     const stepVulnReadmes = vulnReadmesByStep.get(step) || [];
 
-
-    lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
-    lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
-    lines.push('');
-    lines.push(`Objective: Complete the challenge on ${nodeName} and record evidence of your result.`);
-    lines.push('');
-
     const ipCandidates = [
       String((node && (node.ip4 || node.ipv4 || node.ip || node.address)) || '').trim(),
       ...resolvedInputs.filter(([k]) => /ip/i.test(String(k || ''))).map(([, v]) => String(v || '').trim()),
@@ -2005,6 +1998,26 @@ function buildReportGuideMarkdown(scenarioName, chain, assignments, options) {
     ].filter(Boolean);
     const nodeIp = ipCandidates.length ? ipCandidates[0] : 'unknown';
     const guideContext = { nodeName, nodeIp, nodeId };
+    const assignmentSuccess = (assignment.success && typeof assignment.success === 'object') ? assignment.success : {};
+    const vulnerabilitySuccess = stepVulnReadmes
+      .map((entry) => (entry.success && typeof entry.success === 'object') ? entry.success : null)
+      .find(Boolean) || {};
+    const success = Object.keys(vulnerabilitySuccess).length ? vulnerabilitySuccess : assignmentSuccess;
+    const objective = resolveReportGuideTemplateText(
+      String(success.objective || `Complete the challenge on ${nodeName}.`), assignment, guideContext
+    );
+    const evidence = resolveReportGuideTemplateText(
+      String(success.evidence || 'Record the successful tool request or command and the resulting target output.'), assignment, guideContext
+    );
+
+    lines.push(`<details class="guide-step" id="guide-step-${step}"${step === 1 ? ' open' : ''}>`);
+    lines.push(`<summary>Step ${step}: ${_cell(nodeName)}</summary>`);
+    lines.push('');
+    lines.push(`**Objective:** ${objective}`);
+    lines.push('');
+    lines.push(`**Evidence of success:** ${evidence}`);
+    lines.push('');
+
     hint = applyGuideHintIps(resolveReportGuideTemplateText(hint, assignment, guideContext));
     allHints = allHints.map((value) => applyGuideHintIps(resolveReportGuideTemplateText(value, assignment, guideContext))).filter(Boolean);
     descHints = descHints.map((value) => applyGuideHintIps(resolveReportGuideTemplateText(value, assignment, guideContext))).filter(Boolean);

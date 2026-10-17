@@ -21979,6 +21979,12 @@ def _flow_compute_flag_assignments(
             'id': str(gen.get('id') or ''),
             'name': str(gen.get('name') or ''),
             'description': str(gen.get('description') or ''),
+            'success': {
+                key: str((gen.get('success') or {}).get(key) or '').strip()
+                for key in ('objective', 'evidence')
+                if isinstance(gen.get('success'), dict)
+                and str((gen.get('success') or {}).get(key) or '').strip()
+            },
             'type': str(gen.get('_flow_kind') or 'flag-generator'),
             'flag_generator': str(gen.get('_source_name') or '').strip() or 'unknown',
             'generator_catalog': str(gen.get('_flow_catalog') or 'flag_generators'),
@@ -25494,6 +25500,20 @@ def _flow_enrich_saved_flag_assignments(
             except Exception:
                 pass
 
+        # Public objective/evidence contract shared by guides and evaluation.
+        try:
+            existing_success = a2.get('success')
+            if not (isinstance(existing_success, dict) and existing_success.get('objective') and existing_success.get('evidence')):
+                catalog_success = (gen_def or {}).get('success') if isinstance(gen_def, dict) else None
+                if isinstance(catalog_success, dict):
+                    a2['success'] = {
+                        key: str(catalog_success.get(key) or '').strip()
+                        for key in ('objective', 'evidence')
+                        if str(catalog_success.get(key) or '').strip()
+                    }
+        except Exception:
+            pass
+
         # Ensure description hints exist (if the catalog provides them).
         try:
             existing = a2.get('description_hints')
@@ -26329,7 +26349,8 @@ def _flow_merge_plan_preview_metadata(
                     artifact_paths.append(text)
             for name in names:
                 facts = metadata.lookup(name)
-                if not facts or (not facts.hint_levels and not facts.access_instructions):
+                facts_success = getattr(facts, 'success', {}) if facts else {}
+                if not facts or (not facts.hint_levels and not facts.access_instructions and not facts_success):
                     continue
                 node_ip = _first_valid_ipv4(
                     node.get('ip4') or node.get('ipv4') or node.get('ip') or ''
@@ -26340,6 +26361,7 @@ def _flow_merge_plan_preview_metadata(
                     'vulnName': name,
                     'hint_levels': dict(facts.hint_levels),
                     'access_instructions': dict(facts.access_instructions),
+                    'success': dict(facts_success),
                     'templateVars': {
                         'NODE_IP': node_ip,
                         'NODE_NAME': str(node.get('name') or node.get('label') or node_id),
@@ -48151,6 +48173,19 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
 
     display_name = str(payload.get('name') or '').strip() or plugin_id
     description = str(payload.get('description') or '').strip() or f"Generator {plugin_id}"
+    raw_success = payload.get('success') if isinstance(payload.get('success'), dict) else {}
+    success = {
+        'objective': str(raw_success.get('objective') or (
+            'Recover the challenge flag through the exposed service on {{THIS_NODE_NAME}}.'
+            if plugin_type == 'flag-node-generator'
+            else 'Recover the challenge flag from the generated artifact on {{THIS_NODE_NAME}}.'
+        )).strip(),
+        'evidence': str(raw_success.get('evidence') or (
+            'Provide the successful tool request or command and the target response or output containing the recovered flag.'
+            if plugin_type == 'flag-node-generator'
+            else 'Provide tool output showing how the artifact was retrieved, inspected or decoded and the exact flag that was recovered.'
+        )).strip(),
+    }
 
     requires, optional_requires = _normalize_requires_with_optional(payload)
     produces = _split_artifact_list(payload.get('produces'))
@@ -48190,6 +48225,9 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
         f"name: {display_name}\n"
         f"description: {description}\n"
         f"version: {json.dumps(manifest_version_value)}\n"
+        "success:\n"
+        f"  objective: {json.dumps(success['objective'])}\n"
+        f"  evidence: {json.dumps(success['evidence'])}\n"
         "\n"
         "runtime:\n"
         "  type: docker-compose\n"
