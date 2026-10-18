@@ -306,3 +306,19 @@ The catalog and matching vulnerability entry must remain available. The existing
 README reference section remains facilitator-only and is labeled **Publicly
 available documentation**. README text is not converted into participant hints
 or walkthrough steps automatically.
+
+## Evidence-grounded teammate assistance
+
+Evaluator-ready vulnerability records also include an `assistance` version 1
+contract. Its ordered hint objects require `tier`, `sequence`,
+`interpretation`, `next_action`, and `success_signal`; the solution references
+either `access_instructions` or `hint_levels.high` and sets `include_answer`.
+ScenarioForge stores this metadata in the resolved Flow and freezes rendered,
+answer-safe coaching in the private challenge plan. The progress judge adds
+only cited runtime observations and never authors the exploit procedure.
+
+The catalog normalizer uses `hint_levels.<tier>[<index>]` and
+`success.evidence` references so one reviewed source drives the guides and the
+evaluator. ScenarioForge resolves the references while building the private
+challenge plan and retains up to twelve authored entries per challenge, subject
+to the whole-plan size bound for large chains.

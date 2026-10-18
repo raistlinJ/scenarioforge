@@ -23,6 +23,13 @@ def test_complete_guidance_is_ready_for_graph_guides_and_evaluation() -> None:
                 'instructions': 'curl http://{{NODE_IP}}/run?cmd=cat%20{{ARTIFACT_PATH}}',
             }],
         },
+        assistance={'version': 1, 'hints': [{
+            'tier': 'low', 'sequence': 1,
+            'interpretation': 'The service is reachable.',
+            'next_action': 'Inspect it.',
+            'success_signal': 'The response contains command output.',
+        }], 'solution': {'source': 'access_instructions', 'include_answer': True,
+                         'success_signal': 'The response contains command output.'}},
         source_path='/catalog/vuln_metadata.yaml',
     )
 
@@ -46,6 +53,7 @@ def test_missing_metadata_reports_every_required_area() -> None:
         'missing_metadata',
         'missing_progressive_hints',
         'missing_access_instructions',
+        'missing_teammate_assistance',
     }
 
 
@@ -70,6 +78,7 @@ def test_partial_metadata_explains_target_and_artifact_gaps() -> None:
     assert {issue['code'] for issue in audit['issues']} == {
         'missing_target_placeholder',
         'missing_artifact_retrieval',
+        'missing_teammate_assistance',
     }
 
 

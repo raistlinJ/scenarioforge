@@ -19,6 +19,17 @@ def fixture():
                 node_id="entry",
                 flag_value="FLAG_ONE",
                 resolved_outputs={"Credential(password)": "PASSWORD_ONE"},
+                assistance={
+                    "version": 1,
+                    "hints": [{
+                        "tier": "low", "sequence": 1,
+                        "interpretation": "The login page is the current evidence source.",
+                        "next_action": "Inspect the login page.",
+                        "success_signal": "Tool output contains the recovered flag.",
+                    }],
+                    "solution": {"source": "hint_levels.high", "include_answer": True,
+                                 "success_signal": "Tool output contains the recovered flag."},
+                },
             ),
             dict(
                 node_id="target",
@@ -62,10 +73,57 @@ def test_draft_separates_private_references_and_maps_dependencies():
     )
     assert all(s not in public for s in ["FLAG_ONE", "FLAG_TWO", "PASSWORD_ONE"])
     steps = task["challenge_plan"]["steps"]
+    coaching = steps[0]["coaching"][0]
+    assert {key: coaching[key] for key in ("tier", "sequence", "interpretation", "next_action", "source")} == {
+        "tier": "low", "sequence": 1,
+        "interpretation": "The login page is the current evidence source.",
+        "next_action": "Inspect the login page.",
+        "source": "catalog_assistance",
+    }
+    assert coaching["success_signal"].startswith("Successful tool arguments and responses")
     assert steps[1]["requires"] == [steps[0]["id"]]
     assert "FLAG_ONE" in steps[0]["solution"] and "FLAG_TWO" not in steps[0]["solution"]
     assert "FLAG_TWO" in task["rubric"]["criteria"][1]["private_reference"]
     validate_plan(task["challenge_plan"], task["rubric"])
+
+
+def test_draft_preserves_dense_catalog_coaching_up_to_twelve_entries():
+    count = 11
+    flow = {
+        "chain": [{"id": "target", "name": "Target", "ipv4": "192.0.2.11"}],
+        "flag_assignments": [{
+            "node_id": "target",
+            "assistance": {
+                "version": 1,
+                "hints": [{
+                    "tier": "low" if index < 2 else "medium" if index < 5 else "high",
+                    "sequence": index + 1,
+                    "interpretation": f"Evidence assessment {index + 1}.",
+                    "next_action": f"hint_levels.high[{index}]",
+                    "success_signal": "success.evidence",
+                } for index in range(count)],
+                "solution": {
+                    "source": "hint_levels.high",
+                    "include_answer": True,
+                    "success_signal": "success.evidence",
+                },
+            },
+        }],
+    }
+    graph = graph_from_flow(flow, "Lab")
+    task = draft_tasks(
+        flow,
+        graph,
+        rendered_hints=[
+            {"node_id": "target", "text": f"Authored action {index + 1}."}
+            for index in range(count)
+        ],
+    )[0]
+
+    coaching = task["challenge_plan"]["steps"][0]["coaching"]
+    assert len(coaching) == count
+    assert coaching[-1]["sequence"] == count
+    assert coaching[-1]["next_action"] == f"Authored action {count}."
 
 
 def test_flow_graph_and_draft_use_generator_resolved_target_address():

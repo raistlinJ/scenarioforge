@@ -95,6 +95,20 @@ def audit_vulnerability_guidance(
             + ', '.join(missing_hint_levels) + '.',
         })
 
+    assistance_ready = bool(
+        facts
+        and isinstance(facts.assistance, dict)
+        and facts.assistance.get('version') == 1
+        and facts.assistance.get('hints')
+        and isinstance(facts.assistance.get('solution'), dict)
+    )
+    if not assistance_ready:
+        issues.append({
+            'code': 'missing_teammate_assistance',
+            'area': 'evaluation',
+            'message': 'Add version 1 assistance hints and a solution source for evidence-grounded teammate coaching.',
+        })
+
     steps, access_text = _access_text(facts)
     access_ready = bool(steps)
     if not steps:
@@ -142,7 +156,7 @@ def audit_vulnerability_guidance(
         })
 
     guide_ready = hints_ready and access_ready
-    evaluation_ready = capability_ready and guide_ready and artifact_ready
+    evaluation_ready = capability_ready and guide_ready and artifact_ready and assistance_ready
     if evaluation_ready:
         status = 'ready'
     elif facts is None:
@@ -154,6 +168,7 @@ def audit_vulnerability_guidance(
         'status': status,
         'capability_ready': capability_ready,
         'hints_ready': hints_ready,
+        'assistance_ready': assistance_ready,
         'access_ready': access_ready,
         'artifact_retrieval_ready': artifact_ready,
         'guide_ready': guide_ready,
@@ -182,6 +197,7 @@ def summarize_guidance_audits(audits: Iterable[dict[str, Any]]) -> dict[str, Any
         'ready': sum(bool(row.get('evaluation_ready')) for row in rows),
         'attack_graph_ready': sum(bool(row.get('capability_ready')) for row in rows),
         'guide_ready': sum(bool(row.get('guide_ready')) for row in rows),
+        'assistance_ready': sum(bool(row.get('assistance_ready')) for row in rows),
         'artifact_retrieval_ready': sum(bool(row.get('artifact_retrieval_ready')) for row in rows),
         'partial': statuses.get('partial', 0),
         'missing': statuses.get('missing', 0),
@@ -196,11 +212,11 @@ def guidance_audit_markdown(*, catalog: str, items: Iterable[dict[str, Any]]) ->
     lines = [
         f'# Vulnerability guidance audit: {catalog}',
         '',
-        '| Catalog items | Evaluation ready | Attack graph ready | Guide ready | Artifact retrieval ready |',
-        '| ---: | ---: | ---: | ---: | ---: |',
-        f"| {summary['total']} | {summary['ready']} | {summary['attack_graph_ready']} | {summary['guide_ready']} | {summary['artifact_retrieval_ready']} |",
+        '| Catalog items | Evaluation ready | Attack graph ready | Guide ready | Teammate coaching ready | Artifact retrieval ready |',
+        '| ---: | ---: | ---: | ---: | ---: | ---: |',
+        f"| {summary['total']} | {summary['ready']} | {summary['attack_graph_ready']} | {summary['guide_ready']} | {summary['assistance_ready']} | {summary['artifact_retrieval_ready']} |",
         '',
-        'An item is evaluation ready only when it has reviewed capability facts, low/medium/high hints, a concrete participant access procedure, and an artifact retrieval procedure.',
+        'An item is evaluation ready only when it has reviewed capability facts, low/medium/high hints, structured teammate coaching, a concrete participant access procedure, and an artifact retrieval procedure.',
         '',
         '| ID | Vulnerability | Status | Missing requirements |',
         '| ---: | --- | --- | --- |',

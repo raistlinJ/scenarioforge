@@ -473,6 +473,13 @@ prerequisite challenges, and explain what observed evidence to report. Generator
 delivery modes, ports, paths and version fields are not automatically treated as
 success objectives. Explicit starting facts and chain-supplied inputs are included;
 walkthroughs, unreleased hints and discovered answer values remain private.
+
+Scenario-generated challenge plans now also freeze structured teammate coaching
+from generator and vulnerability catalogs. Each release retains its tier,
+interpretation, next action, expected success signal, and provenance. A runtime
+judge may contribute a cited observation, but it does not invent the technical
+guidance. Participant and facilitator guides continue to use the same reviewed
+`hint_levels` and `access_instructions`.
 Authored objectives take precedence. If no supported goal can be inferred, the
 plan's `source.objective_review_steps` identifies the steps needing an authored
 objective. Saving a resolved Flow or exporting its automatically generated task

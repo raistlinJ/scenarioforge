@@ -28,3 +28,54 @@ artifacts:
     - InternalNetwork(subnet)
 injects:
   - File(path) -> /opt/scenario
+inject_candidate_paths:
+  - /opt/scenario
+  - /srv/scenario
+  - /var/lib/scenarioforge
+success:
+  objective: Recover the internal subnet and maintenance token from the deployed network configuration clue.
+  evidence: Successful host-access tool output showing both internal_subnet and maintenance_token from network.conf.
+hint_levels:
+  low:
+    - "I would look for a configuration clue left with the challenge files on {{NODE_NAME}}."
+  medium:
+    - "After obtaining the host access required by this challenge, inspect `/opt/scenario` for a small network configuration file."
+    - "The useful evidence is in `network.conf`; capture both the internal subnet and maintenance token from the same read."
+  high:
+    - "Use the challenge's documented access method for {{NODE_NAME}}, then read `/opt/scenario/network.conf` and report its `internal_subnet` and `maintenance_token` values exactly."
+access_instructions:
+  title: Recover the injected network clue
+  steps:
+    - title: Reach the assigned host
+      instructions: Use the access method documented by the vulnerability or service assigned to {{NODE_NAME}}.
+    - title: Read the clue
+      instructions: Read `/opt/scenario/network.conf` and preserve the `internal_subnet` and `maintenance_token` values in the tool output.
+    - title: Confirm completion
+      instructions: Report the observed subnet and token exactly; the token is the challenge flag.
+assistance:
+  version: 1
+  hints:
+    - tier: low
+      sequence: 1
+      interpretation: The host is reachable, but the configuration clue has not yet been observed.
+      next_action: hint_levels.low[0]
+      success_signal: success.evidence
+    - tier: medium
+      sequence: 2
+      interpretation: The next useful evidence should come from the deployed scenario configuration directory.
+      next_action: hint_levels.medium[0]
+      success_signal: success.evidence
+    - tier: medium
+      sequence: 3
+      interpretation: The likely clue file is known, but its values still need direct evidence.
+      next_action: hint_levels.medium[1]
+      success_signal: success.evidence
+    - tier: high
+      sequence: 4
+      interpretation: The challenge is ready for the documented file-recovery workflow.
+      next_action: hint_levels.high[0]
+      success_signal: success.evidence
+  solution:
+    source: access_instructions
+    include_answer: true
+    success_signal: success.evidence

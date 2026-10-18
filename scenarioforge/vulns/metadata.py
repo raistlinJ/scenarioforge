@@ -217,6 +217,7 @@ class VulnFacts:
     hint_levels: Dict[str, List[str]] = field(default_factory=dict)
     access_instructions: Dict[str, Any] = field(default_factory=dict)
     success: Dict[str, str] = field(default_factory=dict)
+    assistance: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def canonical_requires(self) -> Set[str]:
@@ -475,6 +476,46 @@ def validate_vuln_metadata_doc(
             else:
                 success = {key: raw_success[key].strip() for key in ('objective', 'evidence')}
 
+        assistance = {}
+        if 'assistance' in raw:
+            raw_assistance = raw.get('assistance')
+            if not isinstance(raw_assistance, dict) or raw_assistance.get('version') != 1:
+                errors.append(f'{label}.assistance must be a version 1 mapping')
+            else:
+                coaching = []
+                raw_coaching = raw_assistance.get('hints')
+                if not isinstance(raw_coaching, list) or not raw_coaching:
+                    errors.append(f'{label}.assistance.hints must be a nonempty list')
+                else:
+                    for position, item in enumerate(raw_coaching, 1):
+                        required = {'tier', 'sequence', 'interpretation', 'next_action', 'success_signal'}
+                        if not isinstance(item, dict) or set(item) != required:
+                            errors.append(f'{label}.assistance.hints[{position - 1}] has invalid fields')
+                            continue
+                        if item.get('tier') not in ('low', 'medium', 'high') or type(item.get('sequence')) is not int or item['sequence'] < 1:
+                            errors.append(f'{label}.assistance.hints[{position - 1}] needs a valid tier and sequence')
+                            continue
+                        if any(not isinstance(item.get(key), str) or not item[key].strip()
+                               for key in ('interpretation', 'next_action', 'success_signal')):
+                            errors.append(f'{label}.assistance.hints[{position - 1}] needs nonempty coaching text')
+                            continue
+                        coaching.append({key: item[key].strip() if isinstance(item[key], str) else item[key]
+                                         for key in required})
+                raw_solution = raw_assistance.get('solution')
+                if (not isinstance(raw_solution, dict)
+                        or set(raw_solution) != {'source', 'include_answer', 'success_signal'}
+                        or raw_solution.get('source') not in ('access_instructions', 'hint_levels.high')
+                        or type(raw_solution.get('include_answer')) is not bool
+                        or not isinstance(raw_solution.get('success_signal'), str)
+                        or not raw_solution['success_signal'].strip()):
+                    errors.append(f'{label}.assistance.solution is invalid')
+                elif coaching:
+                    assistance = {'version': 1, 'hints': coaching, 'solution': {
+                        'source': raw_solution['source'],
+                        'include_answer': raw_solution['include_answer'],
+                        'success_signal': raw_solution['success_signal'].strip(),
+                    }}
+
         records.append(
             VulnFacts(
                 key=key or cve_value,
@@ -487,6 +528,7 @@ def validate_vuln_metadata_doc(
                 hint_levels=hint_levels,
                 access_instructions=access_instructions,
                 success=success,
+                assistance=assistance,
             )
         )
 

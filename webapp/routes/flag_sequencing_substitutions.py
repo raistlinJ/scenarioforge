@@ -314,6 +314,8 @@ def register(app, *, backend_module: Any) -> None:
                     for key in ('objective', 'evidence')
                     if str(generator['success'].get(key) or '').strip()
                 }
+            if isinstance(generator.get('assistance'), dict):
+                assignment['assistance'] = dict(generator['assistance'])
             assignment['type'] = str(generator.get('_flow_kind') or assignment.get('type') or 'flag-generator')
             assignment['flag_generator'] = str(generator.get('_source_name') or '').strip() or 'unknown'
             assignment['generator_catalog'] = str(generator.get('_flow_catalog') or assignment.get('generator_catalog') or 'flag_generators')

@@ -2322,6 +2322,17 @@ def test_build_generator_scaffold_emits_input_defaults_version_and_hints():
     # FlagDelivery(mode) is a delivery mode string, never a useful participant hint target.
     assert 'FlagDelivery(mode)' not in json.dumps(doc['hint_levels'])
     assert '{{OUTPUT.FlagFile(path)}}' in json.dumps(doc['hint_levels'])
+    assert doc['assistance']['version'] == 1
+    assert [item['sequence'] for item in doc['assistance']['hints']] == list(
+        range(1, len(doc['assistance']['hints']) + 1)
+    )
+    assert doc['assistance']['hints'][0]['next_action'] == 'hint_levels.low[0]'
+    assert doc['assistance']['hints'][0]['success_signal'] == 'success.evidence'
+    assert doc['assistance']['solution'] == {
+        'source': 'hint_levels.high',
+        'include_answer': True,
+        'success_signal': 'success.evidence',
+    }
 
 
 def test_default_hint_levels_skip_compose_file_for_node_generators():

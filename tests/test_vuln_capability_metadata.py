@@ -865,11 +865,19 @@ def test_optional_guidance_preserves_commands_and_capabilities():
         'access_instructions': {'steps': [{'title': 'Inspect', 'instructions': command}]},
         'success': {'objective': 'Demonstrate code execution on {{NODE_NAME}}.',
                     'evidence': 'Provide the command and returned output.'},
+        'assistance': {'version': 1, 'hints': [{
+            'tier': 'low', 'sequence': 1,
+            'interpretation': 'The service is reachable.',
+            'next_action': 'Inspect its response.',
+            'success_signal': 'The response demonstrates command execution.',
+        }], 'solution': {'source': 'access_instructions', 'include_answer': True,
+                         'success_signal': 'The response demonstrates command execution.'}},
     }]})
     assert not errors
     assert records[0].hint_levels == {'high': [command]}
     assert records[0].access_instructions['steps'][0]['instructions'] == command
     assert records[0].success['objective'].startswith('Demonstrate code execution')
+    assert records[0].assistance['hints'][0]['next_action'] == 'Inspect its response.'
     assert 'Shell(host)' in records[0].provides
 
 

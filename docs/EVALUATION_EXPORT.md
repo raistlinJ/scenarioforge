@@ -421,3 +421,12 @@ solution. Generated task provenance also lists the steps that need access review
 Tasks generated automatically when a Flow is saved require this check and use
 the current participant/facilitator guide renderer, so unsupported catalog
 entries are identified before the evaluation contract can run.
+
+## Structured coaching in challenge plans
+
+Generated challenge plans contain private `coaching` entries alongside the
+plain guide hints. They preserve catalog tier, order, interpretation, next
+action, expected success signal, and provenance. During execution a progress
+judge can supply a cited observation from tool output; the evaluator combines
+that observation with the authored coaching. Unreleased entries, facilitator
+walkthroughs, and answers remain host-private.

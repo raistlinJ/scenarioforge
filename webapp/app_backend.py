@@ -25514,6 +25514,16 @@ def _flow_enrich_saved_flag_assignments(
         except Exception:
             pass
 
+        # Preserve the authored coaching contract separately from rendered hints.
+        try:
+            existing_assistance = a2.get('assistance')
+            if not (isinstance(existing_assistance, dict) and existing_assistance.get('hints')):
+                catalog_assistance = (gen_def or {}).get('assistance') if isinstance(gen_def, dict) else None
+                if isinstance(catalog_assistance, dict) and catalog_assistance.get('hints'):
+                    a2['assistance'] = dict(catalog_assistance)
+        except Exception:
+            pass
+
         # Ensure description hints exist (if the catalog provides them).
         try:
             existing = a2.get('description_hints')
@@ -26350,7 +26360,8 @@ def _flow_merge_plan_preview_metadata(
             for name in names:
                 facts = metadata.lookup(name)
                 facts_success = getattr(facts, 'success', {}) if facts else {}
-                if not facts or (not facts.hint_levels and not facts.access_instructions and not facts_success):
+                facts_assistance = getattr(facts, 'assistance', {}) if facts else {}
+                if not facts or (not facts.hint_levels and not facts.access_instructions and not facts_success and not facts_assistance):
                     continue
                 node_ip = _first_valid_ipv4(
                     node.get('ip4') or node.get('ipv4') or node.get('ip') or ''
@@ -26362,6 +26373,7 @@ def _flow_merge_plan_preview_metadata(
                     'hint_levels': dict(facts.hint_levels),
                     'access_instructions': dict(facts.access_instructions),
                     'success': dict(facts_success),
+                    'assistance': dict(facts_assistance),
                     'templateVars': {
                         'NODE_IP': node_ip,
                         'NODE_NAME': str(node.get('name') or node.get('label') or node_id),
@@ -48289,6 +48301,31 @@ def _build_generator_scaffold(payload: dict[str, Any]) -> tuple[dict[str, str], 
             manifest_yaml += f"  {level}:\n"
             for value in values:
                 manifest_yaml += f"    - {json.dumps(str(value))}\n"
+
+        manifest_yaml += "\nassistance:\n  version: 1\n  hints:\n"
+        sequence = 0
+        interpretations = {
+            'low': 'The available evidence is not yet sufficient to establish completion.',
+            'medium': 'The likely target or artifact has been narrowed, but the required result still needs direct evidence.',
+            'high': 'The challenge is ready for the documented solving workflow.',
+        }
+        for level in ('low', 'medium', 'high'):
+            for index, _value in enumerate(hint_levels.get(level) or []):
+                sequence += 1
+                manifest_yaml += (
+                    f"  - tier: {level}\n"
+                    f"    sequence: {sequence}\n"
+                    f"    interpretation: {json.dumps(interpretations[level])}\n"
+                    f"    next_action: hint_levels.{level}[{index}]\n"
+                    "    success_signal: success.evidence\n"
+                )
+        solution_source = 'access_instructions' if access_instructions else 'hint_levels.high'
+        manifest_yaml += (
+            "  solution:\n"
+            f"    source: {solution_source}\n"
+            "    include_answer: true\n"
+            "    success_signal: success.evidence\n"
+        )
 
     if description_hints:
         manifest_yaml += "\ndescription_hints:\n"

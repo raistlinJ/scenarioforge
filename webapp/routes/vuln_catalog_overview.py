@@ -238,6 +238,7 @@ def register(
                 'hint_levels': guidance.hint_levels if guidance else {},
                 'access_instructions': guidance.access_instructions if guidance else {},
                 'success': getattr(guidance, 'success', {}) if guidance else {},
+                'assistance': getattr(guidance, 'assistance', {}) if guidance else {},
                 'guidance_audit': guidance_audit,
                 'id': int(item.get('id') or 0),
                 'name': _display_name(item),

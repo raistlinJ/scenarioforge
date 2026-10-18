@@ -14,3 +14,8 @@ Do not copy generator outputs or facilitator guides into participant starting fa
 
 The evaluator stores evidence provenance but does not infer that a file was read
 from flag recovery, nor does this template install itself into the catalog.
+
+The manifest's structured teammate coaching uses the same hints, success
+evidence, and access walkthrough as generated guides. A monitor may prepend a
+cited runtime observation, but it does not invent the file location or expected
+evidence.

@@ -732,3 +732,38 @@ VM, update `client_max_body_size` in
 `sudo systemctl reload nginx`. Update and restart ScenarioForge as well to
 apply the application changes. Changing repository files alone does not update
 an already-running VM's nginx configuration.
+
+## Evidence-grounded teammate assistance
+
+Evaluation-capable manifests declare `assistance.version: 1`. Each ordered hint
+object contains `tier` (`low`, `medium`, or `high`), `sequence`,
+`interpretation`, `next_action`, and `success_signal`. Multiple entries per tier
+are allowed. These are authored instructions, so do not write “I observed…” in
+the manifest; the evaluator adds an observation only when its judge/monitor has
+cited matching execution evidence.
+
+```yaml
+assistance:
+  version: 1
+  hints:
+    - tier: low
+      sequence: 1
+      interpretation: The current evidence does not yet prove completion.
+      next_action: Confirm whether the exposed service expects HTTPS.
+      success_signal: A successful TLS handshake or recognizable certificate.
+  solution:
+    source: access_instructions
+    include_answer: true
+    success_signal: Tool output demonstrates the objective and recovered flag.
+```
+
+`solution.source` must be `access_instructions` or `hint_levels.high`. This
+keeps the final walkthrough and answer aligned with the guides instead of
+creating a second procedure that can drift.
+
+Catalog records may use `hint_levels.<tier>[<index>]` and `success.evidence`
+references for `next_action` and `success_signal`. ScenarioForge resolves those
+references from the rendered guide content before exporting the private
+challenge plan. All authored entries are retained, up to twelve per challenge;
+larger multi-challenge plans reduce that count only to stay within the package
+size bound.

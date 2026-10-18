@@ -2229,7 +2229,7 @@ def _build_generator_builder_ai_messages(payload: dict[str, Any]) -> list[dict[s
             '- outputs.json must include generator_id and Flag(flag_id).',
             '- Keep outputs deterministic and ensure all declared outputs exist.',
             '- Include access_instructions for interactive service/file/credential artifacts.',
-            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should provide the answer directly using {{OUTPUT.Flag(flag_id)}}. Never reference a README, the generator manifest, or docker-compose.yml in a hint: participants cannot open those and Flow filters such lines out.',
+            '- Include hint_levels with low, medium, and high arrays: low should reveal a target IP/name, medium should reveal a port/service/file/artifact, and high should provide the answer directly using {{OUTPUT.Flag(flag_id)}}. Never reference a README, the generator manifest, or docker-compose.yml in a hint: participants cannot open those and Flow filters such lines out. ScenarioForge derives the version 1 teammate-assistance contract from these reviewed hints and the success evidence.',
         ]
         if plugin_type == 'flag-node-generator':
             kind_requirements.extend([

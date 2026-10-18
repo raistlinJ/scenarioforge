@@ -135,6 +135,21 @@ hint_levels:
     - "Port: {{OUTPUT.PortForward(host,port)}}"
   high:
     - "README: README.md"
+success:
+  objective: Recover the proof.
+  evidence: Provide direct tool output containing the proof.
+assistance:
+  version: 1
+  hints:
+    - tier: low
+      sequence: 1
+      interpretation: The target still needs inspection.
+      next_action: hint_levels.low[0]
+      success_signal: success.evidence
+  solution:
+    source: hint_levels.high
+    include_answer: true
+    success_signal: success.evidence
 """.strip(),
         encoding="utf-8",
     )
@@ -154,3 +169,5 @@ hint_levels:
     }
     assert generator.get("readme_path", "").endswith("README.md")
     assert generator.get("readme_rel_path") == "flag_generators/web/basic_auth/README.md"
+    assert generator['success']['objective'] == 'Recover the proof.'
+    assert generator['assistance']['hints'][0]['next_action'] == 'hint_levels.low[0]'

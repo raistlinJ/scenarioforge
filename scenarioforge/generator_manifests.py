@@ -294,6 +294,51 @@ def _norm_hint_levels(value: Any) -> dict[str, list[str]]:
     return out
 
 
+def _norm_assistance(value: Any) -> dict[str, Any]:
+    """Normalize the authored teammate-assistance contract without resolving it."""
+    if not isinstance(value, dict) or value.get('version') != 1:
+        return {}
+    hints: list[dict[str, Any]] = []
+    for position, raw in enumerate(value.get('hints') or [], 1):
+        if not isinstance(raw, dict):
+            continue
+        tier = str(raw.get('tier') or '').strip().lower()
+        interpretation = str(raw.get('interpretation') or '').strip()
+        next_action = str(raw.get('next_action') or '').strip()
+        success_signal = str(raw.get('success_signal') or '').strip()
+        if tier not in HINT_LEVELS or not next_action or not success_signal:
+            continue
+        try:
+            sequence = int(raw.get('sequence') or position)
+        except (TypeError, ValueError):
+            continue
+        if sequence < 1:
+            continue
+        hints.append({
+            'tier': tier,
+            'sequence': sequence,
+            'interpretation': interpretation,
+            'next_action': next_action,
+            'success_signal': success_signal,
+        })
+    solution = value.get('solution') or {}
+    if not isinstance(solution, dict):
+        return {}
+    source = str(solution.get('source') or '').strip()
+    success_signal = str(solution.get('success_signal') or '').strip()
+    if source not in {'access_instructions', 'hint_levels.high'} or not success_signal:
+        return {}
+    return {
+        'version': 1,
+        'hints': hints,
+        'solution': {
+            'source': source,
+            'include_answer': bool(solution.get('include_answer', True)),
+            'success_signal': success_signal,
+        },
+    }
+
+
 def _norm_artifact_list(value: Any) -> list[dict[str, Any]]:
     """Normalize produces list into list[{artifact, description?}]."""
     out: list[dict[str, Any]] = []
@@ -716,6 +761,13 @@ def discover_generator_manifests(
                 '_flow_catalog': flow_catalog,
                 'description_hints': list(doc.get('description_hints') or []) if isinstance(doc.get('description_hints'), list) else [],
                 'hint_levels': _norm_hint_levels(doc.get('hint_levels')),
+                'assistance': _norm_assistance(doc.get('assistance')),
+                'success': {
+                    key: str((doc.get('success') or {}).get(key) or '').strip()
+                    for key in ('objective', 'evidence')
+                    if isinstance(doc.get('success'), dict)
+                    and str((doc.get('success') or {}).get(key) or '').strip()
+                },
                 'env': dict(doc.get('env') or {}) if isinstance(doc.get('env'), dict) else {},
             }
 

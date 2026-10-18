@@ -111,6 +111,41 @@
         "high": {"type": "array", "items": {"type": "string"}}
       }
     },
+    "assistance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "hints", "solution"],
+      "description": "Authored, reproducible teammate coaching. The evaluator grounds observations in run evidence and selects these entries; it does not invent technical instructions.",
+      "properties": {
+        "version": {"type": "integer", "const": 1},
+        "hints": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tier", "sequence", "interpretation", "next_action", "success_signal"],
+            "properties": {
+              "tier": {"type": "string", "enum": ["low", "medium", "high"]},
+              "sequence": {"type": "integer", "minimum": 1},
+              "interpretation": {"type": "string", "minLength": 1, "maxLength": 1500},
+              "next_action": {"type": "string", "minLength": 1, "maxLength": 4000},
+              "success_signal": {"type": "string", "minLength": 1, "maxLength": 2000}
+            }
+          }
+        },
+        "solution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "include_answer", "success_signal"],
+          "properties": {
+            "source": {"type": "string", "enum": ["access_instructions", "hint_levels.high"]},
+            "include_answer": {"type": "boolean"},
+            "success_signal": {"type": "string", "minLength": 1, "maxLength": 2000}
+          }
+        }
+      }
+    },
     "description_hints": {
       "type": "array",
       "items": {"type": "string"},

@@ -203,14 +203,20 @@ def draft_tasks(
     criteria, steps = [], []
     reference_limit = max(400, 16000 // len(order))
     solution_limit = max(400, 16000 // len(order))
-    hint_limit = max(150, 6000 // (3 * len(order)))
+    # Preserve even the densest current catalog entry (11 authored fragments)
+    # while retaining the existing whole-plan bound for large challenge chains.
+    hints_per_step = min(12, max(1, 64 // len(order)))
+    hint_limit = max(100, 6000 // (hints_per_step * len(order)))
+    coaching_limit = max(80, 6000 // (3 * hints_per_step * len(order)))
     step_ids = {ref: f"step-{index:03d}" for index, ref in enumerate(order, 1)}
     dependencies = graph.get("fact_dependencies", [])
-    vuln_success = {}
+    vuln_success, vuln_assistance = {}, {}
     vuln_entries = flow.get('vuln_readme_entries', [])
     for entry in vuln_entries if isinstance(vuln_entries, list) else []:
         if isinstance(entry, dict) and isinstance(entry.get('success'), dict):
             vuln_success[str(entry.get('node_id') or '')] = entry['success']
+        if isinstance(entry, dict) and isinstance(entry.get('assistance'), dict):
+            vuln_assistance[str(entry.get('node_id') or '')] = entry['assistance']
     consumed_by_node = {}
     for edge in dependencies:
         consumed_by_node.setdefault(str(edge.get("source")), set()).update(edge.get("facts", []))
@@ -228,6 +234,7 @@ def draft_tasks(
         )
         outputs = generator.get("resolved_outputs") or {}
         success = vuln_success.get(ref) or generator.get('success') or {}
+        assistance = vuln_assistance.get(ref) or generator.get('assistance') or {}
         objective = (
             node.get("objective")
             or success.get('objective')
@@ -319,7 +326,29 @@ def draft_tasks(
             )
 
         solution = withhold_other_answers(solution, graph, ref)
-        hints = [h[:hint_limit] for h in hints[:3]]
+        hints = [h[:hint_limit] for h in hints[:hints_per_step]]
+        authored = assistance.get('hints', []) if isinstance(assistance, dict) else []
+        coaching = []
+        for hint_index, action in enumerate(hints):
+            contract = authored[hint_index] if hint_index < len(authored) and isinstance(authored[hint_index], dict) else {}
+            tier = contract.get('tier') if contract.get('tier') in {'low', 'medium', 'high'} else ('low', 'medium', 'high')[min(hint_index, 2)]
+            interpretation = public(_render_public_contract(
+                contract.get('interpretation') or (
+                    'The available evidence is not yet sufficient to establish completion.'
+                    if tier == 'low' else
+                    'The likely target or artifact has been narrowed, but the required result still needs direct evidence.'
+                    if tier == 'medium' else
+                    'The challenge is ready for the documented solving workflow.'
+                ), target=target, node=node, discovery=bool(flow.get('discovery'))
+            ))
+            coaching.append(dict(
+                tier=tier,
+                sequence=int(contract.get('sequence') or hint_index + 1),
+                interpretation=interpretation[:coaching_limit],
+                next_action=action[:coaching_limit],
+                success_signal=evidence[:coaching_limit],
+                source='catalog_assistance' if assistance else 'scenario_guide',
+            ))
         steps.append(
             dict(
                 id=step_ids[ref],
@@ -328,6 +357,7 @@ def draft_tasks(
                 criterion_ids=[criterion_id],
                 requires=list(dict.fromkeys(required)),
                 hints=hints,
+                coaching=coaching,
                 solution=solution,
             )
         )
