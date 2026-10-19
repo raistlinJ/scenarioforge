@@ -77,6 +77,64 @@ def _render_public_contract(text, *, target, node, discovery):
     return re.sub(r'\s+([,.])', r'\1', value).strip()
 
 
+_GENERIC_VULN_ARTIFACT_OBJECTIVE = (
+    " and recover the ScenarioForge challenge artifact when one is attached"
+)
+_GENERIC_VULN_ARTIFACT_EVIDENCE = (
+    " If an artifact path is supplied, include the recovered artifact value."
+)
+
+
+def _vulnerability_contract(success, access):
+    """Return the reachable portion of the generated vulnerability contract.
+
+    Most Vulhub recipes document how to demonstrate the vulnerability but do
+    not yield a shell or file-read primitive. In those cases an independently
+    injected Flow artifact is not a participant-reachable objective. Reviewed
+    recipes that use ``{{ARTIFACT_PATH}}`` retain the artifact requirement.
+    """
+    result = dict(success) if isinstance(success, dict) else {}
+    access_text = json.dumps(access, ensure_ascii=False) if isinstance(access, dict) else ''
+    if '{{ARTIFACT_PATH}}' in access_text:
+        return result, False
+    objective = str(result.get('objective') or '')
+    evidence = str(result.get('evidence') or '')
+    reachable_objective = objective.replace(_GENERIC_VULN_ARTIFACT_OBJECTIVE, '')
+    reachable_evidence = evidence.replace(_GENERIC_VULN_ARTIFACT_EVIDENCE, '')
+    vulnerability_only = reachable_objective != objective or reachable_evidence != evidence
+    if reachable_objective:
+        result['objective'] = reachable_objective
+    if reachable_evidence:
+        result['evidence'] = reachable_evidence
+    return result, vulnerability_only
+
+
+def _vulnerability_only_solution(text):
+    """Remove an unreachable generated artifact answer from a vuln walkthrough."""
+    value = str(text or '')
+    value = value.replace(_GENERIC_VULN_ARTIFACT_OBJECTIVE, '')
+    value = value.replace(_GENERIC_VULN_ARTIFACT_EVIDENCE, '')
+    value = re.sub(
+        r'<details>\s*<summary>Facilitator answer check</summary>.*?</details>',
+        '',
+        value,
+        flags=re.S | re.I,
+    )
+    value = re.sub(
+        r'### Need a Hint\?.*?(?=### Vulnerability hints:|\Z)',
+        '',
+        value,
+        flags=re.S | re.I,
+    )
+    value = re.sub(
+        r'^- Save any recovered flags or credentials for submission or later steps\.\s*$',
+        '',
+        value,
+        flags=re.M | re.I,
+    )
+    return value.strip()
+
+
 def graph_from_flow(flow, scenario):
     assignments = {
         str(a.get("node_id")): a
@@ -192,7 +250,15 @@ def draft_tasks(
     for node in nodes.values():
         generator = _generator_metadata(node, assignments.get(str(node["id"]), {}))
         secrets.extend(secret_strings(generator.get("flag_value")))
-        secrets.extend(secret_strings(generator.get("resolved_outputs") or {}))
+        for key, value in (generator.get("resolved_outputs") or {}).items():
+            if any(
+                marker in str(key).lower()
+                for marker in (
+                    "flag", "token", "secret", "password", "credential",
+                    "apikey", "api_key", "decryptionkey", "privatekey",
+                )
+            ):
+                secrets.extend(secret_strings(value))
 
     def public(text):
         text = str(text or "")
@@ -210,13 +276,22 @@ def draft_tasks(
     coaching_limit = max(80, 6000 // (3 * hints_per_step * len(order)))
     step_ids = {ref: f"step-{index:03d}" for index, ref in enumerate(order, 1)}
     dependencies = graph.get("fact_dependencies", [])
-    vuln_success, vuln_assistance = {}, {}
+    vuln_success, vuln_assistance, vuln_access, vuln_hints, vuln_names = {}, {}, {}, {}, {}
     vuln_entries = flow.get('vuln_readme_entries', [])
     for entry in vuln_entries if isinstance(vuln_entries, list) else []:
-        if isinstance(entry, dict) and isinstance(entry.get('success'), dict):
-            vuln_success[str(entry.get('node_id') or '')] = entry['success']
-        if isinstance(entry, dict) and isinstance(entry.get('assistance'), dict):
-            vuln_assistance[str(entry.get('node_id') or '')] = entry['assistance']
+        if not isinstance(entry, dict):
+            continue
+        entry_node = str(entry.get('node_id') or '')
+        if str(entry.get('vulnName') or '').strip():
+            vuln_names[entry_node] = str(entry['vulnName']).strip()
+        if isinstance(entry.get('success'), dict):
+            vuln_success[entry_node] = entry['success']
+        if isinstance(entry.get('assistance'), dict):
+            vuln_assistance[entry_node] = entry['assistance']
+        if isinstance(entry.get('access_instructions'), dict):
+            vuln_access[entry_node] = entry['access_instructions']
+        if isinstance(entry.get('hint_levels'), dict):
+            vuln_hints[entry_node] = entry['hint_levels']
     consumed_by_node = {}
     for edge in dependencies:
         consumed_by_node.setdefault(str(edge.get("source")), set()).update(edge.get("facts", []))
@@ -234,6 +309,11 @@ def draft_tasks(
         )
         outputs = generator.get("resolved_outputs") or {}
         success = vuln_success.get(ref) or generator.get('success') or {}
+        vulnerability_only = False
+        if ref in vuln_success:
+            success, vulnerability_only = _vulnerability_contract(
+                success, vuln_access.get(ref)
+            )
         assistance = vuln_assistance.get(ref) or generator.get('assistance') or {}
         objective = (
             node.get("objective")
@@ -253,7 +333,8 @@ def draft_tasks(
             objective += " Target: " + target + "."
         # Catalog context can name the service/challenge, but access procedures,
         # hints and solution text are never mined for the initial briefing.
-        context = public(generator.get("description")) if not flow.get("discovery") else ""
+        context_source = vuln_names.get(ref) if vulnerability_only else generator.get("description")
+        context = public(context_source) if not flow.get("discovery") else ""
         if context and context not in objective:
             objective += " Challenge context: " + context[:700]
         prerequisites = [
@@ -262,12 +343,20 @@ def draft_tasks(
         ]
         if prerequisites:
             objective += " Prerequisites: complete " + ", ".join(dict.fromkeys(prerequisites)) + " first and use the artifacts recovered there."
-        private = dict(
-            flag=generator.get("flag_value"),
-            resolved_outputs=outputs,
-            resolved_inputs=generator.get("resolved_inputs") or {},
-            walkthrough=solutions.get(ref, "")[: reference_limit // 2],
-        )
+        walkthrough = solutions.get(ref, "")
+        if vulnerability_only:
+            walkthrough = _vulnerability_only_solution(walkthrough)
+            private = dict(
+                walkthrough=walkthrough[: reference_limit // 2],
+                note="Score this step on direct vulnerability evidence; the attached generator artifact is not participant-retrievable.",
+            )
+        else:
+            private = dict(
+                flag=generator.get("flag_value"),
+                resolved_outputs=outputs,
+                resolved_inputs=generator.get("resolved_inputs") or {},
+                walkthrough=walkthrough[: reference_limit // 2],
+            )
         encoded_reference = json.dumps(private, ensure_ascii=False)
         if len(encoded_reference) > reference_limit:
             # Never silently cut an answer or a JSON structure. Full resolved
@@ -277,7 +366,7 @@ def draft_tasks(
                 reference_summary=True,
                 note="Read host reference-material.json for the full guide and resolved outputs.",
                 outputs=list(outputs),
-                walkthrough=solutions.get(ref, "")[: reference_limit // 2],
+                walkthrough=walkthrough[: reference_limit // 2],
             )
             encoded_reference = json.dumps(private, ensure_ascii=False)
         if len(encoded_reference) > 8000:
@@ -307,20 +396,33 @@ def draft_tasks(
                 ],
             )
         )
-        hints = hints_for_nodes(
-            flow,
-            [ref],
-            {"type": "contains_all", "expected": secrets},
-            rendered=rendered_hints,
-            graph=graph,
-        )
+        if vulnerability_only:
+            hints = []
+            for level in ('low', 'medium', 'high'):
+                for raw_hint in vuln_hints.get(ref, {}).get(level, []):
+                    hint = public(_render_public_contract(
+                        raw_hint,
+                        target=target,
+                        node=node,
+                        discovery=bool(flow.get('discovery')),
+                    ))
+                    if hint and '[undisclosed detail]' not in hint and hint not in hints:
+                        hints.append(hint)
+        else:
+            hints = hints_for_nodes(
+                flow,
+                [ref],
+                {"type": "contains_all", "expected": secrets},
+                rendered=rendered_hints,
+                graph=graph,
+            )
         required = [
             step_ids[str(d["source"])]
             for d in dependencies
             if str(d.get("target")) == ref and str(d.get("source")) in step_ids
         ]
-        solution = solutions.get(ref, "")[:solution_limit]
-        if generator.get("flag_value"):
+        solution = walkthrough[:solution_limit]
+        if generator.get("flag_value") and not vulnerability_only:
             solution += "\nCurrent challenge answer / flag:\n" + str(
                 generator["flag_value"]
             )
@@ -373,6 +475,12 @@ def draft_tasks(
         guides_sha256=hashlib.sha256(
             json.dumps([rendered_hints, rendered_solutions], sort_keys=True).encode()
         ).hexdigest(),
+        vulnerability_evidence_steps=[
+            step_ids[ref]
+            for ref in order
+            if ref in vuln_success
+            and _vulnerability_contract(vuln_success[ref], vuln_access.get(ref))[1]
+        ],
     )
     from .access import access_check
     access = access_check(dict(steps=steps), graph)

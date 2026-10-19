@@ -9,6 +9,7 @@ preflight, and tests one definition of "ready".
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from typing import Any, Iterable
@@ -143,12 +144,20 @@ def audit_vulnerability_guidance(
             'message': 'Replace unsupported placeholders: ' + ', '.join(unknown_placeholders) + '.',
         })
 
-    # Generic upstream exploit prose may say "read a file" without explaining
-    # how to read the artifact ScenarioForge injected for this run.  Requiring
-    # the resolved placeholder prevents that prose from being mistaken for an
-    # executable challenge solution.
-    artifact_ready = bool(steps and 'ARTIFACT_PATH' in placeholders)
-    if steps and not artifact_ready:
+    # Only recipes whose reviewed success contract requires the injected
+    # artifact must document how the exploit reaches {{ARTIFACT_PATH}}. Other
+    # vulnerabilities are evaluated on direct exploit evidence instead.
+    success_contract = (getattr(facts, 'success', {}) or {}) if facts else {}
+    success_text = json.dumps(success_contract, ensure_ascii=False)
+    artifact_required = bool(
+        not success_contract
+        or (
+            'artifact' in success_text.lower()
+            and 'when one is attached' not in success_text.lower()
+        )
+    )
+    artifact_ready = bool(not artifact_required or (steps and 'ARTIFACT_PATH' in placeholders))
+    if steps and artifact_required and not artifact_ready:
         issues.append({
             'code': 'missing_artifact_retrieval',
             'area': 'evaluation',

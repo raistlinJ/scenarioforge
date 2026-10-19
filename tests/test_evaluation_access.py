@@ -30,6 +30,16 @@ def test_access_requires_connection_not_just_container_cat():
     assert check('curl http://192.0.2.100/proof')['status']=='fail'
 
 
+def test_access_accepts_documented_browser_or_poc_vulnerability_result():
+    solution = '''### Access Instructions
+Use http://192.0.2.10:8080/reset to locate the target, then execute:
+python poc.py -t http://192.0.2.10:8080 --token VALUE
+Submit the predicted code to demonstrate account takeover.
+### Check Your Progress
+'''
+    assert check(solution)['status'] == 'pass'
+
+
 def missing_access_tasks(build):
     root=ET.parse(build['xml_path'])
     state=root.find('.//FlowState')

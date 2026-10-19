@@ -331,6 +331,72 @@ def test_briefing_and_rubric_use_the_catalog_success_contract():
     assert criterion["evidence"] == "Provide the successful request and response containing the token."
 
 
+def test_vulnerability_without_artifact_retrieval_uses_exploit_evidence_only():
+    flag = "PRIVATE_UNREACHABLE_FLAG"
+    flow = dict(
+        chain=[dict(id="web", name="Web", ipv4="192.0.2.20")],
+        flag_assignments=[dict(
+            node_id="web",
+            flag_value=flag,
+            resolved_outputs={"Flag(flag_id)": flag, "File(path)": "/private/proof.json"},
+            hint_levels={"low": ["Inspect the generated artifact."]},
+        )],
+        vuln_readme_entries=[dict(
+            node_id="web",
+            vulnName="demo/CVE-2026-0001",
+            success={
+                "objective": "Demonstrate the documented vulnerability against {{NODE_NAME}} and recover the ScenarioForge challenge artifact when one is attached.",
+                "evidence": "Provide the successful request or command and the target response or output demonstrating the vulnerability impact. If an artifact path is supplied, include the recovered artifact value.",
+            },
+            hint_levels={
+                "low": ["Inspect the web service on {{NODE_IP}}."],
+                "medium": ["Open http://{{NODE_IP}}:8080/reset."],
+                "high": ["Run python poc.py -t http://{{NODE_IP}}:8080 and submit the predicted code."],
+            },
+            access_instructions={"steps": [{
+                "title": "Reproduce",
+                "instructions": "Run python poc.py -t http://{{NODE_IP}}:8080 and submit the predicted code.",
+            }]},
+            assistance={"version": 1, "hints": [], "solution": {}},
+        )],
+    )
+    graph = graph_from_flow(flow, "Lab")
+    guide = '''### Access Instructions
+Run python poc.py -t http://192.0.2.20:8080 and submit the predicted code.
+<details><summary>Facilitator answer check</summary>
+Expected flag: PRIVATE_UNREACHABLE_FLAG
+</details>
+### Need a Hint?
+- Inspect the generated artifact.
+### Vulnerability hints: high
+- Run the POC.
+'''
+    task = draft_tasks(
+        flow,
+        graph,
+        rendered_hints=[
+            {"node_id": "web", "text": "Inspect the generated artifact."},
+            {"node_id": "web", "text": "Open http://192.0.2.20:8080/reset."},
+        ],
+        rendered_solutions=[{"node_id": "web", "text": guide}],
+    )[0]
+    criterion = task["rubric"]["criteria"][0]
+    step = task["challenge_plan"]["steps"][0]
+
+    assert criterion["requirement"] == (
+        "Demonstrate the documented vulnerability against Web at 192.0.2.20. "
+        "Challenge context: demo/CVE-2026-0001"
+    )
+    assert "artifact" not in criterion["evidence"].lower()
+    assert flag not in criterion["private_reference"]
+    assert flag not in step["solution"]
+    assert "challenge artifact" not in step["solution"]
+    assert "recovered artifact value" not in step["solution"]
+    assert step["hints"][0] == "Inspect the web service on 192.0.2.20."
+    assert "generated artifact" not in json.dumps(step["hints"])
+    assert task["challenge_plan"]["source"]["vulnerability_evidence_steps"] == ["step-001"]
+
+
 def test_briefing_keeps_flow_context_and_dependency_goals_with_slim_graph():
     flow, graph = fixture()
     flow["flag_assignments"][0]["description"] = "A service with a credential leak. Password: PASSWORD_ONE."

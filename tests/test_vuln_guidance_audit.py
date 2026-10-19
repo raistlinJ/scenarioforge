@@ -82,6 +82,31 @@ def test_partial_metadata_explains_target_and_artifact_gaps() -> None:
     }
 
 
+def test_conditional_generated_artifact_is_optional_without_a_retrieval_primitive() -> None:
+    facts = VulnFacts(
+        key='demo',
+        impact='account_takeover',
+        provides=('Credential(user, password)',),
+        hint_levels={'low': ['one'], 'medium': ['two'], 'high': ['three']},
+        access_instructions={
+            'steps': [{
+                'title': 'Reproduce',
+                'instructions': 'Run python poc.py -t http://{{NODE_IP}} and submit the result.',
+            }],
+        },
+        success={
+            'objective': 'Demonstrate the vulnerability and recover the ScenarioForge challenge artifact when one is attached.',
+            'evidence': 'Provide successful exploit output.',
+        },
+        assistance={'version': 1, 'hints': [{}], 'solution': {}},
+    )
+
+    audit = audit_vulnerability_guidance(facts)
+
+    assert audit['artifact_retrieval_ready'] is True
+    assert not any(issue['code'] == 'missing_artifact_retrieval' for issue in audit['issues'])
+
+
 def test_summary_and_markdown_include_all_items() -> None:
     ready = {'status': 'ready', 'evaluation_ready': True, 'capability_ready': True, 'guide_ready': True, 'artifact_retrieval_ready': True, 'issues': []}
     missing = {'status': 'missing', 'evaluation_ready': False, 'capability_ready': False, 'guide_ready': False, 'artifact_retrieval_ready': False, 'issues': [{'code': 'missing_metadata', 'message': 'Add metadata.'}]}

@@ -2,6 +2,18 @@
 import re
 
 
+_REMOTE_CLIENT_RE = re.compile(
+    r"\b(curl|wget|ssh|nc|netcat|smbclient|ftp|sftp|socat|nmap|msfconsole|"
+    r"sqlmap|redis-cli|mongo|mysql|psql|python|ruby|perl|https?)\b",
+    re.I,
+)
+_RESULT_ACTION_RE = re.compile(
+    r"\b(GET|POST|PUT|PATCH|DELETE|cat|read|retrieve|download|fetch|curl|wget|"
+    r"exploit|reproduce|demonstrate|execute|trigger|bypass|takeover|authenticate|submit)\b",
+    re.I,
+)
+
+
 def access_check(plan, graph, prompt=""):
     nodes = {str(node["id"]): node for node in graph.get("nodes", [])}
     items = []
@@ -24,17 +36,17 @@ def access_check(plan, graph, prompt=""):
             reasons.append("Access procedure contains unresolved placeholders")
         if re.search(r"\bGET\s+/(?:tmp/vulns|opt/scenarioforge|flow_injects)/", text):
             reasons.append("GET uses a host/container file path; document the service-relative retrieval path")
-        network = re.search(r"\b(curl|wget|ssh|nc|netcat|smbclient|ftp|msfconsole)\b", text)
-        retrieval = re.search(r"\b(GET|cat|read|retrieve|download|fetch|curl|wget|exploit)\b", text, re.I)
+        network = _REMOTE_CLIENT_RE.search(text)
+        retrieval = _RESULT_ACTION_RE.search(text)
         connection_target = network and mentions_target(text)
         if not network or not retrieval or not connection_target:
-            reasons.append("No documented participant connection and retrieval procedure; provide the service endpoint or remote-shell/exploit access and artifact retrieval commands")
+            reasons.append("No documented participant connection and result procedure; provide the service endpoint or remote-shell/exploit access and the command or action that demonstrates completion")
         # A local cat on a target container requires a documented shell entry.
         if re.search(r"\bcat\s+/flow_injects/", text) and not re.search(r"\b(ssh|exploit|msfconsole)\b", text, re.I):
             reasons.append("Container artifact retrieval requires a documented remote shell or exposed file endpoint")
         items.append(dict(name=step["title"], node_id=step["node_id"], step_id=step["id"],
                           status="fail" if reasons else "pass",
-                          detail="; ".join(reasons) if reasons else "Documented connection and retrieval procedure present; live reachability and successful execution remain separate checks"))
+                          detail="; ".join(reasons) if reasons else "Documented connection and result procedure present; live reachability and successful execution remain separate checks"))
     failed = sum(item["status"] == "fail" for item in items)
     return dict(key="challenge_access", label="Challenge participant access procedures", status="fail" if failed else "pass",
                 summary=f"{failed} of {len(items)} challenge access procedures need review" if failed else f"{len(items)} challenge access procedures documented (static validation)",
