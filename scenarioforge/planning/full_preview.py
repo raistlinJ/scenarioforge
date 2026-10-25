@@ -1630,7 +1630,16 @@ def build_full_preview(
             # Build TrafficInfo list
             t_items: List[TrafficInfo] = []
             for it in traffic_plan:
-                t_items.append(TrafficInfo(kind=(it.get('kind') or 'TCP'), factor=float(it.get('factor') or 0.0), pattern=it.get('pattern') or 'continuous', rate_kbps=float(it.get('rate_kbps') or 0.0), abs_count=int(it.get('abs_count') or 0)))
+                t_items.append(TrafficInfo(
+                    kind=it.get('kind') or 'TCP',
+                    factor=float(it.get('factor') or 0.0),
+                    pattern=it.get('pattern') or 'continuous',
+                    rate_kbps=float(it.get('rate_kbps') or 0.0),
+                    period_s=float(it.get('period_s') or 10.0),
+                    jitter_pct=float(it.get('jitter_pct') or 0.0),
+                    content_type=it.get('content_type') or it.get('content') or '',
+                    abs_count=int(it.get('abs_count') or 0),
+                ))
             ninfos: List[NodeInfo] = []
             for h in host_nodes:
                 if h.ip4:

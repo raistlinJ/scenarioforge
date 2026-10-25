@@ -2,13 +2,25 @@ from __future__ import annotations
 from typing import List, Dict
 
 class TrafficItem:
-    def __init__(self, pattern: str = 'continuous', rate_kbps: int | None = None, factor: float = 1.0, content: str | None = None, kind: str | None = None, abs_count: int = 0):
+    def __init__(
+        self,
+        pattern: str = 'continuous',
+        rate_kbps: float | None = None,
+        factor: float = 1.0,
+        content: str | None = None,
+        kind: str | None = None,
+        abs_count: int = 0,
+        period_s: float = 10.0,
+        jitter_pct: float = 0.0,
+    ):
         self.pattern = pattern
         self.rate_kbps = rate_kbps
         self.factor = factor
         self.content = content or 'text'
         self.kind = kind or 'Random'
         self.abs_count = abs_count or 0
+        self.period_s = period_s
+        self.jitter_pct = jitter_pct
 
 def compute_traffic_plan(items: List[TrafficItem], default_rate_kbps: int = 128) -> tuple[list[dict], dict]:
     """Normalize and expand traffic items.
@@ -58,6 +70,8 @@ def compute_traffic_plan(items: List[TrafficItem], default_rate_kbps: int = 128)
             'factor': it.factor,
             'content': it.content,
             'abs_count': it.abs_count,
+            'period_s': it.period_s,
+            'jitter_pct': it.jitter_pct,
         })
     breakdown: Dict[str, object] = {
         'count': len(norm),

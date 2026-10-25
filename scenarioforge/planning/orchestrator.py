@@ -288,20 +288,21 @@ def compute_full_plan(
     try:
         from ..parsers.traffic import parse_traffic_info  # type: ignore
         traffic_density, traffic_items_xml = parse_traffic_info(xml_path, scenario)
-        # Represent traffic via factors/pattern if needed; currently pass-through minimal usage
+        # The traffic parser returns TrafficInfo objects, not XML dictionaries.
+        # Carry the entire row into the plan so preview/runtime retain the
+        # selected protocol, explicit count, and payload/timing settings.
         t_items: List[TrafficItem] = []
         for it in (traffic_items_xml or []):
-            try:
-                pattern = it.get('pattern') if hasattr(it, 'get') else 'continuous'
-                rate = it.get('rate_kbps') if hasattr(it, 'get') else None
-                factor_raw = it.get('factor') if hasattr(it, 'get') else 1.0
-                try:
-                    factor = float(factor_raw or 0.0)
-                except Exception:
-                    factor = 0.0
-                t_items.append(TrafficItem(pattern=pattern or 'continuous', rate_kbps=rate, factor=factor))
-            except Exception:
-                continue
+            t_items.append(TrafficItem(
+                kind=it.kind,
+                pattern=it.pattern or 'continuous',
+                rate_kbps=it.rate_kbps,
+                factor=it.factor,
+                content=it.content_type,
+                abs_count=it.abs_count,
+                period_s=it.period_s,
+                jitter_pct=it.jitter_pct,
+            ))
         if t_items:
             traffic_plan_out, traffic_breakdown = compute_traffic_plan(t_items)
             traffic_breakdown['traffic_density_input'] = traffic_density
