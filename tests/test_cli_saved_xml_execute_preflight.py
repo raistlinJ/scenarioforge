@@ -7,6 +7,23 @@ import scenarioforge.cli as cli
 import scenarioforge.planning.orchestrator as orchestrator
 
 
+@pytest.mark.parametrize('raw_roles, expected_hosts', [({}, 2), ({'Docker': 1}, 3)])
+def test_execute_summary_keeps_raw_roles_for_generator_only_topology(raw_roles, expected_hosts):
+    # Generator rows add their own Docker hosts. An empty raw Node Information
+    # mapping is valid and must not fall back to the already-expanded roles.
+    plan = dict(role_counts_raw=raw_roles, role_counts={'Docker': expected_hosts},
+                routers_planned=1, service_plan={}, vulnerability_plan={},
+                flag_node_generator_plan={'http_public_file_drop': 1, 'http_source_secret_repo': 1})
+    summary = cli._current_plan_summary_for_execute(
+        orchestrated_plan=plan, r2r_policy=None, r2s_policy=None,
+        routing_items=[], routing_plan={}, segmentation_density=0.0,
+        segmentation_items=[], traffic_plan=None, seed=20261115,
+        ip4_prefix='10.0.0.0/24', ip_mode='private', ip_region='all',
+        hitl_preview_reservations={})
+    assert summary['hosts_total'] == expected_hosts
+    assert summary['role_counts']['Docker'] == expected_hosts
+
+
 def _patch_basic_cli_execute_dependencies(monkeypatch, *, flow_state=None):
     monkeypatch.setattr(cli, '_maybe_seed_docker_sudo_password_from_stdin', lambda: None)
     monkeypatch.setattr(cli, '_maybe_delegate_cli_to_remote', lambda *a, **k: None)

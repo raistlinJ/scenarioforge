@@ -4761,12 +4761,15 @@ def _write_iproute2_wrapper(
 
 
 def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: logging.Logger, node_name: str, svc_key: str) -> bool:
-	"""Best-effort ensure build-only service installs iproute2.
+	"""Best-effort ensure a build-only service provides an ``ip`` command.
 
 	When a compose service has `build:` but no `image:`, the wrapper strategy (which
 	rewrites `image` + `build` to a wrapper context) can't be applied without losing
 	the original build context. Instead, we patch the copied build context Dockerfile
-	(in /tmp/vulns/... produced by _copy_build_contexts) to install iproute2.
+	(in /tmp/vulns/... produced by _copy_build_contexts).  The default path is
+	offline-safe: prepend a cached BusyBox stage and copy its multi-call binary
+	into the final image.  The historical package-manager path remains available
+	when ``CORETG_IPROUTE2_WRAPPER_STRATEGY=packages`` is explicitly selected.
 
 	Returns True if we modified the Dockerfile.
 	"""
@@ -4845,6 +4848,54 @@ def _inject_iproute2_into_build_only_service(svc: Dict[str, object], *, logger: 
 					f"fi; \\\n"
 				)
 			entrypoint_fixup = ''.join(parts)
+
+		try:
+			strategy = str(os.getenv('CORETG_IPROUTE2_WRAPPER_STRATEGY') or '').strip().lower()
+			use_packages = strategy in ('packages', 'pkg', 'apt', 'apk', 'yum', 'dnf')
+		except Exception:
+			use_packages = False
+
+		if not use_packages:
+			stage_name = 'coretg_build_iptools'
+			prefix = (
+				'# coretg: cached offline ip tool stage for build-only services\n'
+				f'FROM busybox:1.36.1-musl AS {stage_name}\n\n'
+			)
+			snippet = (
+				'\n\n'
+				'# coretg: provide an offline-safe ip command for CORE network scripts\n'
+				'USER 0\n'
+				f'COPY --from={stage_name} /bin/busybox /usr/local/coretg/bin/busybox\n'
+				'RUN set -eu; \\\n'
+				+ entrypoint_fixup
+				+ '\tmkdir -p /usr/local/bin; \\\n'
+				+ '\tchmod 0755 /usr/local/coretg/bin/busybox; \\\n'
+				+ '\tif command -v ip >/dev/null 2>&1; then exit 0; fi; \\\n'
+				+ '\tln -sfn /usr/local/coretg/bin/busybox /usr/local/bin/ip; \\\n'
+				+ '\tcommand -v ip >/dev/null 2>&1\n'
+			)
+			try:
+				with open(dockerfile_path, 'w', encoding='utf-8') as f:
+					f.write(prefix)
+					f.write(text)
+					if text and not text.endswith('\n'):
+						f.write('\n')
+					f.write(snippet)
+			except Exception:
+				return False
+			svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_ADMIN')
+			svc['cap_add'] = _ensure_list_field_has(svc.get('cap_add'), 'NET_RAW')
+			try:
+				logger.info(
+					'[vuln] injected offline BusyBox ip shim into build-only Dockerfile '
+					'node=%s service=%s dockerfile=%s',
+					node_name,
+					svc_key,
+					dockerfile_path,
+				)
+			except Exception:
+				pass
+			return True
 
 		snippet = (
 			"\n\n"

@@ -3231,7 +3231,7 @@ def _current_plan_summary_for_execute(
     segmentation_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     full_prev = build_full_preview(
-        role_counts=orchestrated_plan.get('role_counts_raw') or orchestrated_plan.get('role_counts') or {},
+        role_counts=orchestrated_plan.get('role_counts_raw', orchestrated_plan.get('role_counts') or {}),
         routers_planned=int(orchestrated_plan.get('routers_planned') or 0),
         services_plan=orchestrated_plan.get('service_plan') or {},
         vulnerabilities_plan=orchestrated_plan.get('vulnerability_plan'),
@@ -9183,7 +9183,7 @@ def main():
     if preview_full is None:
         try:
             preview_full = build_full_preview(
-                role_counts=orchestrated_plan.get('role_counts_raw') or role_counts,
+                role_counts=orchestrated_plan.get('role_counts_raw', role_counts),
                 routers_planned=prelim_router_count,
                 services_plan=service_plan,
                 vulnerabilities_plan=vulnerabilities_plan,
@@ -9289,7 +9289,7 @@ def main():
                         except Exception:
                             pass
                         full_prev = build_full_preview(
-                            role_counts=orchestrated_plan.get('role_counts_raw') or role_counts,
+                            role_counts=orchestrated_plan.get('role_counts_raw', role_counts),
                             routers_planned=prelim_router_count,
                             services_plan=service_plan,
                             vulnerabilities_plan=vulnerabilities_plan,

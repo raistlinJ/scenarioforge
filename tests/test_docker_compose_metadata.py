@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 from scenarioforge.builders.topology import (
@@ -940,11 +941,13 @@ ENTRYPOINT [ "/docker-entrypoint.sh" ]
     assert "USER 0" in txt
     assert "USER root" not in txt
     assert "chmod 0755 """ in txt
-    assert "iproute2" in txt
+    assert "offline-safe ip command" in txt
+    assert "FROM busybox:1.36.1-musl AS coretg_build_iptools" in txt
+    assert "COPY --from=coretg_build_iptools /bin/busybox" in txt
     assert txt.index("chmod 0755 """) < txt.index("if command -v ip >/dev/null 2>&1; then exit 0; fi;")
 
 
-def test_prepare_compose_build_only_includes_buster_archive_fallback(tmp_path):
+def test_prepare_compose_build_only_uses_offline_busybox_by_default(tmp_path):
     compose_src = tmp_path / "docker-compose.yml"
     compose_src.write_text(
         "services:\n  app:\n    build: .\n",
@@ -982,11 +985,32 @@ def test_prepare_compose_build_only_includes_buster_archive_fallback(tmp_path):
     copied_dockerfile = os.path.join(build_context, "Dockerfile")
     txt = open(copied_dockerfile, encoding="utf-8").read()
 
+    assert "FROM busybox:1.36.1-musl AS coretg_build_iptools" in txt
+    assert "apt-get $APT_OPTS update" not in txt
+    assert "archive.debian.org" not in txt
+
+
+def test_prepare_compose_build_only_packages_strategy_keeps_archive_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORETG_IPROUTE2_WRAPPER_STRATEGY", "packages")
+    compose_src = tmp_path / "docker-compose.yml"
+    compose_src.write_text("services:\n  app:\n    build: .\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM debian:buster\nRUN echo ok >/tmp/ok\n", encoding="utf-8"
+    )
+    record = {
+        "Type": "docker-compose",
+        "Name": "httpd/CVE-2021-40438",
+        "Path": str(compose_src),
+    }
+
+    created = prepare_compose_for_assignments({"docker-1": record}, out_base=str(tmp_path))
+    assert created
+    import yaml
+    obj = yaml.safe_load((tmp_path / "docker-compose-docker-1.yml").read_text())
+    build_context = (obj["services"].get("docker-1") or obj["services"]["app"])["build"]["context"]
+    txt = (Path(build_context) / "Dockerfile").read_text()
     assert "if ! apt-get $APT_OPTS update" in txt
     assert "http://archive.debian.org/debian buster main" in txt
-    assert "http://archive.debian.org/debian buster-updates main" in txt
-    assert "http://archive.debian.org/debian-security buster/updates main" in txt
-    assert "http://archive.debian.org/debian stretch-updates main" not in txt
     assert "Acquire::Check-Valid-Until=false" in txt
 
 
